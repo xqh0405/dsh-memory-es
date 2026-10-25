@@ -1,0 +1,42 @@
+# 单节点 Elasticsearch 8.19.23：开启 security + TLS + IK 分词
+# 密码与 API key 都在 deploy/es/.env（已 gitignore），不提交到仓库
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
+    container_name: dsh-es01
+    restart: unless-stopped
+    environment:
+      - node.name=es01
+      - cluster.name=dsh-memory-es
+      - discovery.type=single-node          # 单节点：索引 replicas 必须为 0
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=false   # 关掉自动 enrollment，避免 token 干扰
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.keystore.path=certs/elastic-certificates.p12
+      - xpack.security.http.ssl.keystore.password=${CERT_PASS:-changeme}
+      - xpack.security.http.ssl.truststore.path=certs/elastic-certificates.p12
+      - xpack.security.http.ssl.truststore.password=${CERT_PASS:-changeme}
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.keystore.path=certs/elastic-certificates.p12
+      - xpack.security.transport.ssl.keystore.password=${CERT_PASS:-changeme}
+      - xpack.security.transport.ssl.truststore.path=certs/elastic-certificates.p12
+      - xpack.security.transport.ssl.truststore.password=${CERT_PASS:-changeme}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:?需要 deploy/es/.env 里的 ELASTIC_PASSWORD}
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 65536, hard: 65536 }
+    volumes:
+      - ./data:/usr/share/elasticsearch/data
+      - ./certs:/usr/share/elasticsearch/config/certs
+      - ./plugins/analysis-ik:/usr/share/elasticsearch/plugins/analysis-ik
+    ports:
+      - "127.0.0.1:9200:9200"              # 只绑回环，不对外暴露
+    healthcheck:
+      # 容器内自检用 -k 跳过校验；宿主机侧脚本改用 CA 证书
+      test: ["CMD-SHELL", "curl -fsSk -u elastic:$$ELASTIC_PASSWORD https://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
