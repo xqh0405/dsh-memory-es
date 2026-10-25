@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'v9'
+    const BUILD = 'v11-34044c'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -54,6 +54,8 @@ window.__ModuleLoader__.load({
       colUpdated: '更新时间',
       detail: '详情',
       copy: '复制',
+      copyContent: '复制内容',
+      copyId: '复制 ID',
       copied: '已复制',
       prev: '上一页',
       next: '下一页',
@@ -163,6 +165,8 @@ window.__ModuleLoader__.load({
       colUpdated: 'Updated',
       detail: 'Detail',
       copy: 'Copy',
+      copyContent: 'Copy content',
+      copyId: 'Copy ID',
       copied: 'Copied',
       prev: 'Prev',
       next: 'Next',
@@ -402,7 +406,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function CopyButton({ text, t }) {
+    function CopyButton({ text, t, label }) {
       const [done, setDone] = React.useState(false)
       return h('button', {
         type: 'button',
@@ -428,7 +432,7 @@ window.__ModuleLoader__.load({
             window.setTimeout(() => setDone(false), 1200)
           })
         },
-      }, done ? t('copied') : t('copy'))
+      }, done ? t('copied') : (label ?? t('copy')))
     }
 
     // ── 概览 ─────────────────────────────────────────────────────────────
@@ -1203,8 +1207,8 @@ window.__ModuleLoader__.load({
                 ),
               ),
               h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
-                h(CopyButton, { text: selected.content, t }),
-                h(CopyButton, { text: selected.id, t }),
+                h(CopyButton, { text: selected.content, t, label: t('copyContent') }),
+                h(CopyButton, { text: selected.id, t, label: t('copyId') }),
               ),
             )
           : null,
