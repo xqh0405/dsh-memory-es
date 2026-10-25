@@ -14,6 +14,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const NS = 'memory-es-panel'
+    // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
+    const BUILD = 'v8'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -103,7 +105,7 @@ window.__ModuleLoader__.load({
       stSuperseded: '已撤回',
       stAuto: '自动',
       stExpired: '已过期',
-      maintCliMissing: 'CLI 源码未随面板部署，整理与导出不可用',
+      maintCliMissing: '面板未随带 CLI 源码，整理与导出不可用（部署时缺 panel/cli）',
       configTitle: '配置',
       configSave: '保存',
       configSaved: '已保存到 profile 配置',
@@ -111,40 +113,6 @@ window.__ModuleLoader__.load({
       configReadonly: '只读信息（密码不显示）',
       configNoChange: '没有改动',
       configChanged: '有未保存改动',
-      maintConsolidate: 'Consolidation',
-      maintLastRun: 'Last run',
-      maintNever: 'never',
-      maintDryRun: 'Run dry-run',
-      maintApply: 'Apply to library',
-      maintApplyWarn: 'writes the team index — needs confirmation',
-      maintExport: 'Markdown mirror',
-      maintExportNow: 'Export now',
-      maintSnapshot: 'Snapshots',
-      maintCron: 'Scheduled job',
-      maintResult: 'Result',
-      labelPersonal: 'Personal',
-      labelTeam: 'Team',
-      labelPending: 'Pending',
-      labelDir: 'Directory',
-      labelFiles: 'Files',
-      labelManagedBy: 'Managed by',
-      labelEntry: 'Entry',
-      labelUser: 'User',
-      labelAuditIndex: 'Audit index',
-      labelReader: 'Reader identity',
-      labelWriter: 'Writer identity',
-      labelConsolidator: 'Consolidator identity',
-      labelEmbedding: 'Embedding model',
-      labelSource: 'Source',
-      stActive: 'active',
-      stPending: 'pending',
-      stApproved: 'approved',
-      stRejected: 'rejected',
-      stSuperseded: 'superseded',
-      stAuto: 'auto',
-      stExpired: 'expired',
-      maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
-      configTitle: 'Configuration',
       indexNames: '索引',
       embedding: '嵌入',
       auditNote: '审计索引不在插件配置里，且只读身份没有它的读权限，P3 再补。',
@@ -204,13 +172,6 @@ window.__ModuleLoader__.load({
       reviewDone: 'Done',
       reviewNoWrite: 'Consolidator identity (identity.consolidatorPassword) is not configured; review actions are unavailable.',
       reviewBusy: 'Working…',
-      maintConsolidate: 'Consolidation',
-      maintLastRun: 'Last run',
-      maintNever: 'never',
-      maintDryRun: 'Run dry-run',
-      maintApply: 'Apply to library',
-      maintApplyWarn: 'writes the team index — needs confirmation',
-      maintExport: 'Markdown mirror',
       maintExportNow: 'Export now',
       maintSnapshot: 'Snapshots',
       maintCron: 'Scheduled job',
@@ -236,7 +197,7 @@ window.__ModuleLoader__.load({
       stSuperseded: 'superseded',
       stAuto: 'auto',
       stExpired: 'expired',
-      maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
+      maintCliMissing: 'CLI sources were not shipped with the panel',
       configTitle: 'Configuration',
       configSave: 'Save',
       configSaved: 'Saved to the profile configuration',
@@ -247,6 +208,13 @@ window.__ModuleLoader__.load({
       indexNames: 'Indexes',
       embedding: 'Embedding',
       auditNote: 'The audit index is not in the plugin config and the reader identity cannot read it; P3 will add it.',
+      maintConsolidate: 'Consolidation',
+      maintLastRun: 'Last run',
+      maintNever: 'never',
+      maintDryRun: 'Run dry-run',
+      maintApply: 'Apply to library',
+      maintApplyWarn: 'writes the team index — needs confirmation',
+      maintExport: 'Markdown mirror',
     }
 
     // ── 样式（全部走主题 token，不写死颜色）─────────────────────────────
@@ -1104,6 +1072,11 @@ window.__ModuleLoader__.load({
     }
 
     // ── 页面主体 ─────────────────────────────────────────────────────────
+    let activeLocale = ''
+    function ctxLocaleActive() {
+      return activeLocale
+    }
+
     function MemoryPanel({ t }) {
       const [tab, setTab] = React.useState('overview')
       const [overview, setOverview] = React.useState({ loading: true, error: '', data: null })
@@ -1121,7 +1094,14 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.wrap },
         h('h2', { style: S.h2 }, t('title')),
-        h('p', { style: S.sub }, t('subtitle')),
+        h('p', { style: S.sub },
+          `${t('subtitle')} · 构建 ${BUILD} · 语言 ${(() => {
+            try {
+              return ctxLocaleActive() || '未知'
+            } catch {
+              return '未知'
+            }
+          })()}`),
         h('div', { style: S.tabs },
           [['overview', t('tabOverview')], ['browse', t('tabBrowse')], ['review', t('tabReview')], ['maint', t('tabMaint')], ['config', t('tabConfig')]].map(([value, label]) =>
             h('button', {
@@ -1161,6 +1141,11 @@ window.__ModuleLoader__.load({
           }
         })
         const t = ctx.locale.bind(NS)
+        try {
+          activeLocale = ctx.locale.getLocale?.()?.active ?? ''
+        } catch {
+          activeLocale = ''
+        }
 
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
