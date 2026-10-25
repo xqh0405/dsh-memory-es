@@ -39,6 +39,8 @@
   },
   "scripts": {
     "build": "bash scripts/build.sh",
-    "typecheck": "tsc -p tsconfig.json"
+    "test": "bash scripts/test.sh",
+    "test:integration": "node --test tests/es-integration.test.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
   }
 }
