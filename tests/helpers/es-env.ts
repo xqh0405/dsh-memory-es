@@ -24,6 +24,8 @@ export interface EsTestEnv {
   userId: string
   reader: EsCredential
   writer: EsCredential
+  /** 整理任务身份：读个人库 + 写团队库（mem_consolidator） */
+  consolidator: EsCredential
   /** elastic 超级用户：只用于清理测试数据与读取健康状态（受限身份连 GET / 都是 403） */
   admin: EsCredential
   personalIndex: string
@@ -65,7 +67,10 @@ export function loadEsTestEnv(): EsTestEnv | null {
   const readerPassword = pick('MEM_READER_PASSWORD')
   const writerPassword = pick('MEM_WRITER_PASSWORD')
   const adminPassword = pick('ELASTIC_PASSWORD')
-  if (readerPassword === '' || writerPassword === '' || adminPassword === '') return null
+  const consolidatorPassword = pick('MEM_CONSOLIDATOR_PASSWORD')
+  if (readerPassword === '' || writerPassword === '' || adminPassword === '' || consolidatorPassword === '') {
+    return null
+  }
 
   return {
     url: process.env.MEM_ES_URL ?? 'https://127.0.0.1:9200',
@@ -73,6 +78,7 @@ export function loadEsTestEnv(): EsTestEnv | null {
     userId,
     reader: { username: `mem-reader-${userId}`, password: readerPassword },
     writer: { username: 'mem-writer', password: writerPassword },
+    consolidator: { username: 'mem-consolidator', password: consolidatorPassword },
     admin: { username: 'elastic', password: adminPassword },
     personalIndex: `personal_memory_${userId}`,
     teamIndex: 'team_knowledge',

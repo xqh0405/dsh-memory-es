@@ -27,4 +27,7 @@ if [ ${#files[@]} -eq 0 ]; then
 fi
 
 echo "运行：${files[*]}"
-exec node --test "${files[@]}"
+# --test-concurrency=1：集成测试共用同一个 ES 索引，并发跑文件会互相看不见/互相删数据。
+# 2026-10-25 实测：整理任务（按设计扫整个个人索引）把别的测试文件刚写的文档也当成了候选，
+# dry-run 的条数断言假红，apply 还会去改别人正在清理的文档（404 document_missing）。
+exec node --test --test-concurrency=1 "${files[@]}"

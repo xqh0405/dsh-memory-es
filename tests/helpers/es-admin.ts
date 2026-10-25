@@ -64,6 +64,15 @@ export async function deleteByDomain(env: EsTestEnv, index: string, domain: stri
 }
 
 /** 数一下某个 domain 下还剩几条（用来断言「清理干净了」） */
+/** 按 _id 逐条删除（整理测试用来清掉“顺手替别的文件晋升”的团队条目） */
+export async function deleteDocsById(env: EsTestEnv, index: string, ids: readonly string[]): Promise<void> {
+  for (const id of ids) {
+    await adminRequest(env, 'DELETE', `/${index}/_doc/${encodeURIComponent(id)}?refresh=true`).catch(() => {
+      // 已经不在了就当删过：测试清理不能因为 404 而失败
+    })
+  }
+}
+
 export async function countByDomain(env: EsTestEnv, index: string, domain: string): Promise<number> {
   const res = await adminRequest(env, 'POST', `/${index}/_search`, {
     size: 0,

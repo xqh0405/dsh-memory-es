@@ -50,9 +50,10 @@ export interface MetaFilterOptions {
 // 这样 `client.search(idx, bm25Body(...))` 不需要额外断言。
 export type SearchBody = {
   size: number
-  _source: { excludes: string[] }
+  _source: { excludes: string[]; includes?: string[] }
   query?: Record<string, unknown>
   knn?: Record<string, unknown>
+  sort?: Array<Record<string, 'asc' | 'desc'>>
 }
 
 function assertPositiveInt(value: number, label: string): void {

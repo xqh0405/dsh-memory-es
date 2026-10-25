@@ -17,6 +17,7 @@
 | 提示与文案（S6） | **已完成**：系统提示片段（order=3200）+ 四条工具描述改成「时机 / 不要用」句式 |
 | 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / mark_private）、`memory_promote`（只标候选） |
 
+| 进度 | S1~S8 完成：4 个工具（save/search/status/promote）+ 系统提示段 + 整理任务（默认 dry-run） |
 | 部署形态 | **两套**：本机 .114（`deploy/es`）+ .125（`deploy/es-remote`，给 `dsh-xqh` 容器）。插件已装进 .125 容器的 web profile 并通过冒烟（模型自己调用 `memory_save` 落库、双路检索命中），详见开发文档 §5.7 |
 
 ## 快速开始
@@ -28,6 +29,11 @@
 ./scripts/verify-isolation.sh # M1 判据：11 项断言，必须全 PASS
 ./scripts/es-down.sh          # 停（保留数据）
 
+# 整理任务（S8）：个人记忆 → 团队库，默认 dry-run
+node consolidate/cli.ts                     # 只出候选报告，一条不写
+node consolidate/cli.ts --apply             # 真写团队库 + 回写个人库状态
+node consolidate/cli.ts --auto              # 按 §9.1 阈值判断要不要跑
+
 # 第二套（在 192.168.1.125 上跑，给 dsh-xqh 容器用）
 bash scripts/es-remote-up.sh  # 起 ES（加入 dsh-xqh_default 网络、SAN=dsh-es-xqh）
 ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-indices.sh
@@ -35,7 +41,7 @@ ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-se
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig
-npm test                      # 全部 158 例（集成测试要 ES 在跑；save/search 集成还要 Ollama）
+npm test                      # 全部 189 例（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
 npm test -- es-integration    # 只跑真实 ES 的集成用例
 npm test -- save-integration  # 只跑 memory_save 闭环（真 ES + 真 Ollama）
 npm test -- search-integration # 只跑 memory_search 闭环（真 ES + 真 Ollama）

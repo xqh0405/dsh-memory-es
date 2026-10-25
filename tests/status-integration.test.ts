@@ -128,9 +128,15 @@ function defineStatusIntegration(e: EsTestEnv): void {
       assert.equal(doc.source.promote_state, 'candidate')
       assert.equal(doc.source.status, 'active', 'promote 不改状态')
 
-      // 团队库依然是空的（本部署里没写过）
-      const team = await reader.search(e.teamIndex, { size: 0 })
-      assert.equal(team.total, 0)
+      // promote 只改个人库：团队库里不该出现任何以这条记忆为来源的条目。
+      // 注意别断言「整个团队索引为空」——别的测试文件（整理任务）会往团队库写东西，
+      // 那种断言会在串行跑测试时假红（2026-10-25 踩到）。
+      const team = await reader.search(e.teamIndex, {
+        size: 1,
+        _source: { excludes: ['embedding'] },
+        query: { term: { source_memory_id: promoteId } },
+      })
+      assert.equal(team.total, 0, 'promote 不能写团队库')
     })
 
     test('再 promote 一次：已经是 candidate，ES 返回 noop 或 updated，但结果仍是 candidate', async () => {
