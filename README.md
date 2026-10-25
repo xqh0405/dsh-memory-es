@@ -17,6 +17,8 @@
 | 提示与文案（S6） | **已完成**：系统提示片段（order=3200）+ 四条工具描述改成「时机 / 不要用」句式 |
 | 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / mark_private）、`memory_promote`（只标候选） |
 
+| 部署形态 | **两套**：本机 .114（`deploy/es`，给本机 dsh）+ .125（`deploy/es-remote`，给 `dsh-xqh` 容器）；插件已装进容器的 web profile，详见开发文档 §5.7 |
+
 ## 快速开始
 
 ```bash
@@ -25,6 +27,11 @@
 ./scripts/init-security.sh    # 角色 / 用户（Basic Auth）
 ./scripts/verify-isolation.sh # M1 判据：11 项断言，必须全 PASS
 ./scripts/es-down.sh          # 停（保留数据）
+
+# 第二套（在 192.168.1.125 上跑，给 dsh-xqh 容器用）
+bash scripts/es-remote-up.sh  # 起 ES（加入 dsh-xqh_default 网络、SAN=dsh-es-xqh）
+ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-indices.sh
+ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-security.sh
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig

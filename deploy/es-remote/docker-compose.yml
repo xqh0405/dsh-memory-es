@@ -1,0 +1,60 @@
+# 第二套 ES：跑在 192.168.1.125（es-host.local）上，给那边的 dsh-xqh 容器用。
+#
+# 与 deploy/es/docker-compose.yml 的差异（只三处，其余刻意保持一致，便于两边对拍）：
+#  1. **加入 dsh-xqh 容器的 docker 网络**（external: dsh-xqh_default）——容器之间用容器名
+#     互相解析，所以 es.url 写 https://dsh-es-xqh:9200，而不依赖宿主 IP；
+#  2. **证书 SAN 必须带 dsh-es-xqh**（生成时 NODE_NAME=dsh-es-xqh CERT_DNS=dsh-es-xqh,localhost）；
+#  3. 宿主机端口仍只绑 127.0.0.1（只给宿主机上的 init/curl 用），不对局域网暴露。
+services:
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
+    container_name: dsh-es-xqh
+    restart: unless-stopped
+    environment:
+      - node.name=es01
+      - cluster.name=dsh-memory-es-xqh
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.keystore.path=certs/elastic-certificates.p12
+      - xpack.security.http.ssl.keystore.password=${CERT_PASS:-changeme}
+      - xpack.security.http.ssl.truststore.path=certs/elastic-certificates.p12
+      - xpack.security.http.ssl.truststore.password=${CERT_PASS:-changeme}
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.keystore.path=certs/elastic-certificates.p12
+      - xpack.security.transport.ssl.keystore.password=${CERT_PASS:-changeme}
+      - xpack.security.transport.ssl.truststore.path=certs/elastic-certificates.p12
+      - xpack.security.transport.ssl.truststore.password=${CERT_PASS:-changeme}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:?需要 deploy/es-remote/.env 里的 ELASTIC_PASSWORD}
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - path.repo=/usr/share/elasticsearch/snapshots
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 65536, hard: 65536 }
+    # 宿主 94 GiB 但是多人共用，给 4g 上限（heap 2g + 堆外 1g + page cache 1g）即可；
+    # 数据量级是几十 MB（文档 §5.4），不需要更大。
+    mem_limit: 4g
+    volumes:
+      - ./data:/usr/share/elasticsearch/data
+      - ./certs:/usr/share/elasticsearch/config/certs
+      - ./plugins/analysis-ik:/usr/share/elasticsearch/plugins/analysis-ik
+      - ./snapshots:/usr/share/elasticsearch/snapshots
+    ports:
+      - "127.0.0.1:9200:9200"   # 只给宿主机脚本用；容器之间走 docker 网络
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsSk -u elastic:$$ELASTIC_PASSWORD https://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    networks:
+      default:
+        aliases:
+          - dsh-es-xqh
+
+networks:
+  default:
+    name: dsh-xqh_default     # dsh-xqh 容器所在的网络（已存在）
+    external: true
