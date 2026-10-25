@@ -42,6 +42,11 @@ node consolidate/cli.ts --approve <doc_id>          # 通过 → 进入检索
 node consolidate/cli.ts --reject <doc_id> --reason "结论与线上不符"
 node consolidate/cli.ts --withdraw <doc_id> --reason "这条知识已作废"
 
+# 定时任务（装好但默认关闭；开关在 .state/cron.env）
+./scripts/memory-cron.sh status      # 开关 / 日志 / crontab 状态
+./scripts/memory-cron.sh enable      # 打开（consolidate 默认仍只 dry-run）
+./scripts/memory-cron.sh disable     # 关闭
+
 # Markdown 镜像（S10）：只读导出，改 md 不会回流 ES
 node consolidate/cli.ts --export              # 写 knowledge/<domain>.md + INDEX.md
 node consolidate/cli.ts --export --dry-run    # 只看会写哪些文件
