@@ -24,6 +24,7 @@ window.__ModuleLoader__.load({
       tabBrowse: '记忆浏览',
       tabReview: '审核台',
       tabConfig: '配置',
+      tabMaint: '维护',
       cardPersonal: '个人记忆',
       cardTeam: '团队知识',
       cardPending: '待裁决',
@@ -70,6 +71,18 @@ window.__ModuleLoader__.load({
       reviewDone: '已完成',
       reviewNoWrite: '未配置整理身份（identity.consolidatorPassword），审核动作不可用。',
       reviewBusy: '处理中…',
+      maintConsolidate: '整理任务',
+      maintLastRun: '上次运行',
+      maintNever: '还没跑过',
+      maintDryRun: '跑一次 dry-run',
+      maintApply: '真写库',
+      maintApplyWarn: '会写团队库，需确认',
+      maintExport: 'Markdown 镜像',
+      maintExportNow: '立即导出',
+      maintSnapshot: '快照',
+      maintCron: '定时任务',
+      maintResult: '结果',
+      maintCliMissing: 'CLI 源码未随面板部署，整理与导出不可用',
       configTitle: '配置',
       configSave: '保存',
       configSaved: '已保存到 profile 配置',
@@ -77,6 +90,18 @@ window.__ModuleLoader__.load({
       configReadonly: '只读信息（密码不显示）',
       configNoChange: '没有改动',
       configChanged: '有未保存改动',
+      maintConsolidate: 'Consolidation',
+      maintLastRun: 'Last run',
+      maintNever: 'never',
+      maintDryRun: 'Run dry-run',
+      maintApply: 'Apply to library',
+      maintApplyWarn: 'writes the team index — needs confirmation',
+      maintExport: 'Markdown mirror',
+      maintExportNow: 'Export now',
+      maintSnapshot: 'Snapshots',
+      maintCron: 'Scheduled job',
+      maintResult: 'Result',
+      maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
       configTitle: 'Configuration',
       indexNames: '索引',
       embedding: '嵌入',
@@ -90,6 +115,7 @@ window.__ModuleLoader__.load({
       tabBrowse: 'Browse',
       tabReview: 'Review',
       tabConfig: 'Config',
+      tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
       cardTeam: 'Team',
       cardPending: 'Pending review',
@@ -136,6 +162,18 @@ window.__ModuleLoader__.load({
       reviewDone: 'Done',
       reviewNoWrite: 'Consolidator identity (identity.consolidatorPassword) is not configured; review actions are unavailable.',
       reviewBusy: 'Working…',
+      maintConsolidate: 'Consolidation',
+      maintLastRun: 'Last run',
+      maintNever: 'never',
+      maintDryRun: 'Run dry-run',
+      maintApply: 'Apply to library',
+      maintApplyWarn: 'writes the team index — needs confirmation',
+      maintExport: 'Markdown mirror',
+      maintExportNow: 'Export now',
+      maintSnapshot: 'Snapshots',
+      maintCron: 'Scheduled job',
+      maintResult: 'Result',
+      maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
       configTitle: 'Configuration',
       configSave: 'Save',
       configSaved: 'Saved to the profile configuration',
@@ -384,6 +422,144 @@ window.__ModuleLoader__.load({
                 ),
               ),
         ),
+      )
+    }
+
+    // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
+    function Maintenance({ t }) {
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const [busy, setBusy] = React.useState('')
+      const [result, setResult] = React.useState(null)
+
+      const load = React.useCallback(() => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/maintenance')
+          .then((data) => setState({ loading: false, error: '', data }))
+          .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
+      }, [])
+
+      React.useEffect(() => {
+        load()
+      }, [load])
+
+      const run = (kind) => {
+        setBusy(kind)
+        setResult(null)
+        const path = kind === 'export' ? '/maintenance/export' : '/maintenance/consolidate'
+        const body = kind === 'export' ? {} : { apply: kind === 'apply', confirm: kind === 'apply' }
+        apiPost(path, body)
+          .then((value) => {
+            setResult({ kind, value })
+            load()
+          })
+          .catch((error) => setResult({ kind, error: String(error.message ?? error) }))
+          .finally(() => setBusy(''))
+      }
+
+      if (state.loading) return h('p', { style: S.muted }, t('loading'))
+      if (state.error) {
+        return h('div', null,
+          h('p', { style: S.err }, `${t('error')}: ${state.error}`),
+          h('button', { type: 'button', style: S.btn, onClick: load }, t('retry')),
+        )
+      }
+      const data = state.data
+
+      const card = (title, body, actions) =>
+        h('div', { style: { ...S.card, marginBottom: 12 } },
+          h('h3', { style: { margin: '0 0 8px', fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, title),
+          body,
+          actions ? h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' } }, actions) : null,
+        )
+
+      const line = (label, value) =>
+        h('div', { key: label, style: { display: 'flex', gap: 10, marginBottom: 4, fontSize: 12 } },
+          h('span', { style: { width: 110, ...S.muted } }, label),
+          h('span', { style: S.mono }, String(value ?? '-')),
+        )
+
+      return h('div', null,
+        data.cli.available ? null : h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, t('maintCliMissing')),
+
+        card(t('maintConsolidate'),
+          h('div', null,
+            line(t('maintLastRun'), data.lastRunAt || t('maintNever')),
+            line('personal', data.counts.personal),
+            line('team', data.counts.team),
+            line('pending', data.counts.pending),
+          ),
+          [
+            h('button', {
+              type: 'button',
+              style: { ...S.btn, opacity: busy ? 0.5 : 1 },
+              disabled: Boolean(busy) || !data.cli.available,
+              onClick: () => run('dry'),
+            }, busy === 'dry' ? t('reviewBusy') : t('maintDryRun')),
+            h('button', {
+              type: 'button',
+              style: { ...S.btn, opacity: busy ? 0.5 : 1, borderColor: 'var(--dsw-alias-state-warn-primary)' },
+              disabled: Boolean(busy) || !data.cli.available,
+              title: t('maintApplyWarn'),
+              onClick: () => {
+                if (!window.confirm(`${t('maintApply')}: ${t('maintApplyWarn')}`)) return
+                run('apply')
+              },
+            }, busy === 'apply' ? t('reviewBusy') : t('maintApply')),
+          ],
+        ),
+
+        card(t('maintExport'),
+          h('div', null,
+            line('dir', data.mirror.dir),
+            line(t('maintLastRun'), data.mirror.latest || t('maintNever')),
+            line('files', data.mirror.exists ? data.mirror.files.length : 0),
+            data.mirror.files.length > 0
+              ? h('div', { style: { ...S.mono, ...S.muted, fontSize: 11.5, marginTop: 4 } }, data.mirror.files.join('  '))
+              : null,
+          ),
+          [h('button', {
+            type: 'button',
+            style: { ...S.btn, opacity: busy ? 0.5 : 1 },
+            disabled: Boolean(busy) || !data.cli.available,
+            onClick: () => run('export'),
+          }, busy === 'export' ? t('reviewBusy') : t('maintExportNow'))],
+        ),
+
+        card(t('maintSnapshot'),
+          h('div', null,
+            line('managed by', data.snapshot.managedBy),
+            h('p', { style: { ...S.muted, fontSize: 12, margin: '4px 0 0', lineHeight: 1.6 } }, data.snapshot.note),
+          ),
+        ),
+
+        card(t('maintCron'),
+          h('div', null,
+            line('managed by', data.cron.managedBy),
+            h('p', { style: { ...S.muted, fontSize: 12, margin: '4px 0 0', lineHeight: 1.6 } }, data.cron.note),
+          ),
+        ),
+
+        result
+          ? h('div', {
+              style: {
+                ...S.card,
+                borderLeft: '3px solid var(--dsw-alias-brand-primary)',
+                whiteSpace: 'pre-wrap',
+                fontSize: 12,
+                lineHeight: 1.7,
+                color: 'var(--dsw-alias-label-primary)',
+              },
+            },
+              h('div', { style: { fontWeight: 600, marginBottom: 6 } }, `${t('maintResult')}: ${result.kind}`),
+              result.error
+                ? h('span', { style: S.err }, result.error)
+                : h('div', null,
+                    h('div', null, `exit=${result.value.exitCode}`),
+                    (result.value.lines ?? []).map((text, index) => h('div', { key: index }, text)),
+                    result.value.stderr ? h('div', { style: { ...S.err, marginTop: 6 } }, result.value.stderr) : null,
+                  ),
+            )
+          : null,
       )
     }
 
@@ -860,7 +1036,7 @@ window.__ModuleLoader__.load({
         h('h2', { style: S.h2 }, t('title')),
         h('p', { style: S.sub }, t('subtitle')),
         h('div', { style: S.tabs },
-          [['overview', t('tabOverview')], ['browse', t('tabBrowse')], ['review', t('tabReview')], ['config', t('tabConfig')]].map(([value, label]) =>
+          [['overview', t('tabOverview')], ['browse', t('tabBrowse')], ['review', t('tabReview')], ['maint', t('tabMaint')], ['config', t('tabConfig')]].map(([value, label]) =>
             h('button', {
               key: value,
               type: 'button',
@@ -869,7 +1045,9 @@ window.__ModuleLoader__.load({
             }, label),
           ),
         ),
-        tab === 'config'
+        tab === 'maint'
+          ? h(Maintenance, { t })
+          : tab === 'config'
           ? h(Config, { t })
           : tab === 'review'
           ? h(Review, { t })

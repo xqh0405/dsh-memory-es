@@ -13,6 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
+import { cliAvailable, runCli, summarize } from './cliRunner.js'
 import { createReadClient } from './es.js'
 
 const ROUTE = '/memory-es/api'
@@ -586,6 +587,117 @@ async function handleConfigWrite(ctx, res, req) {
   })
 }
 
+/** 维护页状态：计数、最近整理、镜像目录、快照与定时任务的静态事实 */
+const STATE_DIR = '/data/dsh/memory-es-state'
+const MIRROR_DIR = '/data/dsh/memory-mirror'
+
+async function handleMaintenanceGet(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
+  const { join } = await import('node:path')
+
+  const counts = await Promise.all([
+    client.search(names.personal, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
+      .then((r) => num(r.hits?.total?.value)).catch(() => -1),
+    client.search(names.team, { size: 0, query: teamReviewFilter(false), track_total_hits: true })
+      .then((r) => num(r.hits?.total?.value)).catch(() => -1),
+    client.search(names.team, { size: 0, query: { terms: { review_state: ['pending'] } }, track_total_hits: true })
+      .then((r) => num(r.hits?.total?.value)).catch(() => -1),
+  ])
+
+  // 上次整理时间（CLI 的状态文件）
+  let lastRunAt = ''
+  let pendingCount = null
+  try {
+    const raw = JSON.parse(readFileSync(join(STATE_DIR, 'consolidate.json'), 'utf8'))
+    lastRunAt = typeof raw.lastRunAt === 'string' ? raw.lastRunAt : ''
+    pendingCount = typeof raw.pendingCount === 'number' ? raw.pendingCount : null
+  } catch {
+    /* 还没跑过 */
+  }
+
+  // 镜像目录
+  let mirror = { dir: MIRROR_DIR, exists: false, files: [], latest: '' }
+  try {
+    if (existsSync(MIRROR_DIR)) {
+      const entries = readdirSync(MIRROR_DIR).filter((name) => name.endsWith('.md'))
+      mirror.exists = true
+      mirror.files = entries.slice(0, 20)
+      const times = entries.map((name) => statSync(join(MIRROR_DIR, name)).mtimeMs)
+      if (times.length > 0) mirror.latest = new Date(Math.max(...times)).toISOString()
+    }
+  } catch {
+    /* 忽略 */
+  }
+
+  json(res, 200, {
+    ok: true,
+    value: {
+      counts: { personal: counts[0], team: counts[1], pending: counts[2] },
+      lastRunAt,
+      pendingCount,
+      mirror,
+      cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },
+      // 静态事实：这两件事不由面板管，写清楚免得误以为是面板漏了功能
+      snapshot: {
+        managedBy: 'ES SLM（策略 dsh_memory_daily，每日 03:30，保留 14 天）',
+        note: 'reader 身份没有 cluster:monitor 权限，面板读不到快照状态；用 curl 或 Kibana 看 _snapshot。',
+      },
+      cron: {
+        managedBy: '宿主 crontab（scripts/memory-cron.sh，默认关闭）',
+        note: '开关在 <repo>/.state/cron.env 的 MEMCRON_ENABLED；面板不代改宿主 cron。',
+      },
+    },
+  })
+}
+
+/** POST /maintenance/consolidate：跑一次整理（默认 dry-run） */
+async function handleConsolidate(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const apply = body.value?.apply === true
+  if (apply && body.value?.confirm !== true) {
+    return json(res, 400, { ok: false, error: '真写库需要 confirm:true' })
+  }
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  if (!cliAvailable()) {
+    return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署（缺少 panel/cli/consolidate），无法触发整理' })
+  }
+
+  const result = await runCli(configRow.value, apply ? ['--auto', '--apply'] : ['--auto'], { timeoutMs: 180_000 })
+  json(res, 200, {
+    ok: true,
+    value: {
+      mode: apply ? 'apply' : 'dry-run',
+      exitCode: result.code,
+      lines: summarize(result.stdout),
+      stderr: result.stderr.slice(-2000),
+    },
+  })
+}
+
+/** POST /maintenance/export：导出 Markdown 镜像 */
+async function handleExport(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  if (!cliAvailable()) {
+    return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署，无法导出' })
+  }
+  const dir = typeof body.value?.dir === 'string' && body.value.dir !== '' ? body.value.dir : MIRROR_DIR
+  const result = await runCli(configRow.value, ['--export', dir], { timeoutMs: 60_000 })
+  json(res, 200, {
+    ok: true,
+    value: { dir, exitCode: result.code, lines: summarize(result.stdout), stderr: result.stderr.slice(-2000) },
+  })
+}
+
 async function handle(ctx, req, res) {
   const url = new URL(req.url ?? ROUTE, 'http://localhost')
   // prefix 路由的语义可能是"原样传入"也可能"剥掉前缀"，两种都认：
@@ -593,6 +705,9 @@ async function handle(ctx, req, res) {
   const path = url.pathname.startsWith(ROUTE) ? url.pathname.slice(ROUTE.length) || '/' : url.pathname
   try {
     const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw)$/.exec(path)
+    if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
+    if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
+    if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
@@ -797,10 +912,21 @@ async function selfTest(ctx) {
     } catch {
       configInfo = `HTTP ${configRes.status} 非 JSON`
     }
+    const maintRes = await call('/maintenance')
+    let maintInfo = `HTTP ${maintRes.status}`
+    try {
+      const body = JSON.parse(maintRes.body)
+      maintInfo = body.ok
+        ? `ok cli=${body.value?.cli?.available} mirror=${body.value?.mirror?.files?.length ?? 0}`
+        : `err ${body.error}`
+    } catch {
+      maintInfo = `HTTP ${maintRes.status} 非 JSON`
+    }
+
     console.error(
       `[memory-es-panel] 自检通过 entry=${payload.value?.config?.entryLabel ?? '?'} es=${es.reachable ? 'up' : 'down'} ` +
         `personal=${counts.personal} team=${counts.team} pending=${counts.pending} recent=${payload.value?.recent?.length ?? 0} | ` +
-        `list: ${listInfo} | review: ${pendingInfo} | config: ${configInfo}`,
+        `list: ${listInfo} | review: ${pendingInfo} | config: ${configInfo} | maint: ${maintInfo}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
