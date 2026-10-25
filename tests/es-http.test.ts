@@ -276,3 +276,54 @@ describe('重试策略（只有 409 与 429，各一次）', () => {
     assert.equal(err.attempts, 1)
   })
 })
+
+describe('取消信号（exec.signal 一路传到请求）', () => {
+  function env() {
+    return {
+      url: 'http://es.example:9200',
+      username: 'mem-reader-xqh',
+      password: 'pw',
+      caCertPath: '',
+    }
+  }
+
+  test('外部 abort → EsError kind=aborted，且不重试（不会变成 network）', async () => {
+    // 服务器收到请求后不回包，让请求一直挂着
+    const fake = await startFakeEs(() => {
+      /* 故意不响应 */
+    })
+    try {
+      const client = createEsClient({ ...env(), url: fake.url, requestTimeoutMs: 30_000 })
+      const controller = new AbortController()
+      const pending = client.search('personal_memory_xqh', { size: 1 }, { signal: controller.signal })
+      setTimeout(() => controller.abort(), 20)
+      const err = await pending.then(
+        () => null,
+        (error: unknown) => error,
+      )
+      assert.ok(err instanceof EsError)
+      assert.equal(err.kind, 'aborted', '取消不能被归到 network/timeout')
+      // attempts=1 表示「只发了一次、没有重试」（取消不在 RETRY_DELAY_MS 里）
+      assert.equal(err.attempts, 1, '取消不该重试')
+      assert.equal(fake.requests.length, 1, '取消后不应再发第二次请求')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('已经 abort 的 signal → 立刻失败（不发请求）', async () => {
+    const fake = await startFakeEs((_req, res) => sendJson(res, 200, { hits: { total: 0, hits: [] } }))
+    try {
+      const client = createEsClient({ ...env(), url: fake.url })
+      const controller = new AbortController()
+      controller.abort()
+      const err = await client
+        .search('personal_memory_xqh', { size: 1 }, { signal: controller.signal })
+        .then(() => null, (error: unknown) => error)
+      assert.ok(err instanceof EsError)
+      assert.equal(err.kind, 'aborted')
+    } finally {
+      await fake.close()
+    }
+  })
+})

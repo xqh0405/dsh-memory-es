@@ -33,6 +33,7 @@
 node consolidate/cli.ts                     # 只出候选报告，一条不写
 node consolidate/cli.ts --apply             # 真写团队库 + 回写个人库状态
 node consolidate/cli.ts --auto              # 按 §9.1 阈值判断要不要跑
+node consolidate/cli.ts --since 2026-10-01  # 只看这天之后创建的记忆
 
 # 审核台（S9）：pending 已落库但不进检索
 node consolidate/cli.ts --review list               # 看待裁决队列
@@ -47,7 +48,7 @@ ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-se
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig
-npm test                      # 全部 204 例（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
+npm test                      # 全部 209 例（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
 npm test -- es-integration    # 只跑真实 ES 的集成用例
 npm test -- save-integration  # 只跑 memory_save 闭环（真 ES + 真 Ollama）
 npm test -- search-integration # 只跑 memory_search 闭环（真 ES + 真 Ollama）

@@ -45,6 +45,8 @@ interface CliArgs {
   esUrl: string | null
   statePath: string
   manual: boolean
+  /** 只看这个时间点之后创建的记忆（ISO 或 YYYY-MM-DD） */
+  since: Date | null
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -61,6 +63,7 @@ function parseArgs(argv: string[]): CliArgs {
     statePath: `${REPO_ROOT}.state/consolidate.json`,
     // 显式跑 CLI 本身就算手动触发；--auto 会改回按阈值判断
     manual: true,
+    since: null,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -74,6 +77,13 @@ function parseArgs(argv: string[]): CliArgs {
       case '--auto':
         args.manual = false
         break
+      case '--since': {
+        const raw = requireValue(argv, ++i, '--since 需要日期（ISO 或 YYYY-MM-DD）')
+        const parsed = new Date(raw.length === 10 ? `${raw}T00:00:00Z` : raw)
+        if (Number.isNaN(parsed.getTime())) throw new Error(`--since 不是合法时间：${raw}`)
+        args.since = parsed
+        break
+      }
       case '--limit':
         args.batchSize = Number(argv[++i])
         if (!Number.isInteger(args.batchSize) || args.batchSize < 1) throw new Error('--limit 必须是正整数')
@@ -142,6 +152,7 @@ function printHelp(): void {
   --es-url <url>       覆盖 ES 地址（默认 .env 所在部署的 127.0.0.1:9200）
   --state <path>       状态文件（游标/幂等），默认 .state/consolidate.json
   --auto               按 §9.1 阈值判断是否该跑（默认手动模式，直接跑）
+  --since <日期>       只看该时间之后创建的记忆（ISO 或 YYYY-MM-DD）
 
 审核台（S9）:
   --review list        列出待裁决条目（review_state=pending）
@@ -154,7 +165,13 @@ function printHelp(): void {
 
 环境变量:
   ES_DIR               部署目录（含 .env 与 certs/），默认 ./deploy/es
-  ES_URL               覆盖 ES 地址（等价 --es-url）`)
+  ES_URL               覆盖 ES 地址（等价 --es-url）
+  MEM_PERSONAL_PREFIX  个人索引前缀（默认 personal_memory_）
+  MEM_TEAM_INDEX       团队库索引名（默认 team_knowledge）
+  MEM_AUDIT_INDEX      审计索引名（默认 memory_audit）
+  MEM_EMBEDDING_URL    向量服务地址（默认 http://127.0.0.1:11434；.125 上要写宿主地址）
+  MEM_EMBEDDING_MODEL  向量模型（默认 bge-m3）
+  MEM_EMBEDDING_DIMS   向量维度（默认 1024，必须与索引 dims 一致）`)
 }
 
 /** 极简 .env 解析（与测试里的实现同语义：跳过注释、值里的 = 原样保留） */
@@ -191,11 +208,19 @@ async function main(): Promise<void> {
   const reader = client(`mem-reader-${userId}`, env.MEM_READER_PASSWORD)
   const writer = client('mem-writer', env.MEM_WRITER_PASSWORD)
   const consolidator = client('mem-consolidator', env.MEM_CONSOLIDATOR_PASSWORD)
-  const embed = createEmbedder({ url: 'http://127.0.0.1:11434', model: 'bge-m3', dims: 1024 })
-
-  const personalIndex = `personal_memory_${userId}`
-  const teamIndex = 'team_knowledge'
-  const audit = { client: consolidator, index: AUDIT_INDEX }
+  // 索引名/向量端点都从 .env 读：同一份代码要能在本机（127.0.0.1）和 .125（容器里访问宿主 Ollama）跑，
+  // 硬编码会让「换部署」变成「改代码」。
+  const personalPrefix = env.MEM_PERSONAL_PREFIX ?? 'personal_memory_'
+  const personalIndex = `${personalPrefix}${userId}`
+  const teamIndex = env.MEM_TEAM_INDEX ?? 'team_knowledge'
+  const audit = { client: consolidator, index: env.MEM_AUDIT_INDEX ?? AUDIT_INDEX }
+  const embeddingUrl = env.MEM_EMBEDDING_URL ?? 'http://127.0.0.1:11434'
+  const embeddingModel = env.MEM_EMBEDDING_MODEL ?? 'bge-m3'
+  const dims = Number(env.MEM_EMBEDDING_DIMS ?? '1024')
+  if (!Number.isInteger(dims) || dims <= 0) {
+    throw new Error(`MEM_EMBEDDING_DIMS 非法：${String(env.MEM_EMBEDDING_DIMS)}（必须是正整数）`)
+  }
+  const embed = createEmbedder({ url: embeddingUrl, model: embeddingModel, dims })
   const log = (event: Record<string, unknown>): void => {
     if (process.env.CONSOLIDATE_VERBOSE === '1') console.error(`[debug] ${JSON.stringify(event)}`)
   }
@@ -226,6 +251,10 @@ async function main(): Promise<void> {
   }
 
   console.log(`模式：${args.apply ? 'APPLY（会写库）' : 'DRY-RUN（只报告）'} | 用户 ${userId} | 批次上限 ${args.batchSize}`)
+  console.log(
+    `向量：${embeddingModel}@${embeddingUrl} (${dims} 维) | 个人索引 ${personalIndex} | 团队库 ${teamIndex} | 审计 ${audit.index}`,
+  )
+  if (args.since !== null) console.log(`时间窗：只看 ${args.since.toISOString()} 之后创建的记忆`)
   const report = await runConsolidation(
     {
       userId,
@@ -235,11 +264,17 @@ async function main(): Promise<void> {
       writer,
       consolidator,
       embed,
-      dims: 1024,
+      dims,
       audit,
       log,
     },
-    { apply: args.apply, batchSize: args.batchSize, state, manual: args.manual },
+    {
+      apply: args.apply,
+      batchSize: args.batchSize,
+      state,
+      manual: args.manual,
+      ...(args.since === null ? {} : { createdAfter: args.since }),
+    },
   )
 
   printReport(report, args.apply)

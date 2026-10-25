@@ -13,6 +13,8 @@ import type { EsClient } from '../es/http.ts'
 import { EsError } from '../es/http.ts'
 
 export interface MemoryStoreDeps {
+  /** 取消信号：工具把 `exec.signal` 塞进来，一路传到 ES 请求（声明 timeoutMs 的前提） */
+  signal?: AbortSignal
   /** F2 注入源 */
   userId: string
   /** 个人索引前缀；索引名一律由 前缀 + userId 派生 */
@@ -58,7 +60,9 @@ export async function loadOwnedDoc(deps: MemoryStoreDeps, memoryId: string): Pro
 
   let doc: { id: string; source: Record<string, unknown> }
   try {
-    doc = await deps.reader.get(personalIndexFor(deps.personalPrefix, deps.userId), id)
+    doc = await deps.reader.get(personalIndexFor(deps.personalPrefix, deps.userId), id, {
+      signal: deps.signal,
+    })
   } catch (err) {
     if (err instanceof EsError && err.kind === 'not_found') {
       throw new Error(`找不到记忆 ${id}（个人库里没有这条；索引缺失时先跑 scripts/init-indices.sh）`, { cause: err })

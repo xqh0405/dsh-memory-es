@@ -90,6 +90,7 @@ export async function updateStatus(
     await loadOwnedDoc(deps, replacementId)
 
     // ① 旧文档下架：先做这一步，保证检索立刻正确
+    const signal = deps.signal
     const oldWrite = await deps.writer.update(
       index,
       current.id,
@@ -97,7 +98,12 @@ export async function updateStatus(
       { refresh: 'wait_for' },
     )
     // ② 新文档回填 supersedes（可追溯的那一格）
-    await deps.writer.update(index, replacementId, { supersedes: current.id, updated_at: now }, { refresh: 'wait_for' })
+    await deps.writer.update(
+      index,
+      replacementId,
+      { supersedes: current.id, updated_at: now },
+      { refresh: 'wait_for', signal },
+    )
 
     log({
       tool: 'status',
@@ -122,7 +128,10 @@ export async function updateStatus(
 
   const patch: Record<string, unknown> =
     action === 'expire' ? { status: 'expired', updated_at: now } : { privacy: 'private', updated_at: now }
-  const written = await deps.writer.update(index, current.id, patch, { refresh: 'wait_for' })
+  const written = await deps.writer.update(index, current.id, patch, {
+    refresh: 'wait_for',
+    signal: deps.signal,
+  })
 
   const status = action === 'expire' ? 'expired' : (typeof current.source.status === 'string' ? current.source.status : 'active')
   const privacy = action === 'mark_private' ? 'private' : (typeof current.source.privacy === 'string' ? current.source.privacy : 'normal')
@@ -196,8 +205,10 @@ export function defineStatusTool(deps: UpdateStatusDeps) {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args) {
-      return await updateStatus(deps, args)
+    // supersede 是双写（旧→superseded 再新→supersedes）+ 一次读，给 15 s
+    timeoutMs: 15_000,
+    async execute(args, exec) {
+      return await updateStatus({ ...deps, signal: exec.signal }, args)
     },
   })
 }

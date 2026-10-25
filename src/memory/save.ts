@@ -61,6 +61,8 @@ export interface SaveResult {
 }
 
 export interface SaveDeps {
+  /** 取消信号（来自 exec.signal） */
+  signal?: AbortSignal
   /** F2 注入源（来自 identity.userId） */
   userId: string
   /** 个人索引前缀；索引名在这里拼（`personalIndex` 由前缀 + userId 派生，不给调用点拼错的机会） */
@@ -174,7 +176,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   // 先算一遍拿到 sha 与校验（也会在这里拦空内容/超长），再决定是否去重
   const probe = buildMemoryDoc(input, deps, { now, memoryId: newId(), embedding: null })
 
-  const dup = await deps.reader.search(index, dedupeBody(probe.contentSha256))
+  const dup = await deps.reader.search(index, dedupeBody(probe.contentSha256), { signal: deps.signal })
   const existing = dup.hits[0]
   if (existing) {
     const existingId = typeof existing.source.memory_id === 'string' ? existing.source.memory_id : existing.id
@@ -192,7 +194,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   let embedFailure: string | undefined
   if (deps.embed) {
     try {
-      embedding = await deps.embed.embed(normalizeContent(input.content))
+      embedding = await deps.embed.embed(normalizeContent(input.content), { signal: deps.signal })
     } catch (err) {
       degraded = true
       embedFailure = err instanceof EmbeddingError ? err.kind : 'unknown'
@@ -206,7 +208,11 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   assertDocOwner(built.doc, deps.userId)
 
   try {
-    await deps.writer.index(built.index, built.doc, { id: String(built.doc.memory_id), refresh: 'wait_for' })
+    await deps.writer.index(built.index, built.doc, {
+      id: String(built.doc.memory_id),
+      refresh: 'wait_for',
+      signal: deps.signal,
+    })
   } catch (err) {
     log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
     throw err
@@ -280,10 +286,12 @@ export function defineSaveTool(deps: SaveDeps) {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    // 刻意不声明 timeoutMs：宿主契约要求声明者把 exec.signal 转发到内部请求才能真正取消，
-    // 而本工具的时间由内部超时兜住（ES 8 s / embedding 15 s），宁可不声明也不装作「能取消」。
-    async execute(args) {
-      return await saveMemory(deps, args)
+    // 声明 timeoutMs 的前提（宿主契约）是「真的把 exec.signal 转发到内部请求」：
+    // save 的一路最长链路是 去重检索 8 s + 向量 15 s + 写入 8 s，给 20 s 兜住；
+    // 取消时 http/embedding 会立刻中断在途请求并抛 aborted。
+    timeoutMs: 20_000,
+    async execute(args, exec) {
+      return await saveMemory({ ...deps, signal: exec.signal }, args)
     },
   })
 }

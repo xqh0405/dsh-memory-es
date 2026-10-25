@@ -56,6 +56,8 @@ export interface RunOptions {
   state: ConsolidateState
   /** 只跑这一批、不理会触发阈值（CLI 手动模式） */
   manual?: boolean
+  /** 只看该时间之后创建的记忆（CLI `--since`）；不传则不限 */
+  createdAfter?: Date | null
 }
 
 export interface StepResult {
@@ -94,7 +96,13 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
   let skippedProcessed = 0
   let degraded = false
 
-  const found = await deps.reader.search(deps.personalIndex, buildCandidateQuery({ batchSize: options.batchSize }))
+  const found = await deps.reader.search(
+    deps.personalIndex,
+    buildCandidateQuery({
+      batchSize: options.batchSize,
+      createdAfter: options.createdAfter ?? null,
+    }),
+  )
   const candidates = found.hits.map((hit) => toCandidate(hit.source, hit.id))
 
   for (const candidate of candidates) {
@@ -169,7 +177,6 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
         neighbors = knn.hits.map((hit) => ({
           id: hit.id,
           score: hit.score,
-          contentSha256: typeof hit.source.content_sha256 === 'string' ? hit.source.content_sha256 : undefined,
           topicKey: typeof hit.source.topic_key === 'string' ? hit.source.topic_key : undefined,
           content: typeof hit.source.content === 'string' ? hit.source.content : undefined,
         }))

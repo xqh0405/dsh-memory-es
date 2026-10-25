@@ -50,6 +50,8 @@ export interface RetrievalConfig {
 }
 
 export interface SearchDeps {
+  /** 取消信号（来自 exec.signal） */
+  signal?: AbortSignal
   userId: string
   personalPrefix: string
   teamIndex: string
@@ -136,7 +138,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   let degraded = false
   if (deps.embed) {
     try {
-      vector = await deps.embed.embed(query)
+      vector = await deps.embed.embed(query, { signal: deps.signal })
     } catch (err) {
       degraded = true
       log({ tool: 'search', user: deps.userId, event: 'embedding_degraded', kind: (err as { kind?: string }).kind ?? 'unknown' })
@@ -152,13 +154,17 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     tasks.push({
       scope: target,
       route: 'bm25',
-      run: deps.reader.search(indexName, bm25Body(query, targetMeta, topK)).then((r) => r.hits),
+      run: deps.reader
+        .search(indexName, bm25Body(query, targetMeta, topK), { signal: deps.signal })
+        .then((r) => r.hits),
     })
     if (vector) {
       tasks.push({
         scope: target,
         route: 'knn',
-        run: deps.reader.search(indexName, knnBody(vector, deps.dims, targetMeta, topK)).then((r) => r.hits),
+        run: deps.reader
+          .search(indexName, knnBody(vector, deps.dims, targetMeta, topK), { signal: deps.signal })
+          .then((r) => r.hits),
       })
     }
   }
@@ -313,8 +319,10 @@ export function defineSearchTool(deps: SearchDeps) {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args) {
-      return await searchMemories(deps, args)
+    // 两路 + 两库共 4 个请求并发；取消时全部由 deps.signal 打断
+    timeoutMs: 15_000,
+    async execute(args, exec) {
+      return await searchMemories({ ...deps, signal: exec.signal }, args)
     },
   })
 }

@@ -353,8 +353,47 @@ describe('defineSaveTool', () => {
     ])
     assert.equal(JSON.stringify(def.parameters).includes('user_id'), false)
     assert.match(def.description, /memory_save|记忆/)
-    // 不声明 timeoutMs：声明了就得把 exec.signal 接进内部请求，否则等于假承诺
-    assert.equal(def.timeoutMs, undefined)
+    // 新契约（S9 还债）：声明 timeoutMs **且真的把 exec.signal 转发进内部请求**。
+    // 只有二者同时成立才不算假承诺——所以下面用行为断言，不只看数字。
+    assert.equal(typeof def.timeoutMs, 'number')
+    assert.ok((def.timeoutMs as number) > 0)
+  })
+
+  test('execute 把 exec.signal 一路转发到去重检索 / 向量 / 写入（timeoutMs 才不算假承诺）', async () => {
+    const readerSignal: Array<AbortSignal | undefined> = []
+    const writeSignal: Array<AbortSignal | undefined> = []
+    const embedSignal: Array<AbortSignal | undefined> = []
+    const deps: SaveDeps = {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      defaultDomain: 'd',
+      reader: {
+        search: async (_index, _body, call) => {
+          readerSignal.push(call?.signal)
+          return { took: 1, total: 0, hits: [] }
+        },
+      },
+      writer: {
+        index: async (_index, _doc, options) => {
+          writeSignal.push(options?.signal)
+          return { id: 'x', result: 'created', status: 201 }
+        },
+      },
+      embed: {
+        embed: async (_text, call) => {
+          embedSignal.push(call?.signal)
+          return VECTOR
+        },
+      },
+    }
+
+    const controller = new AbortController()
+    const def = defineSaveTool(deps)
+    await def.execute({ content: '转发信号验证' }, { signal: controller.signal } as unknown as ToolRunContext)
+
+    assert.deepEqual(readerSignal, [controller.signal], '去重检索要带同一个 signal')
+    assert.deepEqual(embedSignal, [controller.signal], '向量调用要带同一个 signal')
+    assert.deepEqual(writeSignal, [controller.signal], '写入要带同一个 signal')
   })
 
   test('execute 返回的值满足声明的 output schema，render 给一行文本', async () => {

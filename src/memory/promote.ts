@@ -114,8 +114,10 @@ export function definePromoteTool(deps: PromoteDeps) {
       },
       render: (_args, value) => [{ type: 'text', text: value.text }],
     },
-    async execute(args) {
-      return await promoteMemory(deps, args)
+    // 只做一次读 + 一次写
+    timeoutMs: 15_000,
+    async execute(args, exec) {
+      return await promoteMemory({ ...deps, signal: exec.signal }, args)
     },
   })
 }

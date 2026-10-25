@@ -13,9 +13,10 @@
  */
 
 /** 失败分类：既决定提示语，也决定日志里怎么归因 */
-export type EmbeddingErrorKind = 'config' | 'unavailable' | 'timeout' | 'protocol' | 'dims'
+export type EmbeddingErrorKind = 'config' | 'unavailable' | 'timeout' | 'aborted' | 'protocol' | 'dims'
 
 const HINTS: Record<EmbeddingErrorKind, string> = {
+  aborted: '调用方已取消（工具超时或用户中断）：本条记忆没有拿到向量，写入会按 degraded 处理',
   config: '检查 embedding.url / embedding.model（模型是否已 pull）',
   unavailable: 'embedding 服务不可达：确认本机 Ollama 在跑；本次写入会降级为纯关键词可检索',
   timeout: 'embedding 超时：本次写入降级为纯关键词可检索',
@@ -49,7 +50,8 @@ export interface EmbedderConfig {
 export interface Embedder {
   readonly model: string
   readonly dims: number
-  embed(text: string): Promise<number[]>
+  /** `call.signal` 取消在途请求（不传即只受自身 timeoutMs 约束） */
+  embed(text: string, call?: { signal?: AbortSignal }): Promise<number[]>
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -86,11 +88,21 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
     model: config.model,
     dims: config.dims,
 
-    async embed(text) {
+    async embed(text, call: { signal?: AbortSignal } = {}) {
       if (text.trim() === '') throw new EmbeddingError('embed(text): text 不能为空', { kind: 'config' })
       const what = `POST ${endpoint} (${config.model})`
+      if (call.signal?.aborted) {
+        throw new EmbeddingError(`${what} → 调用方已取消（未发请求）`, { kind: 'aborted' })
+      }
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, timeoutMs)
+      // 外部取消要能立刻打断在途请求（工具超时/用户中断），而不是等自己的 15 s 超时
+      const forwardAbort = (): void => controller.abort()
+      call.signal?.addEventListener('abort', forwardAbort, { once: true })
       try {
         let response: Response
         try {
@@ -101,6 +113,10 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
             signal: controller.signal,
           })
         } catch (err) {
+          // 先分清是谁取消的：外部 signal → aborted；自己的定时器 → timeout
+          if (call.signal?.aborted && !timedOut) {
+            throw new EmbeddingError(`${what} → 调用方取消`, { kind: 'aborted', cause: err })
+          }
           throw mapFetchError(err, what)
         }
 
@@ -139,6 +155,7 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
         return vector as number[]
       } finally {
         clearTimeout(timer)
+        call.signal?.removeEventListener('abort', forwardAbort)
       }
     },
   }

@@ -20,7 +20,6 @@ export interface NeighborHit {
   id: string
   /** kNN 的 cosine 相似度（0~1） */
   score: number
-  contentSha256?: string
   topicKey?: string
   /** 正文：冲突判定要比对「相反结论」，没有正文就只能按相似度判重复 */
   content?: string

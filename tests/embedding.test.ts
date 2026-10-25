@@ -171,3 +171,49 @@ describe('createEmbedder 配置 fail-fast', () => {
     }
   })
 })
+
+describe('取消信号', () => {
+  const base = { model: 'bge-m3', dims: 4 }
+
+  test('已经 abort → 立刻抛 aborted 且不发请求', async () => {
+    let hits = 0
+    const fake = await startFakeEs((_req, res) => {
+      hits += 1
+      sendJson(res, 200, { embeddings: [[1, 0, 0, 0]] })
+    })
+    try {
+      const embedder = createEmbedder({ ...base, url: fake.url })
+      const controller = new AbortController()
+      controller.abort()
+      const err = await embedder.embed('x', { signal: controller.signal }).then(
+        () => null,
+        (error: unknown) => error,
+      )
+      assert.ok(err instanceof EmbeddingError)
+      assert.equal(err.kind, 'aborted')
+      assert.equal(hits, 0, '已取消就不该发请求')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('在途 abort → aborted（不是 timeout）', async () => {
+    const fake = await startFakeEs(() => {
+      /* 故意不回包 */
+    })
+    try {
+      const embedder = createEmbedder({ ...base, url: fake.url, timeoutMs: 30_000 })
+      const controller = new AbortController()
+      const pending = embedder.embed('x', { signal: controller.signal })
+      setTimeout(() => controller.abort(), 20)
+      const err = await pending.then(
+        () => null,
+        (error: unknown) => error,
+      )
+      assert.ok(err instanceof EmbeddingError)
+      assert.equal(err.kind, 'aborted', '外部取消不能误报成 timeout')
+    } finally {
+      await fake.close()
+    }
+  })
+})

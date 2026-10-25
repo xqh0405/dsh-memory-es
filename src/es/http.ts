@@ -32,6 +32,7 @@ export type EsErrorKind =
   | 'bad_request'
   | 'server'
   | 'timeout'
+  | 'aborted'
   | 'network'
   | 'tls'
   | 'protocol'
@@ -47,6 +48,7 @@ const HINTS: Record<EsErrorKind, string> = {
   bad_request: '请求被 ES 拒绝：多半是字段名与 mapping 不符（mapping 是 dynamic:strict，字段写错直接 400）',
   server: 'ES 服务异常：本次记忆操作未生效',
   timeout: 'ES 请求超时：本次记忆操作未生效',
+  aborted: '调用方已取消（工具超时或用户中断）：本次操作可能已部分生效，重试前先查一次',
   network: 'ES 不可达：检查部署（scripts/es-up.sh）与 es.url',
   tls: 'TLS 证书校验失败：es.caCertPath 要指向自签 CA 的 PEM，且证书 SAN 必须包含 es.url 里的主机名/IP',
   protocol: 'ES 返回了非预期响应（可能被中间层改写），检查是否误连了别的服务',
@@ -111,7 +113,12 @@ export interface EsClientConfig {
 }
 
 /** 写入类请求的公共选项 */
-export interface WriteOptions {
+/** 每次调用都可带取消信号（工具把 exec.signal 一路传到这里） */
+export interface CallOptions {
+  signal?: AbortSignal
+}
+
+export interface WriteOptions extends CallOptions {
   /** 显式指定文档 id；不给则让 ES 生成 */
   id?: string
   /** wait_for 表示返回前刷新（写完立刻能搜到）；默认不刷新 */
@@ -154,20 +161,20 @@ export interface EsHealth {
 
 export interface EsClient {
   readonly endpoint: string
-  info(): Promise<EsInfo>
-  health(): Promise<EsHealth>
+  info(call?: CallOptions): Promise<EsInfo>
+  health(call?: CallOptions): Promise<EsHealth>
   /** 写入/覆盖一条文档（writer 凭证） */
   index(indexName: string, doc: Record<string, unknown>, options?: WriteOptions): Promise<EsWriteResult>
-  get(indexName: string, id: string): Promise<EsGetResult>
+  get(indexName: string, id: string, call?: CallOptions): Promise<EsGetResult>
   /** 局部更新（partial doc），writer 凭证 */
   update(
     indexName: string,
     id: string,
     doc: Record<string, unknown>,
-    options?: Pick<WriteOptions, 'refresh'>,
+    options?: WriteOptions & CallOptions,
   ): Promise<EsWriteResult>
   /** 检索；body 由 `es/dsl.ts` 组装，这里只负责收发 */
-  search(indexName: string, body: Record<string, unknown>): Promise<EsSearchResult>
+  search(indexName: string, body: Record<string, unknown>, call?: CallOptions): Promise<EsSearchResult>
 }
 
 interface RawSearchHit {
@@ -230,6 +237,10 @@ function classifyTransportError(err: unknown, what: string): EsError {
   const e = err as NodeJS.ErrnoException
   const code = typeof e?.code === 'string' ? e.code : ''
   const text = typeof e?.message === 'string' ? e.message : String(err)
+  // 取消必须单独分类：落进 network 会提示「ES 不可达」，把「我们自己取消了」误报成故障
+  if (code === 'ABORT_ERR' || /aborted|AbortError/i.test(`${code} ${text}`)) {
+    return new EsError(`${what} → 调用方取消`, { kind: 'aborted', cause: err })
+  }
   if (/CERT|TLS|SSL|ALTNAME|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(code) || /certificate|TLS|SSL/i.test(text)) {
     return new EsError(`${what} → TLS 校验失败：${code || text}`, { kind: 'tls', cause: err })
   }
@@ -280,7 +291,12 @@ export function createEsClient(config: EsClientConfig): EsClient {
   const transport = baseUrl.protocol === 'https:' ? httpsRequest : httpRequest
 
   /** 发一次请求；不做重试与语义解释 */
-  function once(method: string, path: string, payload: unknown): Promise<{ status: number; text: string }> {
+  function once(
+    method: string,
+    path: string,
+    payload: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ status: number; text: string }> {
     const target = new URL(path, baseUrl)
     const shown = `${method} ${target.pathname}${target.search}`
     const body = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload), 'utf8')
@@ -296,7 +312,8 @@ export function createEsClient(config: EsClientConfig): EsClient {
     return new Promise((resolve, reject) => {
       const req = transport(
         target,
-        { method, headers, ca: caPem },
+        // signal 交给 http.request：中止时它会 destroy 请求并以 AbortError 走 error 事件
+        { method, headers, ca: caPem, signal },
         (res) => {
           const chunks: Buffer[] = []
           res.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -332,12 +349,12 @@ export function createEsClient(config: EsClientConfig): EsClient {
   }
 
   /** 统一入口：只在 409 / 429 上重试一次（各一次，不是“无限”） */
-  async function request<T>(method: string, path: string, payload?: unknown): Promise<T> {
+  async function request<T>(method: string, path: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
     let attempt = 0
     for (;;) {
       attempt += 1
       try {
-        const { status, text } = await once(method, path, payload)
+        const { status, text } = await once(method, path, payload, signal)
         return interpret<T>(method, path, status, text)
       } catch (err) {
         const failure = err instanceof EsError ? err : new EsError(String(err), { kind: 'protocol', cause: err })
@@ -360,12 +377,12 @@ export function createEsClient(config: EsClientConfig): EsClient {
   return {
     endpoint: `${baseUrl.origin}`,
 
-    async info() {
-      return await request<EsInfo>('GET', '/')
+    async info(call: CallOptions = {}) {
+      return await request<EsInfo>('GET', '/', undefined, call.signal)
     },
 
-    async health() {
-      return await request<EsHealth>('GET', '/_cluster/health')
+    async health(call: CallOptions = {}) {
+      return await request<EsHealth>('GET', '/_cluster/health', undefined, call.signal)
     },
 
     async index(indexName, doc, options = {}) {
@@ -378,7 +395,7 @@ export function createEsClient(config: EsClientConfig): EsClient {
           ? `/${enc(indexName)}/_doc${suffix}`
           : `/${enc(indexName)}/_doc/${enc(options.id)}${suffix}`
       const method = options.id === undefined ? 'POST' : 'PUT'
-      const raw = await request<{ _id?: unknown; result?: unknown }>(method, path, doc)
+      const raw = await request<{ _id?: unknown; result?: unknown }>(method, path, doc, options.signal)
       return {
         id: typeof raw._id === 'string' ? raw._id : (options.id ?? ''),
         result: typeof raw.result === 'string' ? raw.result : 'updated',
@@ -386,10 +403,12 @@ export function createEsClient(config: EsClientConfig): EsClient {
       }
     },
 
-    async get(indexName, id) {
+    async get(indexName, id, call: CallOptions = {}) {
       const raw = await request<{ _id?: unknown; _index?: unknown; _source?: unknown }>(
         'GET',
         `/${enc(indexName)}/_doc/${enc(id)}`,
+        undefined,
+        call.signal,
       )
       return {
         id: typeof raw._id === 'string' ? raw._id : id,
@@ -403,6 +422,7 @@ export function createEsClient(config: EsClientConfig): EsClient {
         'POST',
         `/${enc(indexName)}/_update/${enc(id)}${refreshQuery(options.refresh)}`,
         { doc },
+        options.signal,
       )
       return {
         id: typeof raw._id === 'string' ? raw._id : id,
@@ -411,8 +431,8 @@ export function createEsClient(config: EsClientConfig): EsClient {
       }
     },
 
-    async search(indexName, body) {
-      const raw = await request<RawSearchResponse>('POST', `/${enc(indexName)}/_search`, body)
+    async search(indexName, body, call: CallOptions = {}) {
+      const raw = await request<RawSearchResponse>('POST', `/${enc(indexName)}/_search`, body, call.signal)
       const rawHits = Array.isArray(raw.hits?.hits) ? (raw.hits.hits as RawSearchHit[]) : []
       const hits: Hit[] = rawHits.map((hit) => ({
         id: typeof hit._id === 'string' ? hit._id : '',
