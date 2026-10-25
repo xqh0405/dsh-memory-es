@@ -11,6 +11,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -25,8 +26,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  */
 const CLI_DIR_CANDIDATES = [
   process.env.MEMORY_ES_CLI_DIR,
-  '/data/dsh/local-plugins/dsh-memory-es-panel/cli',
-  join(HERE, 'cli'),
+  '/data/dsh/local-plugins/dsh-memory-es-panel/cli',        // .125 容器内
+  join(homedir(), '.dsh/local-plugins/dsh-memory-es-panel/cli'), // .114 本机
+  join(HERE, 'cli'),                                        // 兜底（node_modules 下跑不了，仅当装了本地目录）
 ].filter((value) => typeof value === 'string' && value !== '')
 
 function resolveCliDir() {
