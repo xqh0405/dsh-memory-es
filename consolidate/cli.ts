@@ -253,13 +253,26 @@ function parseDotEnvFile(path: string): Record<string, string> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const env = parseDotEnvFile(`${args.esDir}/.env`)
+  // 允许用进程环境覆盖文件值：cron / 面板调用时可以把单账号凭据直接传进来，
+  // 不必为了换凭据去改写 .env（也避免把密码落在仓库目录里）
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('MEM_') && typeof value === 'string' && value !== '') env[key] = value
+  }
   const userId = args.user ?? env.MEM_USER_ID ?? ''
   if (userId === '') throw new Error('缺少用户：用 --user 指定，或在 .env 里配 MEM_USER_ID')
 
-  const need = ['MEM_READER_PASSWORD', 'MEM_WRITER_PASSWORD', 'MEM_CONSOLIDATOR_PASSWORD'] as const
-  const missing = need.filter((key) => (env[key] ?? '') === '')
-  if (missing.length > 0) {
-    throw new Error(`.env 缺少 ${missing.join(' / ')}（先跑 scripts/init-security.sh）`)
+  // 两种身份模式：
+  //  · 单账号（推荐，一人一个 ES 账号）：MEM_USERNAME/MEM_PASSWORD，个人库读写 + 团队库按角色授权
+  //  · 旧的三账号：MEM_READER_PASSWORD / MEM_WRITER_PASSWORD / MEM_CONSOLIDATOR_PASSWORD
+  const single = (env.MEM_USERNAME ?? '') !== '' && (env.MEM_PASSWORD ?? '') !== ''
+  if (!single) {
+    const need = ['MEM_READER_PASSWORD', 'MEM_WRITER_PASSWORD', 'MEM_CONSOLIDATOR_PASSWORD'] as const
+    const missing = need.filter((key) => (env[key] ?? '') === '')
+    if (missing.length > 0) {
+      throw new Error(
+        `.env 缺少 ${missing.join(' / ')}；或改用单账号模式（scripts/init-user.sh 生成的 users/<uid>.env 里有 MEM_USERNAME/MEM_PASSWORD）`,
+      )
+    }
   }
 
   const url = args.esUrl ?? 'https://127.0.0.1:9200'
@@ -267,9 +280,11 @@ async function main(): Promise<void> {
   const client = (username: string, password: string) =>
     createEsClient({ url, caCertPath, username, password, requestTimeoutMs: 10_000 })
 
-  const reader = client(`mem-reader-${userId}`, env.MEM_READER_PASSWORD)
-  const writer = client('mem-writer', env.MEM_WRITER_PASSWORD)
-  const consolidator = client('mem-consolidator', env.MEM_CONSOLIDATOR_PASSWORD)
+  const reader = single
+    ? client(env.MEM_USERNAME, env.MEM_PASSWORD)
+    : client(`mem-reader-${userId}`, env.MEM_READER_PASSWORD)
+  const writer = single ? reader : client('mem-writer', env.MEM_WRITER_PASSWORD)
+  const consolidator = single ? reader : client('mem-consolidator', env.MEM_CONSOLIDATOR_PASSWORD)
   // 索引名/向量端点都从 .env 读：同一份代码要能在本机（127.0.0.1）和 .125（容器里访问宿主 Ollama）跑，
   // 硬编码会让「换部署」变成「改代码」。
   const personalPrefix = env.MEM_PERSONAL_PREFIX ?? 'personal_memory_'

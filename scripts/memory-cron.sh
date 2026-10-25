@@ -25,6 +25,23 @@ NODE_BIN="${NODE_BIN:-/usr/local/bin/node}"
 
 mkdir -p "$STATE_DIR"
 
+# 单账号优先：scripts/init-user.sh 生成的 users/<uid>.env 里是这个人自己的 ES 账号
+# （个人库读写 + 团队库按角色），CLI 会用它取代 reader/writer/consolidator 三个遗留账号。
+apply_single_account() {
+  local envf="$ROOT/deploy/es/.env" uid user_env
+  [ -f "$envf" ] || return 0
+  uid=$(sed -n 's/^MEM_USER_ID=//p' "$envf" | tail -1)
+  [ -n "$uid" ] || return 0
+  user_env="$ROOT/deploy/es/users/$uid.env"
+  [ -f "$user_env" ] || return 0
+  # 只取需要的两个值，不 source（避免执行文件内容）
+  MEM_USERNAME=$(sed -n 's/^MEM_USERNAME=//p' "$user_env" | tail -1)
+  MEM_PASSWORD=$(sed -n 's/^MEM_PASSWORD=//p' "$user_env" | tail -1)
+  export MEM_USERNAME MEM_PASSWORD
+}
+apply_single_account
+
+
 # 配置默认值：关闭 + 整理任务只 dry-run
 DEFAULT_CONF='# dsh-memory-es 定时任务开关（由 scripts/memory-cron.sh 维护；也可以手改）
 # MEMCRON_ENABLED=1 才真正执行；0 或缺失 = 只打印 disabled 后退出

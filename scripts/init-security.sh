@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# 建角色 / 用户 / API key，并把 key 与用户密码写入 deploy/es/.env。
+# 建共享角色，并按「一人一个 ES 账号」建用户（2026-10-26 起）。
 #
 # 免费版（basic license）没有 DLS，所以隔离靠「一人一索引 + 索引级 ACL」：
-#   · 个人 key 只能读 personal_memory_<自己>
-#   · writer 能写 personal_memory_*（插件唯一写入口）
-#   · consolidator 读所有个人索引、只写 team_knowledge
+#   · 每个人一个账号 mem-user-<uid>：只能读写 personal_memory_<uid>（不是通配符）
+#   · 团队库按档位授权：mem_team_read（只读）/ mem_team_write（读写 + 写审计）
+#   · 每人的账号和密码由 scripts/init-user.sh 生成到 deploy/es/users/<uid>.env（600）
+#
+# ⚠️ mem_writer（能写 personal_memory_* 通配）是旧设计，本脚本**不再创建**；
+#    已有部署里它还在，只为兼容尚未迁移的 CLI/面板。迁移完成后可用
+#    scripts/init-user.sh --drop-legacy-writer 删掉（见该脚本 help）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,17 +49,15 @@ admin -X PUT "$ES/_security/role/mem_team_read" -d @- >/dev/null <<'JSON'
 JSON
 echo '  mem_team_read → 只读 team_knowledge'
 
-admin -X PUT "$ES/_security/role/mem_writer" -d @- >/dev/null <<'JSON'
+admin -X PUT "$ES/_security/role/mem_team_write" -d @- >/dev/null <<'JSON'
 {
   "indices": [
-    {
-      "names": ["personal_memory_*"],
-      "privileges": ["index", "read", "view_index_metadata"]
-    }
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] }
   ]
 }
 JSON
-echo '  mem_writer → 写个人库（通配 personal_memory_*；不含 create_index——建索引是 init-indices.sh 的活）'
+echo '  mem_team_write → 团队库读写 + 审计读写（审核员的角色；旧 mem_writer 通配已不再创建）'
 
 admin -X PUT "$ES/_security/role/mem_consolidator" -d @- >/dev/null <<'JSON'
 {
@@ -80,8 +82,8 @@ PWC=$(get_env MEM_CONSOLIDATOR_PASSWORD); [ -n "${PWC:-}" ] || { PWC=$(rand_pw);
 
 admin -X PUT "$ES/_security/user/$READER" -d "{\"password\":\"$PUB\",\"roles\":[\"mem_personal_$USER_ID\",\"mem_team_read\"]}" >/dev/null
 echo "  $READER ok"
-admin -X PUT "$ES/_security/user/mem-writer" -d "{\"password\":\"$PWB\",\"roles\":[\"mem_writer\"]}" >/dev/null
-echo '  mem-writer ok'
+# 不再创建 mem-writer（通配 personal_memory_*，等于能写别人的个人库）
+echo '  mem-writer 已废弃（通配越权），改由 init-user.sh 建 per-user 账号'
 admin -X PUT "$ES/_security/user/mem-consolidator" -d "{\"password\":\"$PWC\",\"roles\":[\"mem_consolidator\"]}" >/dev/null
 echo '  mem-consolidator ok'
 
@@ -95,8 +97,13 @@ done
 
 chmod 600 "$ENV_FILE"
 echo
+echo "== 3/3 本用户账号（一人一账号）=="
+ES_DIR="$ES_DIR" ES_URL="$ES" bash "$(dirname "$0")/init-user.sh" "$USER_ID" --team-write \
+  || echo '  （init-user.sh 失败：per-user 账号没建，插件仍可用旧三账号）'
+
 echo '完成。认证方式 = Basic Auth（用户名 + 密码），不再创建 API key。'
-echo '  读：mem-reader-<uid>   写：mem-writer   整理：mem-consolidator'
+echo "  用户账号：mem-user-$USER_ID（个人库读写 + 团队库读写）"
+echo '  遗留：mem-reader-<uid> / mem-consolidator 仍保留（兼容未迁移的调用）；mem-writer 已不再创建'
 grep -E '^(MEM_READER_PASSWORD|MEM_WRITER_PASSWORD|MEM_CONSOLIDATOR_PASSWORD)=' "$ENV_FILE" \
   | sed 's/=.*/=<已设置>/' | sed 's/^/  /'
 echo '  凭据通过临时配置文件传给 curl（--config，权限 600、返回前删除），密码不进 argv/ps。'

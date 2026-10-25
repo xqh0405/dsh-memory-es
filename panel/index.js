@@ -26,6 +26,10 @@ const DEFAULTS = {
   index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
   identity: {
     userId: '',
+    // 单账号模式（推荐）
+    username: '',
+    password: '',
+    teamWrite: false,
     readUsername: '',
     readPassword: '',
     consolidatorUsername: 'mem-consolidator',
@@ -95,7 +99,22 @@ function resolveClientConfig(ctx, role = 'reader') {
   const config = findEntryRow(ctx)
   if (!config.ok) return config
   const value = config.value
+  // 单账号模式：一个人一个 ES 账号，个人库读写 + 团队库按 teamWrite 授权
+  const single = value.identity.username && value.identity.password ? value.identity : null
+
   if (role === 'consolidator') {
+    // 有单账号且声明了 teamWrite，就用它自己（它自带 mem_team_write 角色）
+    if (single && value.identity.teamWrite) {
+      return {
+        ok: true,
+        value: {
+          url: value.es.url,
+          caCertPath: value.es.caCertPath,
+          timeoutMs: value.es.requestTimeoutMs,
+          auth: { username: single.username, password: single.password },
+        },
+      }
+    }
     const username = value.identity.consolidatorUsername
     const password = value.identity.consolidatorPassword
     if (!username || !password) {
@@ -114,8 +133,19 @@ function resolveClientConfig(ctx, role = 'reader') {
       },
     }
   }
+  if (single) {
+    return {
+      ok: true,
+      value: {
+        url: value.es.url,
+        caCertPath: value.es.caCertPath,
+        timeoutMs: value.es.requestTimeoutMs,
+        auth: { username: single.username, password: single.password },
+      },
+    }
+  }
   if (!value.identity.readUsername || !value.identity.readPassword) {
-    return { ok: false, error: '插件配置缺少只读身份（readUsername / readPassword）' }
+    return { ok: false, error: '插件配置缺少身份：要么给 identity.username/password（推荐），要么给 readUsername/readPassword' }
   }
   return {
     ok: true,
@@ -147,6 +177,12 @@ function indexNames(config) {
     team: config.index.team,
     audit: AUDIT_INDEX,
   }
+}
+
+/** 能否审核 = 有团队库写权限：单账号 + teamWrite，或旧的整理身份 */
+function canReviewTeam(identity) {
+  if (identity?.username && identity?.password && identity?.teamWrite) return true
+  return Boolean(identity?.consolidatorUsername && identity?.consolidatorPassword)
 }
 
 /** 待裁决口径（概览计数与审核台队列共用，防止两处漂移） */
@@ -441,7 +477,7 @@ async function handlePending(ctx, res, url) {
       size,
       rows,
       conflicts,
-      canWrite: Boolean(config.identity.consolidatorUsername && config.identity.consolidatorPassword),
+      canWrite: canReviewTeam(config.identity),
     },
   })
 }
@@ -469,7 +505,7 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
   const identity = configRow.value.identity
-  if (!identity.consolidatorUsername || !identity.consolidatorPassword) {
+  if (!canReviewTeam(identity)) {
     return json(res, 403, {
       ok: false,
       error: '当前部署没有配置整理身份（identity.consolidatorPassword），审核动作不可用；请联系管理员',
@@ -714,7 +750,7 @@ async function handleConfigWrite(ctx, res, req) {
 async function handleCapabilities(ctx, res) {
   const configRow = findEntryRow(ctx)
   const value = configRow.ok ? configRow.value : null
-  const canReview = Boolean(value?.identity?.consolidatorUsername && value?.identity?.consolidatorPassword)
+  const canReview = Boolean(value && canReviewTeam(value.identity))
   json(res, 200, {
     ok: true,
     value: {

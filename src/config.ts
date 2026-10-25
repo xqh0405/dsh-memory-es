@@ -23,6 +23,14 @@ export interface ConfigType {
   }
   identity: {
     userId: string
+    /**
+     * 单账号模式（推荐）：一个人的 ES 账号，个人库读写 + 团队库按 tier 授权。
+     * 有它就优先使用，readUsername/writerUsername 等旧字段仅作兼容回落。
+     */
+    username: string
+    password: string
+    /** 该账号是否有团队库写权限（= 能不能审核）。false 时面板隐藏审核台 */
+    teamWrite: boolean
     readUsername: string
     readPassword: string
     writerUsername: string
@@ -77,6 +85,10 @@ export const Config: z<ConfigType> = z.object({
       .description('整理/审核身份的用户名；面板的批准/驳回/撤回要用它（对团队库与审计库有写权限）。'),
     consolidatorPassword: z.string().default('')
       .description('整理身份的密码；留空则面板只提供只读功能（审核动作会提示未配置）。'),
+    // 单账号模式：一人一个 ES 账号（mem-user-<uid>），个人库读写 + 团队库按 teamWrite 决定
+    username: z.string().default(''),
+    password: z.string().default(''),
+    teamWrite: z.boolean().default(false),
   }),
   embedding: z.object({
     url: z.string().default('http://127.0.0.1:11434')

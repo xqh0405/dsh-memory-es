@@ -59,8 +59,11 @@ export async function runCli(config, args, options = {}) {
   try {
     mkdirSync(join(envDir, 'certs'), { recursive: true, mode: 0o700 })
     if (config.es.caCertPath) copyFileSync(config.es.caCertPath, join(envDir, 'certs', 'ca.crt'))
+    const single = config.identity.username && config.identity.password
     const envLines = [
       `MEM_USER_ID=${config.identity.userId}`,
+      // 单账号模式：CLI 会优先用这两个，忽略下面三组遗留密码
+      ...(single ? [`MEM_USERNAME=${config.identity.username}`, `MEM_PASSWORD=${config.identity.password}`] : []),
       `MEM_READER_PASSWORD=${config.identity.readPassword}`,
       `MEM_WRITER_PASSWORD=${config.identity.writerPassword}`,
       `MEM_CONSOLIDATOR_PASSWORD=${config.identity.consolidatorPassword}`,

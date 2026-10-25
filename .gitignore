@@ -177,6 +177,10 @@ cython_debug/
 
 # ---- dsh-memory-es 本地运行物 ----
 deploy/es/.env
+# ---- 每人一份的 ES 凭据（scripts/init-user.sh 生成，含明文密码）----
+deploy/es/users/
+deploy/es-remote/users/
+
 deploy/es/certs/
 deploy/es/data/
 deploy/es/plugins/
