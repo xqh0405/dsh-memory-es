@@ -1,0 +1,5 @@
+# dsh bundle patch：把插件插进 profile 的 layer 栈
+# id 是插件 id（Config/apply 用它），name 是 npm 包名
+- insert:
+    - id: dsh-memory-es
+      name: 'dsh-memory-es'
