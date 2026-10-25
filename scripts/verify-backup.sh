@@ -9,7 +9,7 @@ ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
 ES="https://127.0.0.1:9200"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
-WRITE_KEY=$(grep '^MEM_WRITER_API_KEY=' "$ENV_FILE" | cut -d= -f2-)
+WRITE_PASS=$(grep '^MEM_WRITER_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=${USER_ID:-xqh}
 SRC="personal_memory_$USER_ID"
@@ -22,7 +22,7 @@ pass=0; fail=0
 chk() { if [ "$2" = "$1" ]; then echo "  PASS $3"; pass=$((pass+1)); else echo "  FAIL [期望 $1 实际 $2] $3"; fail=$((fail+1)); fi; }
 
 admin() { curl -sS --fail-with-body --cacert "$CA" -u "elastic:$PASS" -H 'Content-Type: application/json' "$@"; }
-writer() { curl -sS --fail-with-body --cacert "$CA" -H "Authorization: ApiKey $WRITE_KEY" -H 'Content-Type: application/json' "$@"; }
+writer() { curl -sS --fail-with-body --cacert "$CA" -u "mem-writer:$WRITE_PASS" -H 'Content-Type: application/json' "$@"; }
 jget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(\"d$1\"))" 2>/dev/null || echo ERR; }
 
 echo "== 1/5 写一条探针文档（带 1024 维向量）=="

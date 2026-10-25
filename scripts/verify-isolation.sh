@@ -9,11 +9,13 @@ ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
 ES="https://127.0.0.1:9200"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
-READ_KEY=$(grep '^MEM_READ_API_KEY=' "$ENV_FILE" | cut -d= -f2-)
-WRITE_KEY=$(grep '^MEM_WRITER_API_KEY=' "$ENV_FILE" | cut -d= -f2-)
-CONS_KEY=$(grep '^MEM_CONSOLIDATOR_API_KEY=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=${USER_ID:-xqh}
+# 认证走 Basic Auth（用户名+密码），不用 API key：灾备重建后密码不变、客户端零改动
+READ_USER="mem-reader-$USER_ID"
+READ_PASS=$(grep '^MEM_READER_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
+WRITE_PASS=$(grep '^MEM_WRITER_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
+CONS_PASS=$(grep '^MEM_CONSOLIDATOR_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 PERSONAL="personal_memory_$USER_ID"
 OTHER="personal_memory_other"
 
@@ -27,9 +29,9 @@ code() { # code <凭证类型> <method> <path> [body]
   local hdr=()
   case "$auth" in
     admin)  hdr=(-u "elastic:$PASS") ;;
-    read)   hdr=(-H "Authorization: ApiKey $READ_KEY") ;;
-    write)  hdr=(-H "Authorization: ApiKey $WRITE_KEY") ;;
-    cons)   hdr=(-H "Authorization: ApiKey $CONS_KEY") ;;
+    read)   hdr=(-u "$READ_USER:$READ_PASS") ;;
+    write)  hdr=(-u "mem-writer:$WRITE_PASS") ;;
+    cons)   hdr=(-u "mem-consolidator:$CONS_PASS") ;;
   esac
   if [ -n "$body" ]; then
     curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" "${hdr[@]}" \
@@ -90,12 +92,12 @@ print(json.dumps({"knn":{"field":"embedding","query_vector":vec,"k":3,"num_candi
                   "size":1,"_source":["memory_id","content"]}))
 PY
 )
-top=$(curl -sS --cacert "$CA" -H "Authorization: ApiKey $READ_KEY" -H 'Content-Type: application/json' \
+top=$(curl -sS --cacert "$CA" -u "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
   -X POST "$ES/$PERSONAL/_search" -d "$knn_body" \
   | python3 -c 'import sys,json;h=json.load(sys.stdin)["hits"]["hits"];print(h[0]["_source"]["memory_id"] if h else "NONE")')
 chk knn-probe "$top" "kNN 用中文问句召回命中（换说法）"
 
-bm25=$(curl -sS --cacert "$CA" -H "Authorization: ApiKey $READ_KEY" -H 'Content-Type: application/json' \
+bm25=$(curl -sS --cacert "$CA" -u "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
   -X POST "$ES/$PERSONAL/_search" \
   -d '{"query":{"match":{"content":"win_price_practical"}},"size":1,"_source":["memory_id"]}' \
   | python3 -c 'import sys,json;h=json.load(sys.stdin)["hits"]["hits"];print(h[0]["_source"]["memory_id"] if h else "NONE")')

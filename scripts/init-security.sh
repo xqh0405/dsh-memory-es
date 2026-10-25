@@ -65,11 +65,9 @@ admin -X PUT "$ES/_security/role/mem_consolidator" -d @- >/dev/null <<'JSON'
 JSON
 echo '  mem_consolidator → 读个人库 + 写团队库'
 
-# 用户不会自动拥有 API key 管理权限，需显式给（只允许管理自己的 key）
-admin -X PUT "$ES/_security/role/mem_apikey_owner" -d @- >/dev/null <<'JSON'
-{ "cluster": ["manage_own_api_key"], "indices": [] }
-JSON
-echo '  mem_apikey_owner → 允许自助创建/吊销自己的 API key'
+# 认证方式：Basic Auth（用户名 + 密码）。
+# 不用 API key 的原因：灾备恢复后 .security 为空，key 必须重建、secret 不可复现，
+# 每个客户端都要同步新值；而用户名密码重建后保持不变，客户端零改动（见文档 §5.6）。
 
 echo "== 2/3 用户 =="
 READER="mem-reader-$USER_ID"
@@ -77,45 +75,26 @@ PUB=$(get_env MEM_READER_PASSWORD); [ -n "${PUB:-}" ] || { PUB=$(rand_pw); set_e
 PWB=$(get_env MEM_WRITER_PASSWORD); [ -n "${PWB:-}" ] || { PWB=$(rand_pw); set_env MEM_WRITER_PASSWORD "$PWB"; }
 PWC=$(get_env MEM_CONSOLIDATOR_PASSWORD); [ -n "${PWC:-}" ] || { PWC=$(rand_pw); set_env MEM_CONSOLIDATOR_PASSWORD "$PWC"; }
 
-admin -X PUT "$ES/_security/user/$READER" -d "{\"password\":\"$PUB\",\"roles\":[\"mem_personal_$USER_ID\",\"mem_team_read\",\"mem_apikey_owner\"]}" >/dev/null
+admin -X PUT "$ES/_security/user/$READER" -d "{\"password\":\"$PUB\",\"roles\":[\"mem_personal_$USER_ID\",\"mem_team_read\"]}" >/dev/null
 echo "  $READER ok"
-admin -X PUT "$ES/_security/user/mem-writer" -d "{\"password\":\"$PWB\",\"roles\":[\"mem_writer\",\"mem_apikey_owner\"]}" >/dev/null
+admin -X PUT "$ES/_security/user/mem-writer" -d "{\"password\":\"$PWB\",\"roles\":[\"mem_writer\"]}" >/dev/null
 echo '  mem-writer ok'
-admin -X PUT "$ES/_security/user/mem-consolidator" -d "{\"password\":\"$PWC\",\"roles\":[\"mem_consolidator\",\"mem_apikey_owner\"]}" >/dev/null
+admin -X PUT "$ES/_security/user/mem-consolidator" -d "{\"password\":\"$PWC\",\"roles\":[\"mem_consolidator\"]}" >/dev/null
 echo '  mem-consolidator ok'
 
-echo "== 3/3 API key =="
-make_key() {
-  local name=$1 user=$2 pass=$3 envkey=$4
-  local cur; cur=$(get_env "$envkey")
-  if [ -n "${cur:-}" ]; then
-    # 关键：.env 里有值不代表还有效。灾备恢复后 .security 是空的，
-    # 旧 key 必然 401，直接跳过会把失效 key 留在配置里（客户端全线 401）。
-    # 所以先验活：200 才跳过，否则重建并覆盖 .env。
-    local code
-    code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" \
-      -H "Authorization: ApiKey $cur" "$ES/_security/_authenticate" 2>/dev/null || echo 000)
-    if [ "$code" = "200" ]; then
-      echo "  $name 仍有效，跳过"
-      return 0
-    fi
-    echo "  $name 已失效（HTTP $code）→ 重建"
+# 清理历史遗留的 API key 值（已改用 Basic Auth，留着会让人误以为还在用）
+for k in MEM_READ_API_KEY MEM_WRITER_API_KEY MEM_CONSOLIDATOR_API_KEY; do
+  if grep -q "^$k=." "$ENV_FILE"; then
+    sed -i "s|^$k=.*|$k=|" "$ENV_FILE"
+    echo "  已清空 .env 的 $k（不再使用）"
   fi
-  local encoded
-  encoded=$(curl -sS --fail-with-body --cacert "$CA" -u "$user:$pass" \
-    -H 'Content-Type: application/json' -X POST "$ES/_security/api_key" \
-    -d "{\"name\":\"$name\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["encoded"])')
-  set_env "$envkey" "$encoded"
-  echo "  $name 已创建 → .env:$envkey（新 key，客户端需同步新值）"
-}
-
-make_key "mem-read-$USER_ID" "$READER" "$PUB" MEM_READ_API_KEY
-make_key "mem-writer" "mem-writer" "$PWB" MEM_WRITER_API_KEY
-make_key "mem-consolidator" "mem-consolidator" "$PWC" MEM_CONSOLIDATOR_API_KEY
+done
 
 chmod 600 "$ENV_FILE"
 echo
-echo '完成。'
-grep -cE '^(MEM_READ_API_KEY|MEM_WRITER_API_KEY|MEM_CONSOLIDATOR_API_KEY)=.+' "$ENV_FILE" \
-  | xargs -I{} echo "  已写入 {} 个 API key 到 .env"
+echo '完成。认证方式 = Basic Auth（用户名 + 密码），不再创建 API key。'
+echo '  读：mem-reader-<uid>   写：mem-writer   整理：mem-consolidator'
+grep -E '^(MEM_READER_PASSWORD|MEM_WRITER_PASSWORD|MEM_CONSOLIDATOR_PASSWORD)=' "$ENV_FILE" \
+  | sed 's/=.*/=<已设置>/' | sed 's/^/  /'
+echo '  ⚠️ Basic Auth 的密码会出现在 curl 的 argv 里（同机 ps 可见）；本机单用户可接受，'
+echo '     多用户/共享主机请改用 --netrc-file 或 API key。'
