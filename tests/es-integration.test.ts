@@ -12,63 +12,20 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
 import { after, before, describe, test } from 'node:test'
 
 import { bm25Body, knnBody } from '../src/es/dsl.ts'
 import { createEsClient, EsError, formatEsError } from '../src/es/http.ts'
 import { normalizeContent, sha256Hex } from '../src/fragment.ts'
+import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
 import type { EsTestEnv } from './helpers/es-env.ts'
 import { isLoopbackUrl, loadEsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__it'
 
-/** 直接用 https 发一条请求：用于清理（elastic 超级用户）与健康检查，不经过被测客户端 */
-function adminRequest(
-  env: EsTestEnv,
-  method: string,
-  path: string,
-  payload?: unknown,
-): Promise<{ status: number; text: string }> {
-  const target = new URL(path, env.url)
-  const transport = target.protocol === 'https:' ? httpsRequest : httpRequest
-  const ca = target.protocol === 'https:' ? readFileSync(env.caCertPath) : undefined
-  const body = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload), 'utf8')
-  const auth = `Basic ${Buffer.from(`${env.admin.username}:${env.admin.password}`, 'utf8').toString('base64')}`
-
-  return new Promise((resolve, reject) => {
-    const req = transport(
-      target,
-      {
-        method,
-        ca,
-        headers: {
-          authorization: auth,
-          'content-type': 'application/json',
-          ...(body ? { 'content-length': body.byteLength } : {}),
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }))
-      },
-    )
-    req.on('error', reject)
-    if (body) req.write(body)
-    req.end()
-  })
-}
-
 /** 删掉所有 domain=__it 的测试文档（幂等；索引不存在时忽略 404） */
 async function cleanupTestDocs(env: EsTestEnv): Promise<void> {
-  const res = await adminRequest(env, 'POST', `/${env.personalIndex}/_delete_by_query?refresh=true&conflicts=proceed`, {
-    query: { term: { domain: MARKER_DOMAIN } },
-  })
-  if (res.status === 404) return
-  assert.ok(res.status === 200, `清理失败：HTTP ${res.status}`)
+  await deleteByDomain(env, env.personalIndex, MARKER_DOMAIN)
 }
 
 const env = loadEsTestEnv()
@@ -172,13 +129,8 @@ function defineReadWriteTests(e: EsTestEnv): void {
     after(async () => {
       await cleanupTestDocs(e)
       // 清理必须真的清干净，否则下一次跑会被残留文档干扰
-      const res = await adminRequest(e, 'POST', `/${e.personalIndex}/_search`, {
-        size: 0,
-        query: { term: { domain: MARKER_DOMAIN } },
-      })
-      assert.equal(res.status, 200)
-      const total = (JSON.parse(res.text) as { hits: { total: { value: number } } }).hits.total.value
-      assert.equal(total, 0, `清理后仍有 ${total} 条 domain=${MARKER_DOMAIN} 的残留文档`)
+      const left = await countByDomain(e, e.personalIndex, MARKER_DOMAIN)
+      assert.equal(left, 0, `清理后仍有 ${left} 条 domain=${MARKER_DOMAIN} 的残留文档`)
     })
 
     test('BM25 命中，且 _source 不回传 embedding（M2 判据）', async () => {

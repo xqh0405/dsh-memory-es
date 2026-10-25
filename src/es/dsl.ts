@@ -137,3 +137,24 @@ export function knnBody(
     },
   }
 }
+
+/**
+ * 精确去重查询：按 `content_sha256` + 状态命中至多一条，给 `memory_save` 的幂等闸用。
+ *
+ * 为什么用 term 而不是 BM25 相似度：内容完全相同才算重复（§7.4 的幂等口径是
+ * “归一化后正文哈希”），相似度召回会把「改了一个词的新事实」判成重复，那是错的。
+ */
+export function dedupeBody(sha256: string, options: { status?: string | null } = {}): SearchBody {
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw new Error('dedupeBody: 需要 64 位小写十六进制 sha256')
+  }
+  return {
+    size: 1,
+    _source: { excludes: [...DEFAULT_SOURCE_EXCLUDES] },
+    query: {
+      bool: {
+        filter: [{ term: { content_sha256: sha256 } }, ...buildFilters({ status: options.status })],
+      },
+    },
+  }
+}

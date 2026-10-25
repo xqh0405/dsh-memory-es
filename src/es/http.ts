@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import type { Hit } from '../fragment'
+import type { Hit } from '../fragment.ts'
 
 /** 错误分类：既决定要不要重试，也决定给模型看哪句提示 */
 export type EsErrorKind =

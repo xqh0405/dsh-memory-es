@@ -11,8 +11,9 @@
 | 权限隔离 | **已验证**：`scripts/verify-isolation.sh` 11/11 PASS |
 | embedding | **已就位**：`bge-m3`（1024 维，0.20 s/条） |
 | 插件骨架（S1） | **已完成**：Config + fail-fast、`fragment.ts` 纯函数契约、tsdown 单产物 |
-| ES 层（S2） | **已完成**：`es/http.ts`（TLS CA / Basic Auth / 超时 / 12 类错误映射 / 409·429 重试）、`es/dsl.ts`（BM25 + kNN body）；`npm test` 46/46 |
-| 工具层（S3+） | **未开始**：`memory_save` / `memory_search` / `memory_update_status` |
+| ES 层（S2） | **已完成**：`es/http.ts`（TLS CA / Basic Auth / 超时 / 12 类错误映射 / 409·429 重试）、`es/dsl.ts`（BM25 + kNN + 去重 body） |
+| 写入工具（S3） | **已完成**：`memory_save`（身份注入 / 幂等去重 / embedding 降级 / F3）、`embedding.ts`（Ollama `/api/embed`）；`npm test` 89/89 |
+| 检索与治理（S4+） | **未开始**：`memory_search`（双路 + RRF）、`memory_update_status`、`memory_promote` |
 
 ## 快速开始
 
@@ -25,8 +26,9 @@
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig
-npm test                      # 全部 46 例（集成测试要 ES 在跑）
+npm test                      # 全部 89 例（集成测试要 ES 在跑；save 集成还要 Ollama）
 npm test -- es-integration    # 只跑真实 ES 的集成用例
+npm test -- save-integration  # 只跑 memory_save 闭环（真 ES + 真 Ollama）
 ```
 
 密码在 `deploy/es/.env`（600，已 gitignore）；证书与数据在 `deploy/es/{certs,data}`（不提交）。
