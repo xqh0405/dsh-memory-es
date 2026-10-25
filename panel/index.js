@@ -37,15 +37,50 @@ function mergeConfig(inherited, override) {
   return merged
 }
 
+function entryLabels(item) {
+  const entry = item.entry ?? {}
+  return [entry.id, entry.name].filter((value) => typeof value === 'string' && value !== '')
+}
+
+/**
+ * 找 `dsh-memory-es` 的配置行。
+ *
+ * 实测这台实例里 `configuration()` 的条目是 **bundle include 层**（id 形如
+ * `include:dsh-memory-es`，`name` 为空），所以按「精确 → 后缀 → 包含」逐级匹配，
+ * 并优先选真带 `es.url` 的那条（空条目会命中但没配置）。
+ */
 function findEntryRow(ctx) {
   const editor = ctx.get('configEditor')
   if (!editor) return { ok: false, error: 'configEditor 服务不可用（无法读取插件配置）' }
-  const row = editor.configuration().find((item) => {
-    const entry = item.entry ?? {}
-    return entry.name === ENTRY_ID || entry.id === ENTRY_ID
-  })
-  if (!row) return { ok: false, error: `没有找到 ${ENTRY_ID} 的配置行（插件是否已安装？）` }
-  return { ok: true, value: mergeConfig(row.inherited, row.override) }
+  const rows = editor.configuration()
+  const matches = (item, mode) => {
+    const labels = entryLabels(item)
+    return labels.some((label) => {
+      if (mode === 'exact') return label === ENTRY_ID
+      if (mode === 'suffix') return label.endsWith(`:${ENTRY_ID}`)
+      return label.includes(ENTRY_ID) && !label.includes('panel')
+    })
+  }
+
+  const candidates = [
+    ...rows.filter((item) => matches(item, 'exact')),
+    ...rows.filter((item) => matches(item, 'suffix')),
+    ...rows.filter((item) => matches(item, 'contains')),
+  ]
+  if (candidates.length === 0) {
+    return { ok: false, error: `没有找到 ${ENTRY_ID} 的配置行（共 ${rows.length} 条）` }
+  }
+  // 挑第一个真的带 es.url 的（同 id 可能出现空条目）
+  for (const row of candidates) {
+    const merged = mergeConfig(row.inherited, row.override)
+    if (merged.es.url !== '' && merged.identity.userId !== '') {
+      return { ok: true, value: merged, label: entryLabels(row).join('|') }
+    }
+  }
+  return {
+    ok: false,
+    error: `找到 ${candidates.length} 条候选但没有一条含完整配置（es.url/userId）；label=${entryLabels(candidates[0]).join('|')}`,
+  }
 }
 
 /** 每次请求现读配置 → 配置改了面板不用重启 */
@@ -122,7 +157,12 @@ async function handleOverview(ctx, res) {
   const client = createReadClient(() => resolveClientConfig(ctx))
 
   const [health, personalCount, teamCount, pendingCount, personalRecent, teamRecent] = await Promise.all([
-    client.health().catch((error) => ({ error: String(error.message ?? error) })),
+    // 用「读一次个人库」当可达性探测：reader 角色没有 cluster:monitor/health 权限，
+    // 直接打 /_cluster/health 会 403，把健康的库误判成 down（2026-10-25 踩过）。
+    client
+      .count(names.personal)
+      .then(() => ({ ok: true }))
+      .catch((error) => ({ error: String(error.message ?? error) })),
     client
       .search(names.personal, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
       .then((r) => num(r.hits?.total?.value))
@@ -164,7 +204,8 @@ async function handleOverview(ctx, res) {
     value: {
       es: {
         reachable: !health.error,
-        status: str(health.status),
+        // 读不到集群健康（权限不足），这里不编造状态；可达性由上面的索引读探测给出
+        status: '',
         error: health.error ? String(health.error) : '',
       },
       counts: { personal: personalCount, team: teamCount, pending: pendingCount, audit: null },
@@ -176,6 +217,7 @@ async function handleOverview(ctx, res) {
         defaultDomain: config.defaults.domain,
         embedding: { model: config.embedding.model, dims: config.embedding.dims, url: config.embedding.url },
         hasCredentials: Boolean(config.identity.readUsername && config.identity.readPassword),
+        entryLabel: configRow.label ?? '',
       },
     },
   })
@@ -269,20 +311,70 @@ async function handle(ctx, req, res) {
   }
 }
 
-/** 宿主半边入口：注册路由，插件卸载时自动摘掉 */
+/** 自检：直接调用自己的 handler（不过 HTTP，绕开登录门禁），结果只打一行日志。
+ *  这样"面板能不能取到数据"不依赖人眼：重启后看一行日志就知道。 */
+async function selfTest(ctx) {
+  const call = (routePath) => new Promise((resolve) => {
+    const res = {
+      statusCode: 0,
+      writeHead(status) {
+        this.statusCode = status
+      },
+      end(body) {
+        resolve({ status: this.statusCode, body: String(body ?? '') })
+      },
+    }
+    handle(ctx, { method: 'GET', url: `${ROUTE}${routePath}` }, res).catch((error) =>
+      resolve({ status: 0, body: String(error?.message ?? error) }),
+    )
+  })
+
+  const result = await call('/overview')
+
+  if (result.status !== 200) {
+    console.error(`[memory-es-panel] 自检失败 HTTP ${result.status} ${result.body.slice(0, 240)}`)
+    return
+  }
+  try {
+    const payload = JSON.parse(result.body)
+    const counts = payload.value?.counts ?? {}
+    const es = payload.value?.es ?? {}
+    // 用 stderr 输出：实测 ctx.logger.info 不落 dsh 的启动日志，console.error 会（一行/次启动，不算噪音）
+    // 第二个接口也跑一遍：/memories 覆盖查询构造与分页投影
+    const list = await call('/memories?size=2&includePending=1')
+    let listInfo = `HTTP ${list.status}`
+    try {
+      const body = JSON.parse(list.body)
+      listInfo = body.ok ? `ok total=${body.value?.total} rows=${body.value?.rows?.length}` : `err ${body.error}`
+    } catch {
+      listInfo = `HTTP ${list.status} 非 JSON`
+    }
+    console.error(
+      `[memory-es-panel] 自检通过 entry=${payload.value?.config?.entryLabel ?? '?'} es=${es.reachable ? 'up' : 'down'} ` +
+        `personal=${counts.personal} team=${counts.team} pending=${counts.pending} recent=${payload.value?.recent?.length ?? 0} | list: ${listInfo}`,
+    )
+  } catch {
+    console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
+  }
+}
+
+/** 宿主半边入口：注册路由，插件卸载时自动摘掉。 */
 export function apply(ctx) {
   ctx.effect(() => {
-    const webServer = ctx.get('webServer')
-    if (!webServer) {
-      ctx.logger?.warn?.('dsh-memory-es-panel: 没有 webServer 服务，面板 API 不注册')
-      return
-    }
-    const dispose = webServer.register({
+    const dispose = ctx.webServer.register({
       kind: 'prefix',
       path: ROUTE,
       handler: (req, res) => handle(ctx, req, res),
     })
-    ctx.logger?.info?.(`dsh-memory-es-panel: 已注册只读路由 ${ROUTE}/{overview,memories}`)
+    console.error(`[memory-es-panel] 已注册只读路由 ${ROUTE}/{overview,memories}`)
+    void selfTest(ctx)
     return dispose
   })
 }
+
+/**
+ * 依赖声明：**必须有**。Cordis 里访问未注入的服务会直接抛
+ * `cannot get property "webServer" without inject`；而 `ctx.get()` 是静默返回 undefined，
+ * 表现为"路由没注册、页面 404"，比抛错难查得多（2026-10-25 就是这么栽的）。
+ */
+export const inject = ['webServer', 'configEditor']
