@@ -46,7 +46,7 @@ node consolidate/cli.ts --approve <doc_id>          # 通过 → 进入检索
 node consolidate/cli.ts --reject <doc_id> --reason "结论与线上不符"
 node consolidate/cli.ts --withdraw <doc_id> --reason "这条知识已作废"
 
-# 设置面板（独立 bundle：Settings → 记忆库，只读样板）
+# 设置面板（独立 bundle：Settings → 记忆库；P1 = 概览 + 记忆浏览，只读）
 #   装在 .125 的 web profile；改完要重启 dsh 才生效
 ls panel/            # client.js 客户端 / index.js 宿主 / cordis.patch.yml
 
