@@ -172,3 +172,39 @@ test('审核动作：驳回仍然要求填原因（先于权限返回 400）', a
   assert.equal(res.statusCode, 400)
   assert.match(JSON.parse(res.body).error, /原因/)
 })
+
+// ── validateConfig：单账号与旧三账号两条路径 ──────────────────────────────
+// src/config.ts 是 TS：Node 22.18+ 可直接 strip 类型导入（这里只取纯函数 validateConfig）
+const { validateConfig } = await import('../src/config.ts').catch((error) => {
+  console.error('[skip] 无法导入 src/config.ts:', String(error?.message ?? error))
+  return { validateConfig: null }
+})
+if (validateConfig) {
+  const base = {
+    es: { url: 'https://x:9200', caCertPath: '', requestTimeoutMs: 8000 },
+    index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
+    embedding: { url: 'http://127.0.0.1:11434', model: 'bge-m3', dims: 1024 },
+    retrieval: { topK: 10, rrfK: 60, marginFloor: 0.02, limit: 20 },
+    defaults: { domain: 'general' },
+  }
+  const identity = (extra) => ({
+    userId: 'xqh', username: '', password: '', teamWrite: false,
+    readUsername: '', readPassword: '', writerUsername: '', writerPassword: '',
+    consolidatorUsername: '', consolidatorPassword: '', ...extra,
+  })
+
+  test('validateConfig：单账号齐全时通过（不要求 readPassword）', () => {
+    const problems = validateConfig({ ...base, identity: identity({ username: 'mem-user-xqh', password: 'p', teamWrite: true }) })
+    assert.deepEqual(problems, [])
+  })
+
+  test('validateConfig：既没单账号也没 readPassword 时明确报错', () => {
+    const problems = validateConfig({ ...base, identity: identity({}) })
+    assert.ok(problems.some((p) => p.includes('readPassword')), `实际：${problems}`)
+  })
+
+  test('validateConfig：userId 缺失仍然拦（审计要记人）', () => {
+    const problems = validateConfig({ ...base, identity: identity({ userId: '', username: 'u', password: 'p', teamWrite: true }) })
+    assert.ok(problems.some((p) => p.includes('userId')), `实际：${problems}`)
+  })
+}
