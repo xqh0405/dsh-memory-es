@@ -11,6 +11,8 @@
 #   scripts/memory-cron.sh disable       # 关闭总开关
 #   scripts/memory-cron.sh consolidate   # 整理任务（默认 dry-run；APPLY=1 才真写）
 #   scripts/memory-cron.sh export        # Markdown 镜像导出
+#   scripts/memory-cron.sh check-certs   # 证书到期检查（默认 30 天内告警）
+#   scripts/memory-cron.sh prune-audit   # 审计保留清理（默认只 dry-run；PRUNE_APPLY=1 才删）
 #
 # 为什么不把「快照」放进来：ES 自己的 SLM（`_slm/policy/dsh_memory_daily`）已经在跑，
 # 再用 cron 触发一次只是重复造轮子、还多一个会坏的环节（2026-10-25 巡检结论）。
@@ -150,6 +152,49 @@ cmd_export() {
   return "$rc"
 }
 
+cmd_check_certs() {
+  local thr="${CERT_WARN_DAYS:-30}"
+  local p12="$ROOT/deploy/es/certs/elastic-certificates.p12"
+  local pass
+  pass=$(sed -n 's/^CERT_PASS=//p' "$ROOT/deploy/es/.env" 2>/dev/null | tail -1)
+  if [ ! -f "$p12" ]; then
+    echo "证书检查：找不到 $p12（跳过）"
+    return 0
+  fi
+  local not_after end_ts now_ts days
+  not_after=$(openssl pkcs12 -in "$p12" -clcerts -nokeys -passin pass:"$pass" 2>/dev/null \
+    | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+  if [ -z "$not_after" ]; then
+    echo "证书检查：读不到证书有效期（CERT_PASS 不对？）"
+    return 1
+  fi
+  end_ts=$(date -d "$not_after" +%s 2>/dev/null || echo 0)
+  now_ts=$(date +%s)
+  days=$(( (end_ts - now_ts) / 86400 ))
+  echo "证书到期：$not_after（剩余 ${days} 天，告警阈值 ${thr} 天）"
+  if [ "$days" -lt "$thr" ]; then
+    echo "!! 证书将在 ${days} 天后过期：用 CERT_DAYS=3650 FORCE=1 scripts/es-certs.sh 重签，然后重启 ES 并同步客户端 ca.crt"
+    return 1
+  fi
+  return 0
+}
+
+cmd_prune_audit() {
+  local apply=0
+  [ "${PRUNE_APPLY:-0}" = "1" ] && apply=1
+  log_line "prune-audit start (apply=$apply keep=${AUDIT_KEEP_DAYS:-90}d)"
+  local out rc
+  if [ "$apply" = "1" ]; then
+    out=$("$ROOT/scripts/prune-audit.sh" --apply 2>&1)
+  else
+    out=$("$ROOT/scripts/prune-audit.sh" 2>&1)
+  fi
+  rc=$?
+  log_line "prune-audit end rc=$rc"
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
 case "${1:-}" in
   status) cmd_status ;;
   enable)
@@ -163,6 +208,8 @@ case "${1:-}" in
     echo '已关闭：定时任务只打印 disabled，不做任何事'
     ;;
   consolidate) cmd_consolidate ;;
+  check-certs) cmd_check_certs ;;
+  prune-audit) cmd_prune_audit ;;
   export) cmd_export ;;
   *)
     cat >&2 <<'USAGE'

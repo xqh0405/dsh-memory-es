@@ -492,7 +492,10 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
   const reason = str(input.reason).trim()
-  const actor = str(input.actor).trim() || 'panel'
+  // 审计要能追到"谁"：actor 统一带 userId（panel:xqh / cli:xqh），
+  // 因为 ES 免费版没有安全审计日志，memory_audit 是唯一的人维度证据
+  const actorBase = str(input.actor).trim() || 'panel'
+  const actor = actorBase.includes(':') ? actorBase : `${actorBase}:${configRow.value.identity.userId}`
 
   if ((action === 'reject' || action === 'withdraw') && reason === '') {
     return json(res, 400, { ok: false, error: `${action} 必须填写原因` })

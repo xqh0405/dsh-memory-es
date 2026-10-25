@@ -66,7 +66,8 @@ function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     mode: 'consolidate',
     target: null,
-    reviewer: process.env.CONSOLIDATE_REVIEWER ?? 'cli',
+    // 默认审计 actor = cli:<userId>（可在 env 里覆盖），与面板的 panel:<userId> 对齐
+    reviewer: process.env.CONSOLIDATE_REVIEWER ?? `cli:${process.env.MEM_USER_ID ?? 'unknown'}`,
     reason: '',
     apply: false,
     dryRun: false,

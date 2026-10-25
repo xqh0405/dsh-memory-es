@@ -77,7 +77,9 @@ echo '  mem_consolidator → 读个人库 + 写团队库 + 审计读写（memory
 echo "== 2/3 用户 =="
 READER="mem-reader-$USER_ID"
 PUB=$(get_env MEM_READER_PASSWORD); [ -n "${PUB:-}" ] || { PUB=$(rand_pw); set_env MEM_READER_PASSWORD "$PUB"; }
-PWB=$(get_env MEM_WRITER_PASSWORD); [ -n "${PWB:-}" ] || { PWB=$(rand_pw); set_env MEM_WRITER_PASSWORD "$PWB"; }
+# MEM_WRITER_PASSWORD 不再生成：单账号（mem-user-<uid>）已取代 mem-writer；
+# 旧的键如果还在 .env 里只是历史残留，别再用它当回落。
+# MEM_CONSOLIDATOR_PASSWORD 仍保留（整理任务跨用户扫库时要用）
 PWC=$(get_env MEM_CONSOLIDATOR_PASSWORD); [ -n "${PWC:-}" ] || { PWC=$(rand_pw); set_env MEM_CONSOLIDATOR_PASSWORD "$PWC"; }
 
 admin -X PUT "$ES/_security/user/$READER" -d "{\"password\":\"$PUB\",\"roles\":[\"mem_personal_$USER_ID\",\"mem_team_read\"]}" >/dev/null
@@ -104,7 +106,9 @@ ES_DIR="$ES_DIR" ES_URL="$ES" bash "$(dirname "$0")/init-user.sh" "$USER_ID" --t
 echo '完成。认证方式 = Basic Auth（用户名 + 密码），不再创建 API key。'
 echo "  用户账号：mem-user-$USER_ID（个人库读写 + 团队库读写）"
 echo '  遗留：mem-reader-<uid> / mem-consolidator 仍保留（兼容未迁移的调用）；mem-writer 已不再创建'
-grep -E '^(MEM_READER_PASSWORD|MEM_WRITER_PASSWORD|MEM_CONSOLIDATOR_PASSWORD)=' "$ENV_FILE" \
+grep -E '^(MEM_READER_PASSWORD|MEM_CONSOLIDATOR_PASSWORD)=' "$ENV_FILE" \
   | sed 's/=.*/=<已设置>/' | sed 's/^/  /'
+grep -q '^MEM_WRITER_PASSWORD=.' "$ENV_FILE" \
+  && echo '  提示：.env 里还有遗留的 MEM_WRITER_PASSWORD（不再生成/使用，可手工删掉）'
 echo '  凭据通过临时配置文件传给 curl（--config，权限 600、返回前删除），密码不进 argv/ps。'
 echo '     仍需注意：密码本身以明文存在 .env（600）；要更强隔离应改用 API key + 最小角色。'
