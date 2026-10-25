@@ -103,3 +103,72 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
   assert.equal(result.ok, false)
   assert.match(result.error, /configEditor/)
 })
+
+// ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
+const { handleCapabilities, handleReviewAction } = await import('../panel/index.js')
+
+const fs = await import('node:fs')
+const os = await import('node:os')
+const path = await import('node:path')
+const { Readable } = await import('node:stream')
+
+function ctxWith(identity) {
+  const row = {
+    entry: { id: 'include:dsh-memory-es' },
+    inherited: {
+      es: { url: 'https://example:9200', caCertPath: '' },
+      index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
+      identity,
+    },
+    override: undefined,
+  }
+  return { get: (name) => (name === 'configEditor' ? { configuration: () => [row] } : undefined) }
+}
+
+function fakeRes() {
+  return {
+    statusCode: 0,
+    body: '',
+    writeHead(status) {
+      this.statusCode = status
+    },
+    end(body) {
+      this.body = String(body ?? '')
+    },
+  }
+}
+
+const READER = { userId: 'xqh', readUsername: 'mem-reader-xqh', readPassword: 'x', writerUsername: 'mem-writer', writerPassword: 'y' }
+const ADMIN = { ...READER, consolidatorUsername: 'mem-consolidator', consolidatorPassword: 'z' }
+
+test('capabilities：普通账号 canReview=false、role=reader', async () => {
+  const res = fakeRes()
+  await handleCapabilities(ctxWith(READER), res)
+  const body = JSON.parse(res.body)
+  assert.equal(body.value.canReview, false)
+  assert.equal(body.value.role, 'reader')
+})
+
+test('capabilities：配了整理身份 canReview=true、role=reviewer', async () => {
+  const res = fakeRes()
+  await handleCapabilities(ctxWith(ADMIN), res)
+  const body = JSON.parse(res.body)
+  assert.equal(body.value.canReview, true)
+  assert.equal(body.value.role, 'reviewer')
+})
+
+test('审核动作：没有整理身份直接 403，且不碰 ES', async () => {
+  const res = fakeRes()
+  const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ confirm: true, reason: 'x' }))]), { method: 'POST' })
+  await handleReviewAction(ctxWith(READER), res, 'doc-1', 'approve', req)
+  assert.equal(res.statusCode, 403, '必须是 403 权限拒绝，不是 500')
+  assert.match(JSON.parse(res.body).error, /整理身份/)
+})
+
+test('审核动作：驳回仍然要求填原因（先于权限返回 400）', async () => {
+  const res = fakeRes()
+  const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ confirm: true, reason: '' }))]), { method: 'POST' })
+  await handleReviewAction(ctxWith(ADMIN), res, 'doc-1', 'reject', req)
+  assert.equal(res.statusCode, 400)
+  assert.match(JSON.parse(res.body).error, /原因/)
+})

@@ -465,8 +465,17 @@ async function handleReviewAction(ctx, res, docId, action, req) {
     return json(res, 400, { ok: false, error: '缺少 confirm:true（写操作要显式确认）' })
   }
 
+  // 权限前置：团队库写入只允许整理身份。普通账号（只有 reader/writer）不该走到构造客户端那步再报 500
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const identity = configRow.value.identity
+  if (!identity.consolidatorUsername || !identity.consolidatorPassword) {
+    return json(res, 403, {
+      ok: false,
+      error: '当前部署没有配置整理身份（identity.consolidatorPassword），审核动作不可用；请联系管理员',
+    })
+  }
+
   const config = configRow.value
   const names = indexNames(config)
   const writeClient = createReadClient(() => resolveClientConfig(ctx, 'consolidator'))
@@ -701,6 +710,24 @@ async function handleConfigWrite(ctx, res, req) {
   })
 }
 
+/** GET /capabilities：当前部署能做到什么（前端据此决定显示哪些标签、哪些按钮可点） */
+async function handleCapabilities(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  const value = configRow.ok ? configRow.value : null
+  const canReview = Boolean(value?.identity?.consolidatorUsername && value?.identity?.consolidatorPassword)
+  json(res, 200, {
+    ok: true,
+    value: {
+      // 审核 = 写团队库的能力；没有整理身份就是只读部署
+      canReview,
+      canMaintain: cliAvailable(),
+      // 让界面能说明"你现在是什么身份"，而不是让人猜按钮为什么灰
+      role: canReview ? 'reviewer' : 'reader',
+      userId: value?.identity?.userId ?? '',
+    },
+  })
+}
+
 /** GET /facets：浏览页过滤器的候选值（domain / memory_type，按文档数降序） */
 async function handleFacets(ctx, res) {
   const configRow = findEntryRow(ctx)
@@ -890,6 +917,7 @@ async function handle(ctx, req, res) {
     if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res)
     if (path === '/maintenance/mirror' && req.method === 'GET') return await handleMirrorFile(ctx, res, url)
     if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
+    if (path === '/capabilities' && req.method === 'GET') return await handleCapabilities(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
@@ -1141,13 +1169,22 @@ async function selfTest(ctx) {
       maintInfo = `HTTP ${maintRes.status} 非 JSON`
     }
 
+    const capsRes = await call('/capabilities')
+    let capsInfo = `HTTP ${capsRes.status}`
+    try {
+      const body = JSON.parse(capsRes.body)
+      capsInfo = body.ok ? `role=${body.value?.role} canReview=${body.value?.canReview}` : `err ${body.error}`
+    } catch {
+      capsInfo = `HTTP ${capsRes.status} 非 JSON`
+    }
+
     console.error(
       `[记忆库面板] 自检通过 | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
         `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
         `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
         `审核: ${pendingInfo} | 过滤候选: ${facetsInfo} | 镜像预览: ${mirrorInfo} | ` +
-        `配置: ${configInfo} | 维护: ${maintInfo}`,
+        `权限: ${capsInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
@@ -1175,6 +1212,15 @@ export function apply(ctx) {
  * 表现为"路由没注册、页面 404"，比抛错难查得多（2026-10-25 就是这么栽的）。
  */
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
-export { findEntryRow, indexNames, mergeConfig, pendingQuery, projectHit, entryLabels }
+export {
+  entryLabels,
+  findEntryRow,
+  handleCapabilities,
+  handleReviewAction,
+  indexNames,
+  mergeConfig,
+  pendingQuery,
+  projectHit,
+}
 
 export const inject = ['webServer', 'configEditor']

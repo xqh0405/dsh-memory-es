@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'v11-34044c'
+    const BUILD = 'perm-574db8'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -77,6 +77,7 @@ window.__ModuleLoader__.load({
       reviewAuditFailed: '（审计写入失败，请查日志）',
       browseTruncated: '结果窗口已到上限 500 条，请用搜索缩小范围',
       reviewNoWrite: '未配置整理身份（identity.consolidatorPassword），审核动作不可用。',
+      capsReader: '当前是只读部署（没有整理身份）：审核台不显示，团队库只能看不能改。',
       reviewBusy: '处理中…',
       maintConsolidate: '整理任务',
       maintLastRun: '上次运行',
@@ -188,6 +189,7 @@ window.__ModuleLoader__.load({
       reviewAuditFailed: '(audit write failed — check the log)',
       browseTruncated: 'result window hit the 500-document cap; narrow the search',
       reviewNoWrite: 'Consolidator identity (identity.consolidatorPassword) is not configured; review actions are unavailable.',
+      capsReader: 'Read-only deployment (no consolidator identity): the review tab is hidden and the team library is read-only.',
       reviewBusy: 'Working…',
       maintExportNow: 'Export now',
       maintSnapshot: 'Snapshots',
@@ -505,7 +507,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
-    function Maintenance({ t }) {
+    function Maintenance({ t, canReview }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
 
       const [busy, setBusy] = React.useState('')
@@ -579,8 +581,8 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button',
               style: { ...S.btn, opacity: busy ? 0.5 : 1, borderColor: 'var(--dsw-alias-state-warn-primary)' },
-              disabled: Boolean(busy) || !data.cli.available,
-              title: t('maintApplyWarn'),
+              disabled: Boolean(busy) || !data.cli.available || canReview === false,
+              title: canReview === false ? t('reviewNoWrite') : t('maintApplyWarn'),
               onClick: () => {
                 if (!window.confirm(`${t('maintApply')}: ${t('maintApplyWarn')}`)) return
                 run('apply')
@@ -1223,6 +1225,14 @@ window.__ModuleLoader__.load({
 
     function MemoryPanel({ t }) {
       const [tab, setTab] = React.useState('overview')
+      // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
+      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader' })
+
+      React.useEffect(() => {
+        apiGet('/capabilities')
+          .then((value) => setCaps({ loaded: true, canReview: Boolean(value.canReview), canMaintain: Boolean(value.canMaintain), role: value.role ?? '' }))
+          .catch(() => setCaps({ loaded: true, canReview: false, canMaintain: false, role: 'reader' }))
+      }, [])
       const [overview, setOverview] = React.useState({ loading: true, error: '', data: null })
 
       const loadOverview = React.useCallback(() => {
@@ -1247,7 +1257,14 @@ window.__ModuleLoader__.load({
             }
           })()}`),
         h('div', { style: S.tabs },
-          [['overview', t('tabOverview')], ['browse', t('tabBrowse')], ['review', t('tabReview')], ['maint', t('tabMaint')], ['config', t('tabConfig')]].map(([value, label]) =>
+          [
+            ['overview', t('tabOverview')],
+            ['browse', t('tabBrowse')],
+            // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
+            ...(caps.canReview ? [['review', t('tabReview')]] : []),
+            ['maint', t('tabMaint')],
+            ['config', t('tabConfig')],
+          ].map(([value, label]) =>
             h('button', {
               key: value,
               type: 'button',
@@ -1257,7 +1274,7 @@ window.__ModuleLoader__.load({
           ),
         ),
         tab === 'maint'
-          ? h(Maintenance, { t })
+          ? h(Maintenance, { t, canReview: caps.canReview })
           : tab === 'config'
           ? h(Config, { t })
           : tab === 'review'
