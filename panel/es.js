@@ -6,7 +6,8 @@
  *
  * 约束（与主插件同源）：
  *  · 永不 `rejectUnauthorized: false`：自签 CA 由 `caCertPath` 读进来校验；
- *  · 只做只读动作（`_search` / `_cluster/health` / `_cat/indices`），面板不写库。
+ *  · 读侧只做 `_search` / `_count`；写侧（审核动作、自检种子）只有 `_update` / `_doc`，
+ *    且必须用整理身份 —— 面板自己没有集群级权限，不碰 `_cluster/*`、`_cat/*`。
  */
 import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
@@ -93,8 +94,6 @@ export function createReadClient(resolveConfig) {
   return {
     search: (index, body) => call(`/${encodeURIComponent(index)}/_search`, { method: 'POST', body }),
     count: (index) => call(`/${encodeURIComponent(index)}/_count`),
-    health: () => call('/_cluster/health'),
-    catIndices: (names) => call(`/_cat/indices/${names.join(',')}?format=json&h=index,docs.count,store.size,health`),
     /** 部分更新（审核动作用；需要 index 权限，只有整理身份有） */
     update: (index, id, doc, options = {}) => {
       const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''

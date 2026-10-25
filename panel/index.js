@@ -1174,4 +1174,7 @@ export function apply(ctx) {
  * `cannot get property "webServer" without inject`；而 `ctx.get()` 是静默返回 undefined，
  * 表现为"路由没注册、页面 404"，比抛错难查得多（2026-10-25 就是这么栽的）。
  */
+// 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
+export { findEntryRow, indexNames, mergeConfig, pendingQuery, projectHit, entryLabels }
+
 export const inject = ['webServer', 'configEditor']
