@@ -11,16 +11,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=${USER_ID:-xqh}
 PERSONAL="personal_memory_$USER_ID"
 
-es() { curl -sS --fail-with-body --cacert "$CA" -u "elastic:$PASS" -H 'Content-Type: application/json' "$@"; }
+es() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
 exists() {
-  code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" -u "elastic:$PASS" -I "$ES/$1")
+  code=$(es_curl "elastic:$PASS" -o /dev/null -w '%{http_code}' -I "$ES/$1")
   [ "$code" = "200" ]
 }
 
@@ -103,6 +104,10 @@ put_index team_knowledge <<'JSON'
 
       "status":            { "type": "keyword" },
       "review_state":      { "type": "keyword" },
+      "reviewed_at":       { "type": "date" },
+      "reviewed_by":       { "type": "keyword" },
+      "reject_reason":     { "type": "keyword" },
+      "conflict_with":     { "type": "keyword" },
       "supersedes":        { "type": "keyword" },
       "superseded_by":     { "type": "keyword" },
       "updated_at":        { "type": "date" }

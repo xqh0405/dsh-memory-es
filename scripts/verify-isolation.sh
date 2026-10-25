@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="$ROOT/deploy/es"
 ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 ES="https://127.0.0.1:9200"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
@@ -24,20 +25,24 @@ chk() { # chk <期望码> <实际码> <说明>
   if [ "$2" = "$1" ]; then echo "  PASS [$2] $3"; pass=$((pass+1));
   else echo "  FAIL [期望 $1 实际 $2] $3"; fail=$((fail+1)); fi
 }
+cred_of() { # cred_of <凭证类型> → 输出 user:pass（只进临时配置文件，不进 argv）
+  case "$1" in
+    admin) echo "elastic:$PASS" ;;
+    read)  echo "$READ_USER:$READ_PASS" ;;
+    write) echo "mem-writer:$WRITE_PASS" ;;
+    cons)  echo "mem-consolidator:$CONS_PASS" ;;
+    *) echo "未知凭证类型: $1" >&2; return 2 ;;
+  esac
+}
 code() { # code <凭证类型> <method> <path> [body]
   local auth=$1 method=$2 path=$3 body=${4:-}
-  local hdr=()
-  case "$auth" in
-    admin)  hdr=(-u "elastic:$PASS") ;;
-    read)   hdr=(-u "$READ_USER:$READ_PASS") ;;
-    write)  hdr=(-u "mem-writer:$WRITE_PASS") ;;
-    cons)   hdr=(-u "mem-consolidator:$CONS_PASS") ;;
-  esac
+  local cred
+  cred=$(cred_of "$auth") || return 2
   if [ -n "$body" ]; then
-    curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" "${hdr[@]}" \
+    es_curl "$cred" -o /dev/null -w '%{http_code}' \
       -H 'Content-Type: application/json' -X "$method" "$ES$path" -d "$body"
   else
-    curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" "${hdr[@]}" -X "$method" "$ES$path"
+    es_curl "$cred" -o /dev/null -w '%{http_code}' -X "$method" "$ES$path"
   fi
 }
 
@@ -92,12 +97,12 @@ print(json.dumps({"knn":{"field":"embedding","query_vector":vec,"k":3,"num_candi
                   "size":1,"_source":["memory_id","content"]}))
 PY
 )
-top=$(curl -sS --cacert "$CA" -u "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
+top=$(es_curl "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
   -X POST "$ES/$PERSONAL/_search" -d "$knn_body" \
   | python3 -c 'import sys,json;h=json.load(sys.stdin)["hits"]["hits"];print(h[0]["_source"]["memory_id"] if h else "NONE")')
 chk knn-probe "$top" "kNN 用中文问句召回命中（换说法）"
 
-bm25=$(curl -sS --cacert "$CA" -u "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
+bm25=$(es_curl "$READ_USER:$READ_PASS" -H 'Content-Type: application/json' \
   -X POST "$ES/$PERSONAL/_search" \
   -d '{"query":{"match":{"content":"win_price_practical"}},"size":1,"_source":["memory_id"]}' \
   | python3 -c 'import sys,json;h=json.load(sys.stdin)["hits"]["hits"];print(h[0]["_source"]["memory_id"] if h else "NONE")')

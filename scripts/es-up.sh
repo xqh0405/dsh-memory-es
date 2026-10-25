@@ -34,8 +34,9 @@ docker compose ps
 
 # 4) 用 CA 从宿主机验证
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 echo '--- 集群健康 ---'
-curl -sS --cacert "$CA" -u "elastic:$PASS" 'https://127.0.0.1:9200/_cluster/health?pretty' | head -20
+es_curl "elastic:$PASS" 'https://127.0.0.1:9200/_cluster/health?pretty' | head -20
 echo '--- 版本与插件 ---'
-curl -sS --cacert "$CA" -u "elastic:$PASS" 'https://127.0.0.1:9200/_cat/plugins?v&h=name,component,version'
+es_curl "elastic:$PASS" 'https://127.0.0.1:9200/_cat/plugins?v&h=name,component,version'

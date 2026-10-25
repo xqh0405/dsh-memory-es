@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
@@ -27,7 +28,7 @@ set_env() {
   fi
 }
 rand_pw() { openssl rand -base64 24 | tr -d '/+=' | cut -c1-24; }
-admin() { curl -sS --fail-with-body --cacert "$CA" -u "elastic:$PASS" -H 'Content-Type: application/json' "$@"; }
+admin() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
 echo "== 1/3 角色 =="
 admin -X PUT "$ES/_security/role/mem_personal_$USER_ID" -d @- >/dev/null <<JSON
@@ -49,22 +50,23 @@ admin -X PUT "$ES/_security/role/mem_writer" -d @- >/dev/null <<'JSON'
   "indices": [
     {
       "names": ["personal_memory_*"],
-      "privileges": ["index", "read", "create_index", "view_index_metadata"]
+      "privileges": ["index", "read", "view_index_metadata"]
     }
   ]
 }
 JSON
-echo '  mem_writer → 写个人库（通配 personal_memory_*）'
+echo '  mem_writer → 写个人库（通配 personal_memory_*；不含 create_index——建索引是 init-indices.sh 的活）'
 
 admin -X PUT "$ES/_security/role/mem_consolidator" -d @- >/dev/null <<'JSON'
 {
   "indices": [
     { "names": ["personal_memory_*"], "privileges": ["read", "view_index_metadata"] },
-    { "names": ["team_knowledge"], "privileges": ["index", "read", "view_index_metadata"] }
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] }
   ]
 }
 JSON
-echo '  mem_consolidator → 读个人库 + 写团队库'
+echo '  mem_consolidator → 读个人库 + 写团队库 + 审计读写（memory_audit；漏了它，重跑本脚本会把 S9 的权限覆盖回去）'
 
 # 认证方式：Basic Auth（用户名 + 密码）。
 # 不用 API key 的原因：灾备恢复后 .security 为空，key 必须重建、secret 不可复现，
@@ -97,5 +99,5 @@ echo '完成。认证方式 = Basic Auth（用户名 + 密码），不再创建 
 echo '  读：mem-reader-<uid>   写：mem-writer   整理：mem-consolidator'
 grep -E '^(MEM_READER_PASSWORD|MEM_WRITER_PASSWORD|MEM_CONSOLIDATOR_PASSWORD)=' "$ENV_FILE" \
   | sed 's/=.*/=<已设置>/' | sed 's/^/  /'
-echo '  ⚠️ Basic Auth 的密码会出现在 curl 的 argv 里（同机 ps 可见）；本机单用户可接受，'
-echo '     多用户/共享主机请改用 --netrc-file 或 API key。'
+echo '  凭据通过临时配置文件传给 curl（--config，权限 600、返回前删除），密码不进 argv/ps。'
+echo '     仍需注意：密码本身以明文存在 .env（600）；要更强隔离应改用 API key + 最小角色。'

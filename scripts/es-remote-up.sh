@@ -16,6 +16,7 @@ BASE="${BASE:-/docker/dsh/instances/xqh/es-memory}"
 REMOTE_DIR="$BASE/deploy/es-remote"
 ENV_FILE="$REMOTE_DIR/.env"
 CA="$REMOTE_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 IMG="docker.elastic.co/elasticsearch/elasticsearch:8.19.23"
 
 echo "== 0/5 前置检查 =="
@@ -91,9 +92,9 @@ cd "$REMOTE_DIR"
 
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 echo '--- 宿主侧健康（用 CA，不走 -k）---'
-curl -sS --cacert "$CA" -u "elastic:$PASS" 'https://127.0.0.1:9200/_cluster/health?pretty' | head -12
+es_curl "elastic:$PASS" 'https://127.0.0.1:9200/_cluster/health?pretty' | head -12
 echo '--- 插件 ---'
-curl -sS --cacert "$CA" -u "elastic:$PASS" 'https://127.0.0.1:9200/_cat/plugins?v&h=name,component,version'
+es_curl "elastic:$PASS" 'https://127.0.0.1:9200/_cat/plugins?v&h=name,component,version'
 echo '--- 证书 SAN（客户端必须用这里列出的名字访问）---'
 docker run --rm -v "$REMOTE_DIR/certs:/certs" "$IMG" bash -c \
   'openssl pkcs12 -in /certs/elastic-certificates.p12 -nokeys -passin pass:'"${CERT_PASS:-changeme}"' 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName' || true

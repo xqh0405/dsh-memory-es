@@ -28,6 +28,7 @@
 ./scripts/init-security.sh    # 角色 / 用户（Basic Auth）
 ./scripts/verify-isolation.sh # M1 判据：11 项断言，必须全 PASS
 ./scripts/es-down.sh          # 停（保留数据）
+# 脚本凭据：scripts/lib/curl-es.sh 用 600 临时配置文件传给 curl（密码不进 argv/ps）
 
 # 整理任务（S8）：个人记忆 → 团队库，默认 dry-run
 node consolidate/cli.ts                     # 只出候选报告，一条不写
@@ -52,7 +53,7 @@ ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-se
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig
-npm test                      # 全部 221 例（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
+npm test                      # 全部 221 例（Node ≥22.18：测试直接跑 .ts 依赖 type stripping）（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
 npm test -- es-integration    # 只跑真实 ES 的集成用例
 npm test -- save-integration  # 只跑 memory_save 闭环（真 ES + 真 Ollama）
 npm test -- search-integration # 只跑 memory_search 闭环（真 ES + 真 Ollama）

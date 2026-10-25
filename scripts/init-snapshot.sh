@@ -9,12 +9,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="$ROOT/deploy/es"
 ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 ES="https://127.0.0.1:9200"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 REPO=fs_repo
 POLICY=dsh_memory_daily
 
-es() { curl -sS --fail-with-body --cacert "$CA" -u "elastic:$PASS" -H 'Content-Type: application/json' "$@"; }
+es() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
 mkdir -p "$ES_DIR/snapshots"
 

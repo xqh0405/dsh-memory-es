@@ -16,20 +16,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 ENV_FILE="$ES_DIR/.env"
 CA="$ES_DIR/certs/ca.crt"
+source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=${USER_ID:-xqh}
 
 # --max-time：S9 迁移是运维脚本，宁可失败也不要静默挂住（本机单节点，10s 足够）
-admin() { curl -sS --max-time 10 --cacert "$CA" -u "elastic:$PASS" -H 'Content-Type: application/json' "$@"; }
+admin() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 # 必须用 -I（真正的 HEAD），不能用 `-X HEAD`：后者让 curl 依旧按响应头里的
 # Content-Length 等 body，而 HEAD 永远不会送 body → curl 一直挂着（2026-10-25 实测卡住）。
 exists() { admin -o /dev/null -w '%{http_code}' -I "$ES/$1" 2>/dev/null | grep -q '^200$'; }
 
 echo "== 1/4 个人索引：加 blocked_reason =="
 # 模板（给以后新建的 per-user 索引）
-admin -X PUT "$ES/_template/personal_memory" -d @- >/dev/null <<'JSON'
+# 必须用组合式 `_index_template`：`_template`（旧式）不接受 `template:` 包裹，
+# 会回 400 unknown key [template]——上一版没开 --fail-with-body，于是静默“成功”了两周（S9 巡检发现）。
+admin -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSON'
 {
   "index_patterns": ["personal_memory_*"],
   "priority": 100,
@@ -60,7 +63,7 @@ admin -X PUT "$ES/_template/personal_memory" -d @- >/dev/null <<'JSON'
   }
 }
 JSON
-echo '  模板 personal_memory 已更新'
+echo '  模板 personal_memory_template 已更新（含 blocked_reason）'
 
 # 已存在的个人索引（PUT _mapping 对新增字段是幂等的）
 for idx in $(admin "$ES/_cat/indices/personal_memory_*?h=index" 2>/dev/null); do
