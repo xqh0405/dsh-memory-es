@@ -89,8 +89,17 @@ make_key() {
   local name=$1 user=$2 pass=$3 envkey=$4
   local cur; cur=$(get_env "$envkey")
   if [ -n "${cur:-}" ]; then
-    echo "  $name 已存在，跳过（要重置：删 .env 里 $envkey 后重跑）"
-    return 0
+    # 关键：.env 里有值不代表还有效。灾备恢复后 .security 是空的，
+    # 旧 key 必然 401，直接跳过会把失效 key 留在配置里（客户端全线 401）。
+    # 所以先验活：200 才跳过，否则重建并覆盖 .env。
+    local code
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA" \
+      -H "Authorization: ApiKey $cur" "$ES/_security/_authenticate" 2>/dev/null || echo 000)
+    if [ "$code" = "200" ]; then
+      echo "  $name 仍有效，跳过"
+      return 0
+    fi
+    echo "  $name 已失效（HTTP $code）→ 重建"
   fi
   local encoded
   encoded=$(curl -sS --fail-with-body --cacert "$CA" -u "$user:$pass" \
@@ -98,7 +107,7 @@ make_key() {
     -d "{\"name\":\"$name\"}" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["encoded"])')
   set_env "$envkey" "$encoded"
-  echo "  $name 已创建 → .env:$envkey"
+  echo "  $name 已创建 → .env:$envkey（新 key，客户端需同步新值）"
 }
 
 make_key "mem-read-$USER_ID" "$READER" "$PUB" MEM_READ_API_KEY
