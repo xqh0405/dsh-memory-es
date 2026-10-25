@@ -17,7 +17,7 @@
 | 提示与文案（S6） | **已完成**：系统提示片段（order=3200）+ 四条工具描述改成「时机 / 不要用」句式 |
 | 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / mark_private）、`memory_promote`（只标候选） |
 
-| 部署形态 | **两套**：本机 .114（`deploy/es`，给本机 dsh）+ .125（`deploy/es-remote`，给 `dsh-xqh` 容器）；插件已装进容器的 web profile，详见开发文档 §5.7 |
+| 部署形态 | **两套**：本机 .114（`deploy/es`）+ .125（`deploy/es-remote`，给 `dsh-xqh` 容器）。插件已装进 .125 容器的 web profile 并通过冒烟（模型自己调用 `memory_save` 落库、双路检索命中），详见开发文档 §5.7 |
 
 ## 快速开始
 
