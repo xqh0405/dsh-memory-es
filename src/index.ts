@@ -17,6 +17,7 @@ import { Config, personalIndexName, validateConfig, type ConfigType } from './co
 import { createEmbedder } from './embedding.ts'
 import { createEsClient } from './es/http.ts'
 import { defineSaveTool } from './memory/save.ts'
+import { defineSearchTool } from './memory/search.ts'
 
 export { Config }
 export type { ConfigType }
@@ -63,12 +64,15 @@ export function apply(ctx: Context, config: ConfigType): void {
     timeoutMs: EMBEDDING_TIMEOUT_MS,
   })
 
+  const userId = config.identity.userId
+  const personalPrefix = config.index.personalPrefix
+
   ctx.effect(
     () =>
       ctx.tools.register(
         defineSaveTool({
-          userId: config.identity.userId,
-          personalPrefix: config.index.personalPrefix,
+          userId,
+          personalPrefix,
           defaultDomain: config.defaults.domain,
           reader,
           writer,
@@ -77,6 +81,23 @@ export function apply(ctx: Context, config: ConfigType): void {
         }),
       ),
     'dsh-memory-es.save',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineSearchTool({
+          userId,
+          personalPrefix,
+          teamIndex: config.index.team,
+          reader,
+          embed,
+          dims: config.embedding.dims,
+          retrieval: config.retrieval,
+          log: (event) => logger.info('search %o', event),
+        }),
+      ),
+    'dsh-memory-es.search',
   )
 
   logger.info(

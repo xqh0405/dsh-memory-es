@@ -22,17 +22,24 @@ export interface EsTermFilter {
   term: Record<string, string>
 }
 
+export interface EsTermsFilter {
+  terms: Record<string, string[]>
+}
+
 export interface EsRangeFilter {
   range: { updated_at: { gte: string } }
 }
 
-export type EsFilter = EsTermFilter | EsRangeFilter
+export type EsFilter = EsTermFilter | EsTermsFilter | EsRangeFilter
+
+/** 单值写 string，多值写 string[] —— 多值走 `terms`（命中任一即可） */
+export type FilterValue = string | string[]
 
 export interface MetaFilterOptions {
   /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用） */
   status?: string | null
-  memory_type?: string
-  domain?: string
+  memory_type?: FilterValue
+  domain?: FilterValue
   /** updated_at >= now - N 天；不传就不加时间窗 */
   updatedWithinDays?: number
   /** 注入当前时间，便于测试断言（默认 new Date()） */
@@ -57,18 +64,23 @@ function assertPositiveInt(value: number, label: string): void {
 /**
  * 组装过滤条件。顺序稳定（status → memory_type → domain → 时间窗），便于测试与日志比对。
  */
+/** 单值 → `term`，多值 → `terms`；空数组直接跳过（“一个都不选”不等于“不筛”） */
+function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue | undefined): void {
+  if (value === undefined) return
+  const values = (Array.isArray(value) ? value : [value]).map((v) => v.trim()).filter((v) => v !== '')
+  if (values.length === 0) return
+  if (values.length === 1) filters.push({ term: { [field]: values[0] } })
+  else filters.push({ terms: { [field]: values } })
+}
+
 export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   const filters: EsFilter[] = []
   const status = options.status === undefined ? 'active' : options.status
   if (status !== null) {
     filters.push({ term: { status } })
   }
-  if (options.memory_type) {
-    filters.push({ term: { memory_type: options.memory_type } })
-  }
-  if (options.domain) {
-    filters.push({ term: { domain: options.domain } })
-  }
+  pushValueFilter(filters, 'memory_type', options.memory_type)
+  pushValueFilter(filters, 'domain', options.domain)
   if (options.updatedWithinDays !== undefined) {
     assertPositiveInt(options.updatedWithinDays, 'updatedWithinDays')
     const now = options.now ?? new Date()
@@ -157,4 +169,26 @@ export function dedupeBody(sha256: string, options: { status?: string | null } =
       },
     },
   }
+}
+
+/**
+ * 解析 `time_range` 形态的表达式（文档 §6.3：`now-180d`）成「多少天」，喂给 `updatedWithinDays`。
+ *
+ * 只支持 `now-<数字><单位>`，单位 d/h/m：小时/分钟不足一天时向上取整为 1 天
+ * （宁可多取一点，也不要因为 floor 掉成 0 天而把时间窗收成「此刻」）。
+ * 非法输入直接抛错——静默忽略会让模型以为过滤生效了。
+ */
+export function parseTimeRangeDays(expression: string): number {
+  const matched = /^now-(\d+)([dhm])$/.exec(expression.trim())
+  if (!matched) {
+    throw new Error(`time_range 只支持 now-<数字><d|h|m> 形式（收到「${expression}」）`)
+  }
+  const amount = Number(matched[1])
+  if (!Number.isInteger(amount) || amount < 1) {
+    throw new Error(`time_range 的数字必须 ≥1（收到「${expression}」）`)
+  }
+  const unit = matched[2]
+  if (unit === 'd') return amount
+  const days = amount / (unit === 'h' ? 24 : 1440)
+  return Math.max(1, Math.ceil(days))
 }

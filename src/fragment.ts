@@ -76,22 +76,78 @@ export function scoreMargin(scoresDesc: number[]): number {
   return scoresDesc[0] - scoresDesc[1]
 }
 
+/** 记忆来源：个人库（一人一索引）还是团队库 */
+export type Scope = 'personal' | 'team'
+
+/** 融合后带来源标记的命中（`origin` 而不是 `source`：`source` 已经被 `_source` 文档占了） */
+export interface ScopedHit extends Fused {
+  origin: Scope
+  /** 去重键：content_sha256；文档没带就退回 id（保证一定能去重） */
+  contentHash: string
+}
+
 /**
- * 投影：把 ES 命中裁成给模型看的精简字段（content 截断）。
- * 上限由调用方传入；返回结构稳定，便于测试断言。
+ * 合并多个库的融合结果（文档 §8.3）：
+ *  1. 每条乘来源权重（个人库 1.2，让贴近当前上下文的那条不被团队库压过）；
+ *  2. 按 content_sha256 去重——同一条被晋升后两库都有，保留高分那条；
+ *  3. 按加权后的分数降序；同分时个人优先、再按 id，保证结果稳定（可测）。
  */
-export function projectHit(
-  hit: Fused,
-  maxChars = 500,
-): {
+export function mergeScopes(
+  groups: ReadonlyArray<{ source: Scope; hits: readonly Fused[] }>,
+  options: {
+    weights?: Partial<Record<Scope, number>>
+    hashOf?: (hit: Fused) => string
+  } = {},
+): ScopedHit[] {
+  const weights = options.weights ?? {}
+  const best = new Map<string, ScopedHit>()
+
+  for (const group of groups) {
+    const weight = weights[group.source] ?? 1
+    for (const hit of group.hits) {
+      const rawHash = options.hashOf?.(hit)
+      const contentHash =
+        rawHash ??
+        (typeof hit.source.content_sha256 === 'string' && hit.source.content_sha256 !== ''
+          ? hit.source.content_sha256
+          : hit.id)
+      const candidate: ScopedHit = {
+        ...hit,
+        origin: group.source,
+        contentHash,
+        fusedScore: hit.fusedScore * weight,
+      }
+      const previous = best.get(contentHash)
+      if (previous === undefined || candidate.fusedScore > previous.fusedScore) {
+        best.set(contentHash, candidate)
+      }
+    }
+  }
+
+  return [...best.values()].sort((a, b) => {
+    if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
+    if (a.origin !== b.origin) return a.origin === 'personal' ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
+}
+
+/** 给模型看的精简命中（§6.3 的返回结构，content 截断） */
+export interface Projected {
   memory_id: string
   content: string
   memory_type: string
   domain: string
   updated_at: string
-  source: 'personal' | 'team'
+  source: Scope
   score: number
-} {
+}
+
+/**
+ * 投影：把 ES 命中裁成给模型看的精简字段（content 截断）。
+ * `source` 优先用调用方显式给的值（检索层知道这条从哪个索引来）；
+ * 不给时才退回「有 source_user 就算团队库」的旧启发式。
+ */
+export function projectHit(hit: Fused, maxChars = 500, source?: Scope): Projected {
   const src = hit.source
   const rawContent = typeof src.content === 'string' ? src.content : ''
   return {
@@ -100,7 +156,18 @@ export function projectHit(
     memory_type: typeof src.memory_type === 'string' ? src.memory_type : '',
     domain: typeof src.domain === 'string' ? src.domain : '',
     updated_at: typeof src.updated_at === 'string' ? src.updated_at : '',
-    source: src.source_user === undefined ? 'personal' : 'team',
+    source: source ?? (src.source_user === undefined ? 'personal' : 'team'),
     score: hit.fusedScore,
   }
+}
+
+/** 把投影后的命中渲染成给模型读的短文本（空结果也要说清楚） */
+export function renderText(hits: ReadonlyArray<Projected>): string {
+  if (hits.length === 0) return '没有找到相关记忆。'
+  const lines = hits.map((hit, index) => {
+    const day = hit.updated_at.slice(0, 10)
+    const meta = [hit.source, hit.memory_type, day].filter((part) => part !== '').join('·')
+    return `${index + 1}. [${meta}] ${hit.content}`
+  })
+  return lines.join('\n')
 }

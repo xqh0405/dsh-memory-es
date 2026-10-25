@@ -85,8 +85,10 @@ describe('apply', () => {
 
     const requests = (fake as { requests: unknown[] }).requests
     assert.equal(requests.length, 0, '加载期不应发任何请求')
-    assert.equal(harness.registered.length, 1)
-    assert.equal(harness.registered[0].name, 'memory_save')
+    assert.deepEqual(
+      harness.registered.map((tool) => tool.name).sort(),
+      ['memory_save', 'memory_search'],
+    )
     assert.equal(harness.logs.length, 1)
     assert.match(harness.logs[0], /ready: user=xqh index=personal_memory_xqh/)
   })
@@ -95,9 +97,10 @@ describe('apply', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
-    assert.equal(harness.registered.length, 1)
-    assert.equal(harness.disposers.length, 1, '应当通过 ctx.effect 注册（而不是裸 register）')
+    assert.equal(harness.registered.length, 2, '每个工具一次 effect')
+    assert.equal(harness.disposers.length, 2, '应当通过 ctx.effect 注册（而不是裸 register）')
     harness.disposers[0]()
+    harness.disposers[1]()
     assert.equal(harness.registered.length, 0)
   })
 
