@@ -196,3 +196,6 @@ deploy/es-remote/plugins/
 deploy/es-remote/snapshots/
 .pnpm-store/
 .state/
+
+# Markdown 镜像导出目录（生成物；回滚＝删掉它）
+knowledge/

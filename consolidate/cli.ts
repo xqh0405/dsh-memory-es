@@ -24,13 +24,14 @@ import { createEmbedder } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
 import { daysSinceLastRun, loadState, saveState } from './state.ts'
 import { DEFAULT_BATCH_SIZE, shouldRun } from './scan.ts'
+import { exportMirror } from './export.ts'
 import { approve, listPending, reject, withdraw } from './review.ts'
 import { runConsolidation, type RunReport } from './run.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const AUDIT_INDEX = 'memory_audit'
 
-type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw'
+type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw' | 'export'
 
 interface CliArgs {
   mode: Mode
@@ -39,6 +40,8 @@ interface CliArgs {
   reviewer: string
   reason: string
   apply: boolean
+  /** 显式 dry-run：整理时=不写库，导出时=不写文件 */
+  dryRun: boolean
   batchSize: number
   user: string | null
   esDir: string
@@ -47,6 +50,8 @@ interface CliArgs {
   manual: boolean
   /** 只看这个时间点之后创建的记忆（ISO 或 YYYY-MM-DD） */
   since: Date | null
+  /** --export 的输出目录（默认 <repo>/knowledge） */
+  exportDir: string
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -56,6 +61,7 @@ function parseArgs(argv: string[]): CliArgs {
     reviewer: process.env.CONSOLIDATE_REVIEWER ?? 'cli',
     reason: '',
     apply: false,
+    dryRun: false,
     batchSize: DEFAULT_BATCH_SIZE,
     user: null,
     esDir: process.env.ES_DIR ?? `${REPO_ROOT}deploy/es`,
@@ -64,6 +70,7 @@ function parseArgs(argv: string[]): CliArgs {
     // 显式跑 CLI 本身就算手动触发；--auto 会改回按阈值判断
     manual: true,
     since: null,
+    exportDir: `${REPO_ROOT}knowledge`,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -73,6 +80,7 @@ function parseArgs(argv: string[]): CliArgs {
         break
       case '--dry-run':
         args.apply = false
+        args.dryRun = true
         break
       case '--auto':
         args.manual = false
@@ -121,6 +129,16 @@ function parseArgs(argv: string[]): CliArgs {
         args.mode = 'withdraw'
         args.target = requireValue(argv, ++i, '--withdraw 需要 doc_id')
         break
+      case '--export': {
+        args.mode = 'export'
+        // 目录可选：下一个参数不是 --flag 就当它
+        const next = argv[i + 1]
+        if (next !== undefined && !next.startsWith('--')) {
+          args.exportDir = next
+          i += 1
+        }
+        break
+      }
       case '--help':
       case '-h':
         printHelp()
@@ -161,6 +179,10 @@ function printHelp(): void {
   --withdraw <doc_id>  撤回：status=superseded（不物理删，§10；必须配 --reason）
   --reason <文本>      驳回/撤回的原因（写进条目与审计流水）
   --reviewer <名字>    谁在操作（默认环境变量 CONSOLIDATE_REVIEWER，再退到 cli）
+
+Markdown 镜像（S10，只读导出）:
+  --export [目录]      按 domain 导出 knowledge/<domain>.md + INDEX.md（默认 <repo>/knowledge）
+                       与 --dry-run 组合时只报告会写哪些文件
   -h, --help           本帮助
 
 环境变量:
@@ -223,6 +245,22 @@ async function main(): Promise<void> {
   const embed = createEmbedder({ url: embeddingUrl, model: embeddingModel, dims })
   const log = (event: Record<string, unknown>): void => {
     if (process.env.CONSOLIDATE_VERBOSE === '1') console.error(`[debug] ${JSON.stringify(event)}`)
+  }
+
+  // Markdown 镜像：只读导出，不写 ES
+  if (args.mode === 'export') {
+    const result = await exportMirror(
+      { client: consolidator, teamIndex, endpoint: url },
+      { outDir: args.exportDir, dryRun: args.dryRun, now: new Date() },
+    )
+    console.log(
+      `${args.dryRun ? 'DRY-RUN（不写文件）' : '已导出'} → ${result.outDir} | 共 ${result.total} 条 / ${result.files.length} 个 domain`,
+    )
+    for (const file of result.files) console.log(`  - ${file.domain} → ${file.file} (${file.count} 条)`)
+    if (result.files.length === 0) console.log('  （团队库里没有可导出的条目：只导出 active 且 auto/approved 的）')
+    if (result.pruned.length > 0) console.log(`  清理旧文件：${result.pruned.join(', ')}`)
+    if (!args.dryRun) console.log(`索引：${args.exportDir}/INDEX.md`)
+    return
   }
 
   // 审核台：单条显式动作，没有 dry-run 概念（动作本身就是人的决定）
