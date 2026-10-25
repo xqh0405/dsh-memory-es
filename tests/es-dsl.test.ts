@@ -8,6 +8,22 @@ import { describe, test } from 'node:test'
 
 import { bm25Body, buildFilters, DEFAULT_SOURCE_EXCLUDES, knnBody } from '../src/es/dsl.ts'
 
+describe('buildFilters / review_state（S9 审核闸）', () => {
+  test('传数组 → terms；传 null/undefined → 不加条件', () => {
+    const withFilter = buildFilters({ status: 'active', review_state: ['auto', 'approved'] })
+    assert.deepEqual(withFilter.at(-1), { terms: { review_state: ['auto', 'approved'] } })
+    assert.deepEqual(buildFilters({ status: 'active', review_state: null }), [{ term: { status: 'active' } }])
+    assert.deepEqual(buildFilters({ status: 'active' }), [{ term: { status: 'active' } }])
+  })
+
+  test('单值 → term（与其它 meta 过滤行为一致）', () => {
+    assert.deepEqual(buildFilters({ review_state: 'approved' }), [
+      { term: { status: 'active' } },
+      { term: { review_state: 'approved' } },
+    ])
+  })
+})
+
 describe('buildFilters', () => {
   test('默认只加 status=active', () => {
     assert.deepEqual(buildFilters(), [{ term: { status: 'active' } }])

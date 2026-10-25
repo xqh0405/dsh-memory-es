@@ -329,6 +329,52 @@ describe('searchMemories 编排', () => {
   })
 })
 
+describe('团队库审核闸（S9）：pending/rejected 不进检索', () => {
+  /** bm25 的过滤在 query.bool.filter；knn 的过滤在顶层 knn.filter —— 两种形态分开取 */
+  const filtersOf = (body: Record<string, unknown>, route: 'bm25' | 'knn'): unknown[] => {
+    if (route === 'knn') return ((body.knn as { filter?: unknown[] } | undefined)?.filter ?? [])
+    const query = body.query as { bool?: { filter?: unknown[] } } | undefined
+    return query?.bool?.filter ?? []
+  }
+  const hasReviewGate = (filters: unknown[]): boolean =>
+    filters.some((f) => JSON.stringify(f) === JSON.stringify({ terms: { review_state: ['auto', 'approved'] } }))
+
+  test('团队库两路都带 review_state=[auto,approved]，个人库不带', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.9)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 3)], knn: [hit('t1', 0.8)] },
+    })
+    try {
+      await searchMemories(h.deps(), { query: 'x' })
+      for (const route of ['bm25', 'knn'] as const) {
+      const team = h.bodyOf(TEAM_INDEX, route)
+      const personal = h.bodyOf(PERSONAL_INDEX, route)
+      assert.ok(team, `团队库 ${route} 请求应当发出`)
+      assert.equal(hasReviewGate(filtersOf(team, route)), true, `团队库 ${route} 必须带审核闸`)
+      // 个人索引没有 review_state 字段：带上这个过滤会查空，所以绝不能带
+      assert.equal(
+        JSON.stringify(personal).includes('review_state'),
+        false,
+          '个人库请求不能带 review_state 过滤',
+        )
+      }
+    } finally {
+      // 每个 harness 起一个假 ES 服务器；不关掉的话 node --test 不会退出（实测会挂到超时）
+      await h.fake.close()
+    }
+  })
+
+  test('scope=personal 时完全不查团队库（审核闸也就无从泄漏）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'x', scope: 'personal' })
+      assert.equal(h.bodyOf(TEAM_INDEX, 'bm25'), undefined)
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
 describe('defineSearchTool', () => {
   test('参数与输出 schema 合法，execute 返回声明结构', async () => {
     const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.7)] } })

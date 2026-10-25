@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 
+import { detectContradiction } from '../consolidate/conflict.ts'
 import { decideDedupe } from '../consolidate/dedupe.ts'
 import { distillBatch, stripPersonalContext, topicKey } from '../consolidate/distill.ts'
 import { buildCandidateQuery, shouldRun } from '../consolidate/scan.ts'
@@ -172,6 +173,32 @@ describe('decideDedupe（§9.4 三道闸）', () => {
       duplicateThreshold: 0.8,
     })
     assert.equal(decision.verdict, 'merge_candidate')
+  })
+})
+
+describe('detectContradiction（§9.4 冲突判定）', () => {
+  test('反义极性词对 → 判冲突', () => {
+    const result = detectContradiction('必须同时写 win_price 与 win_price_practical', '禁止同时写 win_price 与 win_price_practical')
+    assert.equal(result.contradiction, true)
+    assert.deepEqual(result.pair, ['必须', '禁止'])
+  })
+
+  test('同极性（都要求 / 都禁止）→ 不判冲突', () => {
+    assert.equal(detectContradiction('必须写 A', '必须写 A 并且写 B').contradiction, false)
+    assert.equal(detectContradiction('禁止写 A', '不能写 A').contradiction, false)
+  })
+
+  test('一边没表态 → 不判冲突（不能凭空造冲突）', () => {
+    assert.equal(detectContradiction('必须写 A', 'A 字段是 LONGTEXT').contradiction, false)
+  })
+
+  test('否定词优先匹配：「不支持」不会被「支持」吃掉', () => {
+    // 若实现先匹配「支持」，这条会变成 pos vs pos 而漏判（极性判定必须否定词优先）
+    assert.equal(detectContradiction('支持这个方案', '不支持这个方案').contradiction, true)
+  })
+
+  test('中英混写也能命中（enable/disable）', () => {
+    assert.equal(detectContradiction('enable xpack security', 'disable xpack security').contradiction, true)
   })
 })
 

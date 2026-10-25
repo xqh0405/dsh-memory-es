@@ -127,6 +127,10 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       ? meta
       : { ...meta, updatedWithinDays: TEAM_FALLBACK_WINDOW_DAYS }
 
+  // 团队库的审核闸（S9）：pending（待人工裁决）/ rejected（已驳回）都不该出现在检索结果里。
+  // 个人库没有 review_state 字段，所以只能加在 teamMeta 上，不能塞进共用的 meta。
+  const teamReviewFilter = ['auto', 'approved'] as const
+
   // 向量失败 → 降级为纯 BM25（不抛：检索还能用）
   let vector: number[] | null = null
   let degraded = false
@@ -160,7 +164,9 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   }
 
   if (scope !== 'team') pushRoute('personal', personalIndex, meta)
-  if (scope !== 'personal') pushRoute('team', deps.teamIndex, teamMeta)
+  if (scope !== 'personal') {
+    pushRoute('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
+  }
 
   let settled: Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>
   try {

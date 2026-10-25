@@ -16,10 +16,13 @@ import { runConsolidation } from '../consolidate/run.ts'
 import { createEmbedder } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
-import { countByDomain, deleteByDomain, deleteDocsById, getAdminDoc } from './helpers/es-admin.ts'
+import { searchMemories } from '../src/memory/search.ts'
+import { adminRequest, countByDomain, deleteByDomain, deleteDocsById, getAdminDoc } from './helpers/es-admin.ts'
 import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__consol_it'
+const CONFLICT_DOMAIN = '__consol_it_conflict'
+const AUDIT_INDEX = 'memory_audit'
 const CLEAN_A = '整理集成测试：北单中断开奖要同时写 win_price 与 win_price_practical，否则统计口径会错。'
 const CLEAN_B = '整理集成测试：发布流水线生产 job 只认 main 分支，测试 job 只认 test 分支。'
 const SECRET = '整理集成测试：数据库密码 password=Realsecret123 不能进团队库。'
@@ -65,11 +68,17 @@ function defineConsolidateIntegration(e: EsTestEnv): void {
   /** 本次测试写进团队库的 doc_id（整理任务按设计会扫整个索引，可能“顺手”晋升别人的文档，
    *  这些也得清掉，否则会污染后面的测试文件） */
   const promotedTeamDocIds: string[] = []
+  /** 本文件种过的个人记忆 id（after 时按它清审计流水） */
+  const createdMemoryIds: string[] = []
 
   describe('真实实例：整理任务闭环', () => {
     before(async () => {
       await deleteByDomain(e, e.personalIndex, MARKER_DOMAIN)
       await deleteByDomain(e, e.teamIndex, MARKER_DOMAIN)
+      // 冲突场景用独立 domain：必须在这里也清，否则上一轮跑剩的文档会被 saveMemory 的 sha 去重命中，
+      // 拿回来的旧 id 已经是 promoted，扫描就再也看不到它（实测踩到，表现为“冲突样本没被扫到”）。
+      await deleteByDomain(e, e.personalIndex, CONFLICT_DOMAIN)
+      await deleteByDomain(e, e.teamIndex, CONFLICT_DOMAIN)
       const [a, b, secret] = await Promise.all([
         saveMemory(saveDeps, { content: CLEAN_A, domain: MARKER_DOMAIN }),
         saveMemory(saveDeps, { content: CLEAN_B, domain: MARKER_DOMAIN }),
@@ -78,12 +87,21 @@ function defineConsolidateIntegration(e: EsTestEnv): void {
       cleanAId = a.memory_id
       cleanBId = b.memory_id
       secretId = secret.memory_id
+      createdMemoryIds.push(cleanAId, cleanBId, secretId)
     })
 
     after(async () => {
       await deleteByDomain(e, e.personalIndex, MARKER_DOMAIN)
       await deleteByDomain(e, e.teamIndex, MARKER_DOMAIN)
+      // 冲突场景用独立 domain —— 这里也必须清，否则每跑一次测试就往库里留一条 pending
+      await deleteByDomain(e, e.personalIndex, CONFLICT_DOMAIN)
+      await deleteByDomain(e, e.teamIndex, CONFLICT_DOMAIN)
       await deleteDocsById(e, e.teamIndex, promotedTeamDocIds)
+      if (createdMemoryIds.length > 0) {
+        await adminRequest(e, 'POST', `/${AUDIT_INDEX}/_delete_by_query?refresh=true&conflicts=proceed`, {
+          query: { terms: { memory_id: createdMemoryIds } },
+        })
+      }
       assert.equal(await countByDomain(e, e.personalIndex, MARKER_DOMAIN), 0)
       assert.equal(await countByDomain(e, e.teamIndex, MARKER_DOMAIN), 0)
     })
@@ -158,6 +176,95 @@ function defineConsolidateIntegration(e: EsTestEnv): void {
       const report = await runConsolidation(deps, { apply: false, batchSize: 50, state: emptyState() })
       const mine = report.results.filter((item) => [cleanAId, cleanBId, secretId].includes(item.memory_id))
       assert.deepEqual(mine, [], 'promoted/blocked 的条目不再成为候选')
+    })
+
+    test('冲突样本（反义结论）→ pending 落库、带 conflict_with、且不进检索', async () => {
+      const baselineId = 'conflict-baseline'
+      const baselineContent = '北单中断开奖必须同时写 win_price 与 win_price_practical。'
+      // 团队库先放一条「已批准」的基准结论——**必须带向量**，否则 kNN 根本找不到它，
+      // 冲突判定就没有对手可比（第一版就是漏了这一步，表现为 verdict=new）。
+      const baselineVector = await embed.embed(baselineContent)
+      await consolidator.index(
+        e.teamIndex,
+        {
+          doc_id: baselineId,
+          content: baselineContent,
+          embedding: baselineVector,
+          memory_type: 'fact',
+          domain: CONFLICT_DOMAIN,
+          topic_key: `${CONFLICT_DOMAIN}:baseline`,
+          content_sha256: 'hash-conflict-baseline',
+          source_user: e.userId,
+          source_memory_id: 'mem-conflict-baseline',
+          source_created_at: '2026-10-01T00:00:00Z',
+          promoted_at: '2026-10-01T00:00:00Z',
+          status: 'active',
+          review_state: 'approved',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+        { id: baselineId, refresh: 'wait_for' },
+      )
+      // 个人记忆给出相反结论（相似度会很高，正是 §9.4 要拦的那种）
+      const saved = await saveMemory(saveDeps, {
+        content: '北单中断开奖禁止同时写 win_price 与 win_price_practical。',
+        domain: CONFLICT_DOMAIN,
+      })
+
+      createdMemoryIds.push(saved.memory_id)
+      const report = await runConsolidation(deps, { apply: true, batchSize: 50, state: emptyState() })
+      const mineStep = report.results.find((item) => item.memory_id === saved.memory_id)
+      assert.ok(mineStep, '冲突样本应当被扫到')
+      assert.equal(mineStep.verdict, 'pending', '相反结论必须进 pending，不能自动晋升')
+
+      const pendingDocs = await consolidator.search(e.teamIndex, {
+        size: 5,
+        _source: { excludes: ['embedding'] },
+        query: {
+          bool: {
+            filter: [
+              { term: { domain: CONFLICT_DOMAIN } },
+              { term: { review_state: 'pending' } },
+              { term: { status: 'active' } },
+            ],
+          },
+        },
+      })
+      assert.equal(pendingDocs.total, 1, 'pending 条目要落库（队列才可查）')
+      assert.equal(pendingDocs.hits[0].source.conflict_with, baselineId, '要记下和谁冲突')
+      assert.equal(pendingDocs.hits[0].source.source_memory_id, saved.memory_id, '溯源字段不能丢')
+
+      // 关键：pending 落库了，但检索必须看不到（审核闸生效）
+      const search = await searchMemories(
+        {
+          userId: e.userId,
+          personalPrefix: 'personal_memory_',
+          teamIndex: e.teamIndex,
+          reader,
+          embed,
+          dims: 1024,
+          retrieval: { topK: 20, rrfK: 60, marginFloor: 0.05, limit: 8 },
+        },
+        { query: '北单中断开奖 写 win_price', scope: 'team', domain: [CONFLICT_DOMAIN], limit: 8 },
+      )
+      assert.equal(
+        search.hits.some((hit) => hit.memory_id === pendingDocs.hits[0].id),
+        false,
+        'pending 条目不能出现在检索结果里',
+      )
+
+      // 这条冲突样本由 after() 统一清理（独立 domain + 按 memory_id 清审计）
+    })
+
+    test('blocked 条目落 blocked_reason（只存类型，不存原文）', async () => {
+      const blocked = await getAdminDoc(e, e.personalIndex, secretId)
+      assert.equal(blocked.source?.promote_state, 'blocked')
+      assert.equal(typeof blocked.source?.blocked_reason, 'string')
+      assert.match(String(blocked.source?.blocked_reason), /password_assignment/)
+      assert.equal(
+        String(blocked.source?.blocked_reason).includes('Realsecret123'),
+        false,
+        'blocked_reason 不能带原文',
+      )
     })
 
     test('cleanB 也在团队库里（两条都到位，不是只写了一条）', async () => {

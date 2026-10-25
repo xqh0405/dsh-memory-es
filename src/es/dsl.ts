@@ -42,6 +42,13 @@ export interface MetaFilterOptions {
   domain?: FilterValue
   /** updated_at >= now - N 天；不传就不加时间窗 */
   updatedWithinDays?: number
+  /**
+   * 只取这些 review_state（**只在团队库用**）。
+   * 个人索引没有 `review_state` 字段，`dynamic: strict` 下拿它查询不会报错但会查空，
+   * 所以调用方要按索引区分（见 search.ts 的 teamMeta）。
+   * 传 null/undefined = 不加这个条件（审核台、迁移排查时用）。
+   */
+  review_state?: FilterValue | null
   /** 注入当前时间，便于测试断言（默认 new Date()） */
   now?: Date
 }
@@ -66,8 +73,8 @@ function assertPositiveInt(value: number, label: string): void {
  * 组装过滤条件。顺序稳定（status → memory_type → domain → 时间窗），便于测试与日志比对。
  */
 /** 单值 → `term`，多值 → `terms`；空数组直接跳过（“一个都不选”不等于“不筛”） */
-function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue | undefined): void {
-  if (value === undefined) return
+function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue | null | undefined): void {
+  if (value === undefined || value === null) return
   const values = (Array.isArray(value) ? value : [value]).map((v) => v.trim()).filter((v) => v !== '')
   if (values.length === 0) return
   if (values.length === 1) filters.push({ term: { [field]: values[0] } })
@@ -82,6 +89,7 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   }
   pushValueFilter(filters, 'memory_type', options.memory_type)
   pushValueFilter(filters, 'domain', options.domain)
+  pushValueFilter(filters, 'review_state', options.review_state ?? null)
   if (options.updatedWithinDays !== undefined) {
     assertPositiveInt(options.updatedWithinDays, 'updatedWithinDays')
     const now = options.now ?? new Date()

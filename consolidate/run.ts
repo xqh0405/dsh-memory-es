@@ -18,6 +18,9 @@ import type { Embedder } from '../src/embedding.ts'
 import { dedupeBody, knnBody } from '../src/es/dsl.ts'
 import type { EsClient } from '../src/es/http.ts'
 import { normalizeContent, sha256Hex } from '../src/fragment.ts'
+import type { AuditDeps } from './audit.ts'
+import { writeAudit } from './audit.ts'
+import { detectContradiction } from './conflict.ts'
 import type { DedupeVerdict, NeighborHit } from './dedupe.ts'
 import { decideDedupe } from './dedupe.ts'
 import { distillBatch, toTeamDoc, topicKey } from './distill.ts'
@@ -39,6 +42,8 @@ export interface ConsolidateDeps {
   consolidator: Pick<EsClient, 'search' | 'index'>
   embed: Pick<Embedder, 'embed'> | null
   dims: number
+  /** 审计通道（S9）。不传 = 不记流水（测试里可省，生产 CLI 必传） */
+  audit?: AuditDeps
   now?: () => Date
   newId?: () => string
   log?: (event: Record<string, unknown>) => void
@@ -115,9 +120,22 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
         await deps.writer.update(
           deps.personalIndex,
           candidate.memory_id,
-          { promote_state: 'blocked', updated_at: now.toISOString() },
+          { promote_state: 'blocked', blocked_reason: kinds, updated_at: now.toISOString() },
           { refresh: 'wait_for' },
         )
+        if (deps.audit) {
+          await writeAudit(deps.audit, {
+            event: 'blocked',
+            actor: `consolidate:${deps.userId}`,
+            at: now,
+            subject_type: 'personal_memory',
+            subject_id: candidate.memory_id,
+            memory_id: candidate.memory_id,
+            from_state: 'none',
+            to_state: 'blocked',
+            reason: kinds,
+          })
+        }
         state = withProcessed(state, candidate.memory_id, {
           at: now.toISOString(),
           verdict: 'blocked',
@@ -142,15 +160,18 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
     if (shaHit === null && deps.embed) {
       try {
         const vector = await deps.embed.embed(rewritten)
+        // 只在**同一个 domain** 内找邻居：跨域内容语义不同（「分支只认 main」在 CI 与在发布流程里
+        // 是两件事），混着比既会误判重复，也会让冲突判定比错了对手（S9 实测踩到）。
         const knn = await deps.consolidator.search(
           deps.teamIndex,
-          knnBody(vector, deps.dims, { status: 'active' }, 5),
+          knnBody(vector, deps.dims, { status: 'active', domain: item.domain }, 5),
         )
         neighbors = knn.hits.map((hit) => ({
           id: hit.id,
           score: hit.score,
           contentSha256: typeof hit.source.content_sha256 === 'string' ? hit.source.content_sha256 : undefined,
           topicKey: typeof hit.source.topic_key === 'string' ? hit.source.topic_key : undefined,
+          content: typeof hit.source.content === 'string' ? hit.source.content : undefined,
         }))
       } catch (err) {
         degraded = true
@@ -162,9 +183,24 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
 
     const decision = decideDedupe({ shaHit, neighbors, topicKey: teamKey })
 
+    // 3.5 冲突优先于合并（§9.4 最后一条）：高相似但结论相反 → 一律 pending。
+    // 判不了的语义冲突不硬判——detectContradiction 只对明确词对返回 true。
+    let verdict: StepResult['verdict'] = decision.verdict
+    let reason = decision.reason
+    let conflictWith: string | undefined
+    if (decision.verdict === 'merge_candidate' && decision.neighborId !== undefined) {
+      const neighborContent = neighbors.find((n) => n.id === decision.neighborId)?.content ?? ''
+      const contradiction = detectContradiction(rewritten, neighborContent)
+      if (contradiction.contradiction) {
+        verdict = 'pending'
+        reason = contradiction.reason
+        conflictWith = decision.neighborId
+      }
+    }
+
     // 4. 按结论行事（dry-run 到此为止，只记录）
     let teamDocId: string | undefined
-    if (decision.verdict === 'new') {
+    if (verdict === 'new') {
       counts.promoted += 1
       if (options.apply) {
         const docId = newId()
@@ -200,10 +236,24 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
           at: now.toISOString(),
           verdict: 'promoted',
           teamDocId,
-          reason: decision.reason,
+          reason,
         })
+        if (deps.audit) {
+          await writeAudit(deps.audit, {
+            event: 'promoted',
+            actor: `consolidate:${deps.userId}`,
+            at: now,
+            subject_type: 'team_doc',
+            subject_id: docId,
+            memory_id: candidate.memory_id,
+            team_doc_id: docId,
+            from_state: 'none',
+            to_state: 'auto',
+            reason,
+          })
+        }
       }
-    } else if (decision.verdict === 'duplicate') {
+    } else if (verdict === 'duplicate') {
       counts.duplicate += 1
       if (options.apply) {
         // 团队库已有同文：个人这条的“已晋升”是事实，直接置 promoted（幂等）
@@ -216,10 +266,10 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
         state = withProcessed(state, candidate.memory_id, {
           at: now.toISOString(),
           verdict: 'duplicate',
-          reason: decision.reason,
+          reason,
         })
       }
-    } else if (decision.verdict === 'merge_candidate') {
+    } else if (verdict === 'merge_candidate') {
       counts.mergeCandidate += 1
       if (options.apply) {
         // S8 不做自动合并：标成 candidate 表示“评估过、待人工合并”，不改团队库
@@ -232,24 +282,76 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
         state = withProcessed(state, candidate.memory_id, {
           at: now.toISOString(),
           verdict: 'merge_candidate',
-          reason: decision.reason,
+          reason,
         })
       }
     } else {
+      // pending：S9 起**落库**（S8 只记本地文件，因为检索挡不住 review_state）。
+      // 现在 search 侧已加审核闸（review_state ∈ {auto,approved}），所以落库也不会污染召回，
+      // 队列才可查、可统计、可审批。
       counts.pending += 1
-      const pendingEntry = {
-        memory_id: candidate.memory_id,
-        at: now.toISOString(),
-        reason: decision.reason,
-        ...(decision.neighborId === undefined ? {} : { neighborId: decision.neighborId }),
+      if (options.apply) {
+        const docId = newId()
+        let embedding: number[] | null = null
+        if (deps.embed) {
+          try {
+            embedding = await deps.embed.embed(rewritten)
+          } catch (err) {
+            degraded = true
+            log({ event: 'pending_embedding_degraded', memory_id: candidate.memory_id, error: String(err) })
+          }
+        }
+        const pendingDoc = toTeamDoc(item, candidate, {
+          docId,
+          sourceUser: deps.userId,
+          now,
+          embedding,
+          status: 'active',
+          reviewState: 'pending',
+        })
+        if (conflictWith !== undefined) pendingDoc.conflict_with = conflictWith
+        await deps.consolidator.index(deps.teamIndex, pendingDoc, { id: docId, refresh: 'wait_for' })
+        // 个人这条留 candidate：还没定论，不能标 promoted
+        await deps.writer.update(
+          deps.personalIndex,
+          candidate.memory_id,
+          { promote_state: 'candidate', updated_at: now.toISOString() },
+          { refresh: 'wait_for' },
+        )
+        teamDocId = docId
+        state = withPending(state, {
+          memory_id: candidate.memory_id,
+          at: now.toISOString(),
+          reason,
+          ...(conflictWith === undefined ? {} : { neighborId: conflictWith }),
+        })
+        state = withProcessed(state, candidate.memory_id, {
+          at: now.toISOString(),
+          verdict: 'pending',
+          teamDocId: docId,
+          reason,
+        })
+        if (deps.audit) {
+          await writeAudit(deps.audit, {
+            event: 'pending_created',
+            actor: `consolidate:${deps.userId}`,
+            at: now,
+            subject_type: 'team_doc',
+            subject_id: docId,
+            memory_id: candidate.memory_id,
+            team_doc_id: docId,
+            to_state: 'pending',
+            reason,
+            ...(conflictWith === undefined ? {} : { note: `conflict_with=${conflictWith}` }),
+          })
+        }
       }
-      if (options.apply) state = withPending(state, pendingEntry)
     }
 
     results.push({
       memory_id: candidate.memory_id,
-      verdict: decision.verdict,
-      reason: decision.reason,
+      verdict,
+      reason,
       ...(teamDocId === undefined ? {} : { teamDocId }),
       ...(decision.neighborId === undefined ? {} : { neighborId: decision.neighborId }),
       topScore: decision.topScore,
@@ -259,7 +361,7 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
     log({
       event: 'candidate',
       memory_id: candidate.memory_id,
-      verdict: decision.verdict,
+      verdict,
       applied: options.apply,
       top_score: decision.topScore,
     })
