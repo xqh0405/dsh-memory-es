@@ -27,6 +27,9 @@ export interface ConfigType {
     readPassword: string
     writerUsername: string
     writerPassword: string
+    /** 整理/审核身份（对 team_knowledge 与 memory_audit 有写权限）；面板的审核动作要用 */
+    consolidatorUsername: string
+    consolidatorPassword: string
   }
   embedding: {
     url: string
@@ -70,6 +73,10 @@ export const Config: z<ConfigType> = z.object({
       .description('写身份的用户名（唯一写入口）。'),
     writerPassword: z.string().default('')
       .description('写身份的密码；同样用环境变量。'),
+    consolidatorUsername: z.string().default('mem-consolidator')
+      .description('整理/审核身份的用户名；面板的批准/驳回/撤回要用它（对团队库与审计库有写权限）。'),
+    consolidatorPassword: z.string().default('')
+      .description('整理身份的密码；留空则面板只提供只读功能（审核动作会提示未配置）。'),
   }),
   embedding: z.object({
     url: z.string().default('http://127.0.0.1:11434')

@@ -22,6 +22,8 @@ window.__ModuleLoader__.load({
       subtitle: 'Elasticsearch 后端记忆（dsh-memory-es）：概览与浏览。',
       tabOverview: '概览',
       tabBrowse: '记忆浏览',
+      tabReview: '审核台',
+      tabConfig: '配置',
       cardPersonal: '个人记忆',
       cardTeam: '团队知识',
       cardPending: '待裁决',
@@ -57,7 +59,25 @@ window.__ModuleLoader__.load({
       error: '出错了',
       retry: '重试',
       close: '关闭',
-      configTitle: '配置（只读）',
+      reviewEmpty: '没有待裁决的条目',
+      reviewConflict: '冲突对象',
+      reviewApprove: '批准',
+      reviewReject: '驳回',
+      reviewWithdraw: '撤回',
+      reviewReason: '原因（驳回/撤回必填）',
+      reviewConfirm: '确认',
+      reviewCancel: '取消',
+      reviewDone: '已完成',
+      reviewNoWrite: '未配置整理身份（identity.consolidatorPassword），审核动作不可用。',
+      reviewBusy: '处理中…',
+      configTitle: '配置',
+      configSave: '保存',
+      configSaved: '已保存到 profile 配置',
+      configRestart: '⚠️ 需要重启 dsh 才生效（ES 客户端在插件加载时建立）。.125 上执行：docker restart dsh-xqh',
+      configReadonly: '只读信息（密码不显示）',
+      configNoChange: '没有改动',
+      configChanged: '有未保存改动',
+      configTitle: 'Configuration',
       indexNames: '索引',
       embedding: '嵌入',
       auditNote: '审计索引不在插件配置里，且只读身份没有它的读权限，P3 再补。',
@@ -68,6 +88,8 @@ window.__ModuleLoader__.load({
       subtitle: 'Elasticsearch-backed memory (dsh-memory-es): overview and browse.',
       tabOverview: 'Overview',
       tabBrowse: 'Browse',
+      tabReview: 'Review',
+      tabConfig: 'Config',
       cardPersonal: 'Personal',
       cardTeam: 'Team',
       cardPending: 'Pending review',
@@ -103,7 +125,24 @@ window.__ModuleLoader__.load({
       error: 'Failed',
       retry: 'Retry',
       close: 'Close',
-      configTitle: 'Configuration (read-only)',
+      reviewEmpty: 'Nothing pending review',
+      reviewConflict: 'Conflicting entry',
+      reviewApprove: 'Approve',
+      reviewReject: 'Reject',
+      reviewWithdraw: 'Withdraw',
+      reviewReason: 'Reason (required for reject/withdraw)',
+      reviewConfirm: 'Confirm',
+      reviewCancel: 'Cancel',
+      reviewDone: 'Done',
+      reviewNoWrite: 'Consolidator identity (identity.consolidatorPassword) is not configured; review actions are unavailable.',
+      reviewBusy: 'Working…',
+      configTitle: 'Configuration',
+      configSave: 'Save',
+      configSaved: 'Saved to the profile configuration',
+      configRestart: '⚠️ Restart dsh for it to take effect (the ES client is built when the plugin loads). On .125: docker restart dsh-xqh',
+      configReadonly: 'Read-only info (passwords hidden)',
+      configNoChange: 'No changes',
+      configChanged: 'Unsaved changes',
       indexNames: 'Indexes',
       embedding: 'Embedding',
       auditNote: 'The audit index is not in the plugin config and the reader identity cannot read it; P3 will add it.',
@@ -229,6 +268,22 @@ window.__ModuleLoader__.load({
       return body.value
     }
 
+    async function apiPost(path, body) {
+      const res = await fetch(`${API}${path}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const type = res.headers.get('content-type') || ''
+      if (!type.includes('application/json')) {
+        throw new Error(`HTTP ${res.status}，返回 ${type || '无 content-type'} 而不是 JSON`)
+      }
+      const payload = await res.json()
+      if (!payload.ok) throw new Error(payload.error || `HTTP ${res.status}`)
+      return payload.value
+    }
+
     function shortTime(value) {
       return typeof value === 'string' && value.length >= 16 ? `${value.slice(0, 10)} ${value.slice(11, 16)}` : value || '-'
     }
@@ -329,6 +384,268 @@ window.__ModuleLoader__.load({
                 ),
               ),
         ),
+      )
+    }
+
+    // ── 配置（P4：可改白名单字段 + 强制重启提示）──────────────────────────
+    function Config({ t }) {
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const [draft, setDraft] = React.useState({})
+      const [busy, setBusy] = React.useState(false)
+      const [result, setResult] = React.useState(null)
+
+      const load = React.useCallback(() => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/config')
+          .then((data) => {
+            setState({ loading: false, error: '', data })
+            const next = {}
+            for (const field of data.fields) next[field.key] = field.value
+            setDraft(next)
+            setResult(null)
+          })
+          .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
+      }, [])
+
+      React.useEffect(() => {
+        load()
+      }, [load])
+
+      const data = state.data
+      const changed = data
+        ? data.fields.filter((field) => String(draft[field.key] ?? '') !== String(field.value ?? ''))
+        : []
+
+      const save = () => {
+        if (changed.length === 0) return
+        setBusy(true)
+        apiPost('/config', {
+          confirm: true,
+          changes: changed.map((field) => ({ key: field.key, type: field.type, value: draft[field.key] })),
+        })
+          .then((value) => setResult(value))
+          .catch((error) => setState((prev) => ({ ...prev, error: String(error.message ?? error) })))
+          .finally(() => setBusy(false))
+      }
+
+      if (state.loading) return h('p', { style: S.muted }, t('loading'))
+      if (state.error) {
+        return h('div', null,
+          h('p', { style: S.err }, `${t('error')}: ${state.error}`),
+          h('button', { type: 'button', style: S.btn, onClick: load }, t('retry')),
+        )
+      }
+
+      return h('div', null,
+        h('div', { style: S.card },
+          h('h3', { style: { margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t('configTitle')),
+          data.fields.map((field) =>
+            h('div', { key: field.key, style: { display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 } },
+              h('label', { style: { width: 130, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, field.label),
+              h('input', {
+                style: { ...S.input, flex: 1 },
+                type: field.type === 'number' ? 'number' : 'text',
+                value: draft[field.key] ?? '',
+                onChange: (event) => setDraft((prev) => ({ ...prev, [field.key]: event.target.value })),
+              }),
+              h('code', { style: { ...S.mono, ...S.muted, width: 170 } }, field.key),
+            ),
+          ),
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button',
+              style: { ...S.btn, opacity: busy || changed.length === 0 ? 0.5 : 1 },
+              disabled: busy || changed.length === 0,
+              onClick: save,
+            }, busy ? t('reviewBusy') : t('configSave')),
+            h('span', { style: { fontSize: 12, ...S.muted } },
+              changed.length === 0 ? t('configNoChange') : `${t('configChanged')}: ${changed.map((f) => f.key).join(', ')}`),
+            h('span', { style: { flex: 1 } }),
+            h('button', { type: 'button', style: S.btn, onClick: load }, t('retry')),
+          ),
+          result
+            ? h('div', {
+                style: {
+                  marginTop: 10,
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  borderLeft: '3px solid var(--dsw-alias-state-warn-primary)',
+                  background: 'var(--dsw-alias-bg-layer-2)',
+                  color: 'var(--dsw-alias-label-primary)',
+                  whiteSpace: 'pre-wrap',
+                },
+              }, `${t('configSaved')}: ${result.saved.join(', ')}\n${t('configRestart')}`)
+            : null,
+        ),
+
+        h('div', { style: S.card },
+          h('h3', { style: { margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t('configReadonly')),
+          [
+            ['entry', data.readonly.entryLabel],
+            ['userId', data.readonly.userId],
+            ['personal', data.readonly.personalIndex],
+            ['team', data.readonly.teamIndex],
+            ['audit', data.readonly.auditIndex],
+            ['reader', data.readonly.reader],
+            ['writer', data.readonly.writer],
+            ['consolidator', `${data.readonly.consolidator}${data.readonly.consolidatorConfigured ? '' : '（密码未配置）'}`],
+            ['embedding', data.readonly.embedding],
+          ].map(([label, value]) =>
+            h('div', { key: label, style: { display: 'flex', gap: 10, marginBottom: 4, fontSize: 12 } },
+              h('span', { style: { width: 130, ...S.muted } }, label),
+              h('span', { style: S.mono }, String(value ?? '-')),
+            ),
+          ),
+        ),
+      )
+    }
+
+    // ── 审核台 ───────────────────────────────────────────────────────────
+    function Review({ t }) {
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const [pending, setPending] = React.useState(null) // { docId, action }
+      const [reason, setReason] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [done, setDone] = React.useState('')
+
+      const load = React.useCallback(() => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/review/pending', { size: '50' })
+          .then((data) => setState({ loading: false, error: '', data }))
+          .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
+      }, [])
+
+      React.useEffect(() => {
+        load()
+      }, [load])
+
+      const submit = () => {
+        if (!pending) return
+        setBusy(true)
+        apiPost(`/review/${encodeURIComponent(pending.docId)}/${pending.action}`, {
+          reason: reason.trim(),
+          confirm: true,
+          actor: 'panel',
+        })
+          .then(() => {
+            setDone(`${pending.action} ${pending.docId.slice(0, 8)} ✓`)
+            setPending(null)
+            setReason('')
+            load()
+          })
+          .catch((error) => setState((prev) => ({ ...prev, error: String(error.message ?? error) })))
+          .finally(() => setBusy(false))
+      }
+
+      const data = state.data
+      const rows = data?.rows ?? []
+      const conflicts = new Map((data?.conflicts ?? []).map((item) => [item.id, item]))
+
+      const actionBtn = (row, action, label) =>
+        h('button', {
+          type: 'button',
+          style: { ...S.btn, ...(action === 'approve' ? { borderColor: 'var(--dsw-alias-state-success-primary)' } : {}) },
+          onClick: () => {
+            setPending({ docId: row.id, action })
+            setReason('')
+            setDone('')
+          },
+        }, label)
+
+      return h('div', null,
+        state.loading ? h('p', { style: S.muted }, t('loading')) : null,
+        state.error
+          ? h('div', null,
+              h('p', { style: S.err }, `${t('error')}: ${state.error}`),
+              h('button', { type: 'button', style: S.btn, onClick: load }, t('retry')),
+            )
+          : null,
+        done ? h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary)' } }, `${t('reviewDone')}: ${done}`) : null,
+        data && data.canWrite === false ? h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, t('reviewNoWrite')) : null,
+
+        !state.loading && !state.error && rows.length === 0
+          ? h('div', { style: S.card }, h('p', { style: S.muted }, t('reviewEmpty')))
+          : null,
+
+        rows.map((row) => {
+          const conflict = row.conflictWith ? conflicts.get(row.conflictWith) : null
+          return h('div', { key: row.id, style: { ...S.card, marginBottom: 12 } },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' } },
+              h('span', { style: S.pill('warn') }, row.reviewState || 'pending'),
+              h('span', { style: { ...S.mono, ...S.muted } }, row.domain || '-'),
+              h('span', { style: { ...S.mono, ...S.muted } }, row.topicKey || '-'),
+              h('span', { style: { flex: 1 } }),
+              h('span', { style: { ...S.mono, ...S.muted } }, shortTime(row.updatedAt)),
+            ),
+            h('p', { style: { margin: '0 0 8px', fontSize: 13, lineHeight: 1.7, color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap' } }, row.content),
+            row.sourceUser
+              ? h('p', { style: { ...S.mono, ...S.muted, margin: '0 0 8px' } }, `source: ${row.sourceUser} / ${row.sourceMemoryId || '-'}`)
+              : null,
+
+            conflict
+              ? h('div', {
+                  style: {
+                    borderLeft: '3px solid var(--dsw-alias-state-warn-primary)',
+                    padding: '6px 0 6px 10px',
+                    marginBottom: 8,
+                  },
+                },
+                  h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 4 } },
+                    `${t('reviewConflict')}: ${conflict.id.slice(0, 8)}`),
+                  h('div', { style: { fontSize: 12.5, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'pre-wrap' } },
+                    conflict.content.length > 200 ? `${conflict.content.slice(0, 200)}…` : conflict.content),
+                )
+              : null,
+
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              actionBtn(row, 'approve', t('reviewApprove')),
+              actionBtn(row, 'reject', t('reviewReject')),
+              actionBtn(row, 'withdraw', t('reviewWithdraw')),
+            ),
+
+            pending && pending.docId === row.id
+              ? h('div', {
+                  style: {
+                    marginTop: 10,
+                    padding: 10,
+                    borderRadius: 8,
+                    background: 'var(--dsw-alias-bg-layer-2)',
+                    border: '1px solid var(--dsw-alias-border-l1)',
+                  },
+                },
+                  h('div', { style: { fontSize: 12, marginBottom: 6, color: 'var(--dsw-alias-label-secondary)' } },
+                    `${t('reviewConfirm')}: ${pending.action}`),
+                  pending.action === 'approve'
+                    ? null
+                    : h('textarea', {
+                        style: { ...S.input, width: '100%', minHeight: 56, boxSizing: 'border-box', marginBottom: 8 },
+                        placeholder: t('reviewReason'),
+                        value: reason,
+                        onChange: (event) => setReason(event.target.value),
+                      }),
+                  h('div', { style: { display: 'flex', gap: 8 } },
+                    h('button', {
+                      type: 'button',
+                      style: { ...S.btn, opacity: busy ? 0.6 : 1 },
+                      disabled: busy,
+                      onClick: submit,
+                    }, busy ? t('reviewBusy') : t('reviewConfirm')),
+                    h('button', {
+                      type: 'button',
+                      style: S.btn,
+                      disabled: busy,
+                      onClick: () => {
+                        setPending(null)
+                        setReason('')
+                      },
+                    }, t('reviewCancel')),
+                  ),
+                )
+              : null,
+          )
+        }),
       )
     }
 
@@ -543,7 +860,7 @@ window.__ModuleLoader__.load({
         h('h2', { style: S.h2 }, t('title')),
         h('p', { style: S.sub }, t('subtitle')),
         h('div', { style: S.tabs },
-          [['overview', t('tabOverview')], ['browse', t('tabBrowse')]].map(([value, label]) =>
+          [['overview', t('tabOverview')], ['browse', t('tabBrowse')], ['review', t('tabReview')], ['config', t('tabConfig')]].map(([value, label]) =>
             h('button', {
               key: value,
               type: 'button',
@@ -552,7 +869,11 @@ window.__ModuleLoader__.load({
             }, label),
           ),
         ),
-        tab === 'overview'
+        tab === 'config'
+          ? h(Config, { t })
+          : tab === 'review'
+          ? h(Review, { t })
+          : tab === 'overview'
           ? h(Overview, {
               data: overview.data,
               loading: overview.loading,

@@ -95,5 +95,25 @@ export function createReadClient(resolveConfig) {
     count: (index) => call(`/${encodeURIComponent(index)}/_count`),
     health: () => call('/_cluster/health'),
     catIndices: (names) => call(`/_cat/indices/${names.join(',')}?format=json&h=index,docs.count,store.size,health`),
+    /** 部分更新（审核动作用；需要 index 权限，只有整理身份有） */
+    update: (index, id, doc, options = {}) => {
+      const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
+      return call(
+        `/${encodeURIComponent(index)}/_update/${encodeURIComponent(id)}${query}`,
+        { method: 'POST', body: { doc } },
+      )
+    },
+    /**
+     * 写文档。`options.id` 有值就用它（PUT 幂等），否则让 ES 生成 id（写审计用）。
+     * 注意路径必须是 `/{index}/_doc`，`POST /{index}` 会 405（2026-10-25 写自检抓到的）。
+     */
+    index: (index, doc, options = {}) => {
+      const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
+      const idPart = options.id ? `/${encodeURIComponent(options.id)}` : ''
+      return call(`/${encodeURIComponent(index)}/_doc${idPart}${query}`, {
+        method: options.id ? 'PUT' : 'POST',
+        body: doc,
+      })
+    },
   }
 }
