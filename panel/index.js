@@ -492,11 +492,6 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
   const reason = str(input.reason).trim()
-  // 审计要能追到"谁"：actor 统一带 userId（panel:xqh / cli:xqh），
-  // 因为 ES 免费版没有安全审计日志，memory_audit 是唯一的人维度证据
-  const actorBase = str(input.actor).trim() || 'panel'
-  const actor = actorBase.includes(':') ? actorBase : `${actorBase}:${configRow.value.identity.userId}`
-
   if ((action === 'reject' || action === 'withdraw') && reason === '') {
     return json(res, 400, { ok: false, error: `${action} 必须填写原因` })
   }
@@ -514,6 +509,11 @@ async function handleReviewAction(ctx, res, docId, action, req) {
       error: '当前部署没有配置整理身份（identity.consolidatorPassword），审核动作不可用；请联系管理员',
     })
   }
+
+  // 审计要能追到"谁"：actor 统一带 userId（panel:xqh），因为免费版 ES 没有安全审计日志，
+  // memory_audit 是唯一的人维度证据。放在身份校验之后算，避免变量未初始化
+  const actorBase = str(input.actor).trim() || 'panel'
+  const actor = actorBase.includes(':') ? actorBase : `${actorBase}:${identity.userId}`
 
   const config = configRow.value
   const names = indexNames(config)

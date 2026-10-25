@@ -61,6 +61,11 @@ export interface SaveResult {
 }
 
 export interface SaveDeps {
+  /**
+   * 写入成功后触发（**不要 await**）：插件层用它排队后台蒸馏。
+   * save 必须立刻返回——蒸馏是"事后整理"，不能把入库卡在模型上。
+   */
+  onSaved?: (info: { memoryId: string; content: string; domain: string }) => void
   /** 取消信号（来自 exec.signal） */
   signal?: AbortSignal
   /** F2 注入源（来自 identity.userId） */
@@ -145,6 +150,9 @@ export function buildMemoryDoc(
     domain: input.domain?.trim() || deps.defaultDomain,
     privacy,
     promote_state: 'none',
+    // 蒸馏状态：入库立刻可见（pending），后台子代理处理后改成 done。
+    // 由插件自己写，不依赖 LLM —— 入库不能被模型可用性卡住。
+    distill_state: 'pending',
     status: 'active',
     content_sha256: sha256Hex(normalized),
     created_at: timestamp,
@@ -226,6 +234,19 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
     degraded,
     ...(embedFailure === undefined ? {} : { embed_failure: embedFailure }),
   })
+
+  // 后台蒸馏的入口：这里绝不能 await，也不能让它的异常冒出来影响"已保存"的结论
+  if (deps.onSaved) {
+    try {
+      deps.onSaved({
+        memoryId: String(built.doc.memory_id),
+        content: String(built.doc.content),
+        domain: String(built.doc.domain),
+      })
+    } catch (err) {
+      log({ tool: 'save', user: deps.userId, hook_error: String(err).slice(0, 200) })
+    }
+  }
 
   return {
     memory_id: String(built.doc.memory_id),

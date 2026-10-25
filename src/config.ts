@@ -53,6 +53,14 @@ export interface ConfigType {
   defaults: {
     domain: string
   }
+  distill: {
+    /** 保存后是否后台蒸馏（不阻塞入库） */
+    enabled: boolean
+    /** 模型路由；留空 = 用宿主第一个可用模型 */
+    provider: string
+    model: string
+    timeoutMs: number
+  }
 }
 
 export const Config: z<ConfigType> = z.object({
@@ -111,6 +119,12 @@ export const Config: z<ConfigType> = z.object({
   defaults: z.object({
     domain: z.string().default('general')
       .description('memory_save 未显式给 domain 时的缺省值；建议按项目填（如 lottery-cloud）。'),
+  }),
+  distill: z.object({
+    enabled: z.boolean().default(true),
+    provider: z.string().default(''),
+    model: z.string().default(''),
+    timeoutMs: z.number().default(30_000),
   }),
 })
 
