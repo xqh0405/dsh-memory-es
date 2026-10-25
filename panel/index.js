@@ -149,6 +149,11 @@ function indexNames(config) {
   }
 }
 
+/** 待裁决口径（概览计数与审核台队列共用，防止两处漂移） */
+function pendingQuery() {
+  return { bool: { filter: [{ term: { review_state: 'pending' } }, { term: { status: 'active' } }] } }
+}
+
 /** 团队库的审核过滤：默认只列可检索的；`includePending=1` 才把待裁决也列出来 */
 function teamReviewFilter(includePending) {
   return includePending
@@ -196,12 +201,19 @@ async function handleOverview(ctx, res) {
       .search(names.personal, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
       .then((r) => num(r.hits?.total?.value))
       .catch(() => -1),
+    // 团队口径必须带 status=active：否则已撤回(superseded)/已驳回(rejected)的文档只要
+    // review_state 还是 auto/approved 就会被算进"团队知识"（2026-10-25 实测多算了一条自检残留）
     client
-      .search(names.team, { size: 0, query: teamReviewFilter(false), track_total_hits: true })
+      .search(names.team, {
+        size: 0,
+        query: { bool: { filter: [teamReviewFilter(false), { term: { status: 'active' } }] } },
+        track_total_hits: true,
+      })
       .then((r) => num(r.hits?.total?.value))
       .catch(() => -1),
+    // 待裁决口径与审核台完全一致：review_state=pending **且** status=active
     client
-      .search(names.team, { size: 0, query: { terms: { review_state: ['pending'] } }, track_total_hits: true })
+      .search(names.team, { size: 0, query: pendingQuery(), track_total_hits: true })
       .then((r) => num(r.hits?.total?.value))
       .catch(() => -1),
     client
@@ -364,7 +376,7 @@ async function handlePending(ctx, res, url) {
   const result = await client.search(names.team, {
     size: limit,
     _source: { excludes: ['embedding'] },
-    query: { bool: { filter: [{ term: { review_state: 'pending' } }, { term: { status: 'active' } }] } },
+    query: pendingQuery(),
     sort: [{ promoted_at: 'asc' }],
   })
   const rows = (result.hits?.hits ?? []).map((hit) => {
