@@ -81,10 +81,9 @@ export async function promoteMemory(deps: PromoteDeps, input: PromoteInput): Pro
 }
 
 const DESCRIPTION = [
-  '把一条个人记忆标成「值得进团队知识库」的候选。',
-  '何时用：这条经验对别人也有用（接口契约、踩过的坑、口径约定），且不含个人隐私与凭证。',
-  '只置候选标记，不直接写团队库——去重与敏感扫描由整理任务负责。',
-  '同一条只需标一次；已经是 promoted 的会被跳过。',
+  '把一条个人记忆标成「值得进团队知识库」的候选——只打标记，不会直接写团队库。',
+  '适合：接口契约、通用踩坑、口径约定这类对别人也有用的经验；不含个人隐私与凭证。',
+  '去重与敏感扫描由整理任务负责，所以标了也不等于会进；同一条标一次就够，已晋升的会跳过。',
 ].join(' ')
 
 export function definePromoteTool(deps: PromoteDeps) {

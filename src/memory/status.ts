@@ -149,10 +149,10 @@ export async function updateStatus(
 }
 
 const DESCRIPTION = [
-  '改一条记忆的状态：supersede（被新版本取代）/ expire（过期）/ mark_private（标记私有）。',
-  '何时用：记忆过时了、被新决定覆盖了、或用户说「这条别用了」。',
-  '不物理删除——历史仍可审计，检索只取 status=active。',
-  'supersede 需要 replacement_memory_id，会同时把旧文档置 superseded 并给新文档回填 supersedes。',
+  '把一条记忆标成「过时」或「私有」，不物理删除（历史仍可审计，检索只取 active）。',
+  'supersede：被新版本取代，必须给 replacement_memory_id，会在新旧两条之间双向连线。',
+  'expire：直接作废。mark_private：涉及隐私、不再参与整理任务（状态不变）。',
+  '什么时候用：记忆过时了、被新决定覆盖了、或用户说「这条别用了」。不要靠重复写同内容来覆盖。',
 ].join(' ')
 
 export function defineStatusTool(deps: UpdateStatusDeps) {

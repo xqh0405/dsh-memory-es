@@ -12,11 +12,13 @@
 
 import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
+import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 
 import { Config, personalIndexName, validateConfig, type ConfigType } from './config.ts'
 import { createEmbedder } from './embedding.ts'
 import { createEsClient } from './es/http.ts'
 import { defineSaveTool } from './memory/save.ts'
+import { MEMORY_PROMPT_SECTION } from './prompt.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineSearchTool } from './memory/search.ts'
 import { defineStatusTool } from './memory/status.ts'
@@ -26,12 +28,13 @@ export type { ConfigType }
 
 type Context = CordisContext & {
   tools: ToolRegistry
+  systemPrompt: SystemPrompt
 }
 
 export const name = 'dsh-memory-es'
 
-/** 依赖的服务：tools（注册工具） */
-export const inject = ['tools']
+/** 依赖的服务：tools（注册工具）、systemPrompt（注入用法约定） */
+export const inject = ['tools', 'systemPrompt']
 
 /** embedding 冷启动实测约 2.2 s（首次加载模型），默认 15 s 足够 */
 const EMBEDDING_TIMEOUT_MS = 15_000
@@ -129,6 +132,8 @@ export function apply(ctx: Context, config: ConfigType): void {
       ),
     'dsh-memory-es.promote',
   )
+
+  ctx.effect(() => ctx.systemPrompt.section(MEMORY_PROMPT_SECTION), 'dsh-memory-es.prompt')
 
   logger.info(
     'ready: user=%s index=%s team=%s embed=%s@%s',

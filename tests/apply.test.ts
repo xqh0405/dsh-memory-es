@@ -45,12 +45,15 @@ interface FakeCtx {
   logs: string[]
   /** 存放 effect 注册的 disposer，用来验证卸载时能回收 */
   disposers: Array<() => void>
+  /** 注册过的提示词段 */
+  sections: Array<{ name: string; order: number; text: string }>
 }
 
 function fakeCtx(): FakeCtx {
   const registered: Array<{ name: string }> = []
   const logs: string[] = []
   const disposers: Array<() => void> = []
+  const sections: Array<{ name: string; order: number; text: string }> = []
   const ctx = {
     logger: () => ({
       info: (format: string, ...args: unknown[]) => logs.push(renderLog(format, args)),
@@ -66,13 +69,21 @@ function fakeCtx(): FakeCtx {
         }
       },
     },
+    systemPrompt: {
+      section: (section: { name: string; order: number; text: string }) => {
+        sections.push(section)
+        return () => {
+          sections.splice(sections.indexOf(section), 1)
+        }
+      },
+    },
     // 模拟 cordis 的 ctx.effect：立即执行 body 拿到 disposer，卸载时调用
     effect: (body: () => () => void) => {
       disposers.push(body())
       return () => {}
     },
   }
-  return { ctx, registered, logs, disposers }
+  return { ctx, registered, logs, disposers, sections }
 }
 
 describe('apply', () => {
@@ -98,9 +109,11 @@ describe('apply', () => {
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
     assert.equal(harness.registered.length, 4, '每个工具一次 effect')
-    assert.equal(harness.disposers.length, 4, '应当通过 ctx.effect 注册（而不是裸 register）')
+    assert.equal(harness.sections.length, 1, '提示词段也要走 effect')
+    assert.equal(harness.disposers.length, 5, '应当通过 ctx.effect 注册（而不是裸 register）')
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
+    assert.equal(harness.sections.length, 0)
   })
 
   test('配置非法：一次列出全部问题（不只报第一个）', () => {
@@ -122,9 +135,20 @@ describe('apply', () => {
     assert.throws(() => apply(fakeCtx().ctx as never, same), /同一个用户/)
   })
 
+  test('提示词段：名字/顺序正确，正文非空且不含会触发插值的花括号', () => {
+    const harness = fakeCtx()
+    apply(harness.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
+    assert.equal(harness.sections.length, 1)
+    const [section] = harness.sections
+    assert.equal(section.name, 'dsh-memory-es')
+    assert.equal(section.order, 3200)
+    assert.ok(section.text.includes('memory_search'))
+    assert.equal(section.text.includes('{{'), false)
+  })
+
   test('exports：name 与 inject 是插件契约的一部分', () => {
     assert.equal(name, 'dsh-memory-es')
-    assert.deepEqual(inject, ['tools'])
+    assert.deepEqual(inject, ['tools', 'systemPrompt'])
   })
 })
 
