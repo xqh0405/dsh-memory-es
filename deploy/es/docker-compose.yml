@@ -27,6 +27,10 @@ services:
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile:  { soft: 65536, hard: 65536 }
+    # 硬上限 6g = heap 2g + 堆外约 1g + page cache 约 3g。
+    # 不设限时 cgroup 记账会把 page cache 一路涨到宿主上限；
+    # 宿主 15 GiB 上还有 ollama（加载 bge-m3 约 1.2 GiB）与 dsh。
+    mem_limit: 6g
     volumes:
       - ./data:/usr/share/elasticsearch/data
       - ./certs:/usr/share/elasticsearch/config/certs
