@@ -28,6 +28,10 @@ if [ -f "$CERTS/elastic-certificates.p12" ] && [ "${FORCE:-0}" != "1" ]; then
   exit 0
 fi
 
+# 证书有效期（天）。默认 10 年：内部自签不受公网证书「≤398 天」限制（那是浏览器对公共
+# 信任链的要求），所以按"少折腾"取长。想短一点就 CERT_DAYS=1095（3 年）。
+CERT_DAYS="${CERT_DAYS:-3650}"
+
 # certutil 不会覆盖已有输出文件，重生成前必须先删
 if [ "${FORCE:-0}" = "1" ]; then
   rm -f "$CERTS/elastic-stack-ca.p12" "$CERTS/elastic-certificates.p12" "$CERTS/ca.crt"
@@ -35,13 +39,13 @@ fi
 
 echo "生成 CA ..."
 docker run --rm -v "$CERTS:/certs" "$IMG" \
-  bin/elasticsearch-certutil ca --silent --pass "$PASS" --out /certs/elastic-stack-ca.p12
+  bin/elasticsearch-certutil ca --silent --pass "$PASS" --days "$CERT_DAYS" --out /certs/elastic-stack-ca.p12
 
 echo "生成节点证书 ..."
 # --name/--dns/--ip 必须给：certutil 默认只签 CN=instance 且无 SAN，
 # 客户端访问 https://127.0.0.1:9200 会因主机名不匹配被 curl 拒绝。
 docker run --rm -v "$CERTS:/certs" "$IMG" \
-  bin/elasticsearch-certutil cert --silent --pass "$PASS" \
+  bin/elasticsearch-certutil cert --silent --pass "$PASS" --days "$CERT_DAYS" \
   --ca /certs/elastic-stack-ca.p12 --ca-pass "$PASS" \
   --name "$NODE_NAME" --dns "$CERT_DNS" --ip "$CERT_IP" \
   --out /certs/elastic-certificates.p12
@@ -51,4 +55,8 @@ docker run --rm --entrypoint bash -v "$CERTS:/certs" "$IMG" -c \
   "openssl pkcs12 -in /certs/elastic-stack-ca.p12 -nokeys -passin pass:$PASS -out /certs/ca.crt"
 
 chmod 600 "$CERTS"/*.p12
+echo "有效期 $CERT_DAYS 天；核对："
+docker run --rm --entrypoint bash -v "$CERTS:/certs" "$IMG" -c \
+  "openssl pkcs12 -in /certs/elastic-certificates.p12 -clcerts -nokeys -passin pass:$PASS | openssl x509 -noout -dates" \
+  2>/dev/null || true
 ls -l "$CERTS"
