@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'v8'
+    const BUILD = 'v9'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -31,7 +31,8 @@ window.__ModuleLoader__.load({
       cardTeam: '团队知识',
       cardPending: '待裁决',
       cardAudit: '审计事件',
-      cardAuditNA: '待整理身份（P3）',
+      cardAuditNA: '需配置整理身份（identity.consolidatorPassword）后可见',
+      cardAudit7d: '近 7 天',
       esOk: 'ES 正常',
       esDown: 'ES 不可达',
       esChecking: '正在检查…',
@@ -71,6 +72,8 @@ window.__ModuleLoader__.load({
       reviewConfirm: '确认',
       reviewCancel: '取消',
       reviewDone: '已完成',
+      reviewAuditFailed: '（审计写入失败，请查日志）',
+      browseTruncated: '结果窗口已到上限 500 条，请用搜索缩小范围',
       reviewNoWrite: '未配置整理身份（identity.consolidatorPassword），审核动作不可用。',
       reviewBusy: '处理中…',
       maintConsolidate: '整理任务',
@@ -130,7 +133,8 @@ window.__ModuleLoader__.load({
       cardTeam: 'Team',
       cardPending: 'Pending review',
       cardAudit: 'Audit events',
-      cardAuditNA: 'needs the consolidator identity (P3)',
+      cardAuditNA: 'visible once identity.consolidatorPassword is configured',
+      cardAudit7d: 'last 7 days',
       esOk: 'ES healthy',
       esDown: 'ES unreachable',
       esChecking: 'Checking…',
@@ -170,6 +174,8 @@ window.__ModuleLoader__.load({
       reviewConfirm: 'Confirm',
       reviewCancel: 'Cancel',
       reviewDone: 'Done',
+      reviewAuditFailed: '(audit write failed — check the log)',
+      browseTruncated: 'result window hit the 500-document cap; narrow the search',
       reviewNoWrite: 'Consolidator identity (identity.consolidatorPassword) is not configured; review actions are unavailable.',
       reviewBusy: 'Working…',
       maintExportNow: 'Export now',
@@ -431,7 +437,14 @@ window.__ModuleLoader__.load({
             value: show(counts.pending),
             hint: counts.pending > 0 ? '→ ' + t('tabBrowse') : '',
           }),
-          h(StatCard, { label: t('cardAudit'), value: '—', hint: t('cardAuditNA') }),
+          h(StatCard, {
+            label: t('cardAudit'),
+            value: counts.audit === null || counts.audit === undefined ? '—' : counts.audit,
+            hint:
+              counts.auditLast7d === null || counts.auditLast7d === undefined
+                ? t('cardAuditNA')
+                : `${t('cardAudit7d')} ${counts.auditLast7d}`,
+          }),
         ),
 
         h('div', { style: { ...S.card, marginBottom: 12 } },
@@ -753,8 +766,13 @@ window.__ModuleLoader__.load({
           confirm: true,
           actor: 'panel',
         })
-          .then(() => {
-            setDone(`${pending.action} ${pending.docId.slice(0, 8)} ✓`)
+          .then((value) => {
+            // 审计写失败时后端返回 auditWritten:false —— 不能让界面只说"成功"
+            setDone(
+              value?.auditWritten === false
+                ? `${pending.action} ${pending.docId.slice(0, 8)} ✓ ${t('reviewAuditFailed')}`
+                : `${pending.action} ${pending.docId.slice(0, 8)} ✓`,
+            )
             setPending(null)
             setReason('')
             load()
@@ -1012,7 +1030,10 @@ window.__ModuleLoader__.load({
 
               h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' } },
                 h('span', { style: { fontSize: 12, ...S.muted } },
-                  `${t('total')} ${total} ${t('rows')} · personal ${data?.totals?.personal ?? 0} / team ${data?.totals?.team ?? 0}`),
+                  [
+                    `${t('total')} ${total} ${t('rows')} · personal ${data?.totals?.personal ?? 0} / team ${data?.totals?.team ?? 0}`,
+                    data?.truncated ? `· ${t('browseTruncated')}` : '',
+                  ].join(' ')),
                 h('span', { style: { flex: 1 } }),
                 h('button', {
                   type: 'button',

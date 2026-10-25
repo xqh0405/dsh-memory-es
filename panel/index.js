@@ -190,6 +190,21 @@ async function handleOverview(ctx, res) {
   const names = indexNames(config)
   const client = createReadClient(() => resolveClientConfig(ctx))
 
+  // 审计计数：memory_audit 只给整理身份读（reader 无权限），没配整理身份时降级为 null
+  const auditClient = createReadClient(() => resolveClientConfig(ctx, 'consolidator'))
+  const auditStat = await auditClient
+    .search(AUDIT_INDEX, {
+      size: 0,
+      track_total_hits: true,
+      query: { match_all: {} },
+      aggs: { last7d: { filter: { range: { at: { gte: 'now-7d' } } } } },
+    })
+    .then((result) => ({
+      total: num(result.hits?.total?.value),
+      last7d: num(result.aggregations?.last7d?.doc_count),
+    }))
+    .catch(() => null)
+
   const [health, personalCount, teamCount, pendingCount, personalRecent, teamRecent] = await Promise.all([
     // 用「读一次个人库」当可达性探测：reader 角色没有 cluster:monitor/health 权限，
     // 直接打 /_cluster/health 会 403，把健康的库误判成 down（2026-10-25 踩过）。
@@ -249,7 +264,13 @@ async function handleOverview(ctx, res) {
         status: '',
         error: health.error ? String(health.error) : '',
       },
-      counts: { personal: personalCount, team: teamCount, pending: pendingCount, audit: null },
+      counts: {
+        personal: personalCount,
+        team: teamCount,
+        pending: pendingCount,
+        audit: auditStat ? auditStat.total : null,
+        auditLast7d: auditStat ? auditStat.last7d : null,
+      },
       recent,
       config: {
         url: config.es.url,
@@ -282,6 +303,13 @@ async function handleMemories(ctx, res, url) {
   const status = (params.get('status') ?? 'active').trim()
   const includePending = params.get('includePending') === '1'
 
+  // 跨两库分页：from/size 对每个库各算一次再合并排序 → 翻页会重复或漏条。
+  // 改成「每个库都从头取到第 page 页末尾，合并排序后再切片」，代价是深页取数多，故设窗口上限。
+  const WINDOW_MAX = 500
+  const wanted = (page + 1) * size
+  const windowSize = Math.min(wanted, WINDOW_MAX)
+  const truncated = wanted > WINDOW_MAX
+
   const buildBody = (isTeam) => {
     const filter = []
     if (status !== 'all') filter.push({ term: { status } })
@@ -302,8 +330,8 @@ async function handleMemories(ctx, res, url) {
             },
           ]
     return {
-      from: page * size,
-      size,
+      from: 0,
+      size: windowSize,
       track_total_hits: true,
       _source: { excludes: ['embedding'] },
       query: { bool: { must, filter } },
@@ -317,10 +345,11 @@ async function handleMemories(ctx, res, url) {
     scope !== 'personal' ? client.search(names.team, buildBody(true)) : Promise.resolve(emptyPage),
   ])
 
-  const rows = [
+  const merged = [
     ...(personal.hits?.hits ?? []).map((hit) => projectHit(hit, 'personal')),
     ...(team.hits?.hits ?? []).map((hit) => projectHit(hit, 'team')),
   ].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+  const rows = merged.slice(page * size, page * size + size)
 
   json(res, 200, {
     ok: true,
@@ -333,6 +362,9 @@ async function handleMemories(ctx, res, url) {
       page,
       size,
       rows,
+      // 深页超过窗口上限时，页尾可能不全 —— 明确告诉前端，别让人以为"没有更多了"
+      truncated,
+      windowSize,
     },
   })
 }
@@ -567,6 +599,69 @@ async function handleConfigWrite(ctx, res, req) {
   for (const change of changes) {
     if (typeof change?.key !== 'string' || !allowed.has(change.key)) {
       return json(res, 400, { ok: false, error: `不可修改的字段：${change?.key}` })
+    }
+  }
+
+  // 保存前校验：写错配置要当场拦住，而不是等重启后 dsh 连不上 ES 才发现
+  const currentRow = findEntryRow(ctx)
+  const currentValue = currentRow.ok ? currentRow.value : null
+  const patched = currentValue ? JSON.parse(JSON.stringify(currentValue)) : {}
+
+  for (const change of changes) {
+    const [group, key] = change.key.split('.')
+    const value = change.type === 'number' ? Number(change.value) : String(change.value)
+    if (change.type === 'number' && !Number.isFinite(value)) {
+      return json(res, 400, { ok: false, error: `${change.key} 必须是数字` })
+    }
+    if (patched[group] === undefined || patched[group] === null) patched[group] = {}
+    patched[group][key] = value
+
+    const { existsSync } = await import('node:fs')
+    if (change.key === 'es.url') {
+      let parsed
+      try {
+        parsed = new URL(value)
+      } catch {
+        return json(res, 400, { ok: false, error: `ES 地址不是合法 URL：${value}` })
+      }
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return json(res, 400, { ok: false, error: `ES 地址只支持 http/https，收到 ${parsed.protocol}` })
+      }
+    }
+    if (change.key === 'es.caCertPath' && value !== '' && !existsSync(value)) {
+      return json(res, 400, { ok: false, error: `CA 证书文件不存在：${value}` })
+    }
+    if (change.key === 'es.requestTimeoutMs' && (value < 500 || value > 60000)) {
+      return json(res, 400, { ok: false, error: '请求超时应在 500~60000 毫秒之间' })
+    }
+    if (change.key === 'embedding.dims' && (!Number.isInteger(value) || value <= 0)) {
+      return json(res, 400, { ok: false, error: '向量维度必须是正整数' })
+    }
+  }
+
+  // 改了连接相关的值就先探一次 ES：探不通不落盘，别把 dsh 写坏
+  const touchesConnection = changes.some((c) => c.key === 'es.url' || c.key === 'es.caCertPath')
+  if (touchesConnection && currentValue) {
+    const probe = createReadClient(() => ({
+      ok: true,
+      value: {
+        url: patched.es.url,
+        caCertPath: patched.es.caCertPath,
+        timeoutMs: patched.es.requestTimeoutMs,
+        auth: { username: currentValue.identity.readUsername, password: currentValue.identity.readPassword },
+      },
+    }))
+    try {
+      await probe.search(`${patched.index.personalPrefix}${currentValue.identity.userId}`, {
+        size: 0,
+        track_total_hits: true,
+        query: { match_all: {} },
+      })
+    } catch (error) {
+      return json(res, 400, {
+        ok: false,
+        error: `用新配置连不上 ES，未保存：${String(error?.message ?? error).slice(0, 300)}`,
+      })
     }
   }
 
@@ -916,6 +1011,22 @@ async function selfTest(ctx) {
     } catch {
       pendingInfo = `HTTP ${pendingRes.status} 非 JSON`
     }
+    // 翻页自检：page=0 与 page=1 各取 1 条，必须不是同一条（跨两库分页曾经的 bug）
+    let pagingInfo = '未测'
+    try {
+      const first = JSON.parse((await call('/memories?scope=both&size=1&page=0')).body)
+      const second = JSON.parse((await call('/memories?scope=both&size=1&page=1')).body)
+      const idOf = (body) => body.value?.rows?.[0]?.id ?? '(空)'
+      const a = idOf(first)
+      const b = idOf(second)
+      pagingInfo =
+        a === b && a !== '(空)'
+          ? `重复(${a})`
+          : `总=${first.value?.total ?? '?'} 第1条=${a} 第2条=${b}${first.value?.truncated ? ' 截断' : ''}`
+    } catch (error) {
+      pagingInfo = `失败 ${String(error?.message ?? error).slice(0, 80)}`
+    }
+
     const configRes = await call('/config')
     let configInfo = `HTTP ${configRes.status}`
     try {
@@ -939,7 +1050,8 @@ async function selfTest(ctx) {
       `[记忆库面板] 自检通过 | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
         `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
-        `浏览: ${listInfo} | 审核: ${pendingInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
+        `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
+        `审核: ${pendingInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
