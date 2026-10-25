@@ -31,7 +31,7 @@ import { runConsolidation, type RunReport } from './run.ts'
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const AUDIT_INDEX = 'memory_audit'
 
-type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw' | 'export'
+type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw' | 'export' | 'list'
 
 interface CliArgs {
   mode: Mode
@@ -52,6 +52,14 @@ interface CliArgs {
   since: Date | null
   /** --export 的输出目录（默认 <repo>/knowledge） */
   exportDir: string
+  /** --ls 的范围 */
+  scope: 'personal' | 'team' | 'both'
+  /** --ls 的 domain 过滤 */
+  domain: string[]
+  /** --ls 的状态过滤（默认 active；传 all 表示不过滤） */
+  status: string
+  /** --ls 是否把团队库的 pending 也列出来（默认不列，和检索口径一致） */
+  showPending: boolean
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -71,6 +79,10 @@ function parseArgs(argv: string[]): CliArgs {
     manual: true,
     since: null,
     exportDir: `${REPO_ROOT}knowledge`,
+    scope: 'both',
+    domain: [],
+    status: 'active',
+    showPending: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -129,6 +141,27 @@ function parseArgs(argv: string[]): CliArgs {
         args.mode = 'withdraw'
         args.target = requireValue(argv, ++i, '--withdraw 需要 doc_id')
         break
+      case '--ls':
+      case '--list':
+        args.mode = 'list'
+        break
+      case '--scope': {
+        const value = requireValue(argv, ++i, '--scope 需要 personal|team|both')
+        if (value !== 'personal' && value !== 'team' && value !== 'both') {
+          throw new Error('--scope 只支持 personal|team|both')
+        }
+        args.scope = value
+        break
+      }
+      case '--domain':
+        args.domain.push(requireValue(argv, ++i, '--domain 需要值'))
+        break
+      case '--status':
+        args.status = requireValue(argv, ++i, '--status 需要值（active|all|superseded|expired|rejected…）')
+        break
+      case '--show-pending':
+        args.showPending = true
+        break
       case '--export': {
         args.mode = 'export'
         // 目录可选：下一个参数不是 --flag 就当它
@@ -171,6 +204,13 @@ function printHelp(): void {
   --state <path>       状态文件（游标/幂等），默认 .state/consolidate.json
   --auto               按 §9.1 阈值判断是否该跑（默认手动模式，直接跑）
   --since <日期>       只看该时间之后创建的记忆（ISO 或 YYYY-MM-DD）
+
+查看记忆（只读）:
+  --ls                 列出记忆条目（个人库 + 团队库），最多 --limit 条
+  --scope <p|t|both>   只看 personal / team / 两者（默认 both）
+  --domain <名字>      按 domain 过滤，可重复
+  --status <状态>      默认 active；all=不过滤；也可传 superseded/expired/rejected
+  --show-pending       团队库把 review_state=pending 的也列出来（默认不列，与检索口径一致）
 
 审核台（S9）:
   --review list        列出待裁决条目（review_state=pending）
@@ -245,6 +285,12 @@ async function main(): Promise<void> {
   const embed = createEmbedder({ url: embeddingUrl, model: embeddingModel, dims })
   const log = (event: Record<string, unknown>): void => {
     if (process.env.CONSOLIDATE_VERBOSE === '1') console.error(`[debug] ${JSON.stringify(event)}`)
+  }
+
+  // 查看记忆（只读）：个人库 + 团队库
+  if (args.mode === 'list') {
+    await runList(args, { personalIndex, teamIndex, reader, limit: args.batchSize })
+    return
   }
 
   // Markdown 镜像：只读导出，不写 ES
@@ -323,6 +369,75 @@ async function main(): Promise<void> {
   } else {
     console.log('（dry-run：状态未写盘、团队库与个人库均未改动）')
   }
+}
+
+/** `--ls`：只读列条目。排序用 updated_at desc（最近动过的在最上面）。 */
+async function runList(
+  args: CliArgs,
+  deps: {
+    personalIndex: string
+    teamIndex: string
+    reader: ReturnType<typeof createEsClient>
+    limit: number
+  },
+): Promise<void> {
+  const buildQuery = (includeReviewState: boolean): Record<string, unknown> => {
+    const filter: Array<Record<string, unknown>> = []
+    if (args.status !== 'all') filter.push({ term: { status: args.status } })
+    if (args.domain.length > 0) filter.push({ terms: { domain: args.domain } })
+    if (includeReviewState && !args.showPending) {
+      // 与 memory_search 同口径：pending 默认不列（它是"还没定论"的东西）
+      filter.push({ terms: { review_state: ['auto', 'approved'] } })
+    }
+    return { bool: { filter } }
+  }
+
+  const rows: string[] = []
+  const counts: Record<string, number> = {}
+  const scan = async (index: string, label: string, includeReviewState: boolean): Promise<void> => {
+    const result = await deps.reader.search(index, {
+      size: deps.limit,
+      _source: { excludes: ['embedding'] },
+      query: buildQuery(includeReviewState),
+      sort: [{ updated_at: 'desc' }],
+    })
+    counts[label] = result.total
+    for (const hit of result.hits) {
+      const src = hit.source
+      const str = (k: string): string => (typeof src[k] === 'string' ? (src[k] as string) : '')
+      const state = includeReviewState ? `${str('status')}/${str('review_state') || '-'}` : str('status')
+      const content = str('content').replace(/\s+/g, ' ').slice(0, 56)
+      rows.push(
+        [
+          hit.id.slice(0, 8).padEnd(8),
+          label.padEnd(8),
+          (str('domain') || '-').padEnd(16).slice(0, 16),
+          (str('memory_type') || '-').padEnd(11).slice(0, 11),
+          state.padEnd(16).slice(0, 16),
+          (str('updated_at') || '-').slice(0, 19),
+          content,
+        ].join('  '),
+      )
+    }
+  }
+
+  if (args.scope !== 'team') await scan(deps.personalIndex, 'personal', false)
+  if (args.scope !== 'personal') await scan(deps.teamIndex, 'team', true)
+
+  console.log(`范围：${args.scope} | 状态：${args.status}${args.domain.length > 0 ? ` | domain: ${args.domain.join(',')}` : ''}${args.showPending ? ' | 含 pending' : ''}`)
+  console.log(
+    `${'id'.padEnd(8)}  ${'库'.padEnd(8)}  ${'domain'.padEnd(16)}  ${'type'.padEnd(11)}  ${'状态'.padEnd(16)}  ${'更新时间'.padEnd(19)}  content`,
+  )
+  if (rows.length === 0) {
+    console.log('（没有符合条件的记忆）')
+  } else {
+    for (const row of rows) console.log(row)
+  }
+  const summary = Object.entries(counts)
+    .map(([label, total]) => `${label}=${total}`)
+    .join(' ')
+  console.log('')
+  console.log(`共 ${summary}（最多显示 ${deps.limit} 条，用 --limit 调整）`)
 }
 
 async function runReview(

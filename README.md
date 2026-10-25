@@ -36,6 +36,10 @@ node consolidate/cli.ts --apply             # 真写团队库 + 回写个人库�
 node consolidate/cli.ts --auto              # 按 §9.1 阈值判断要不要跑
 node consolidate/cli.ts --since 2026-10-01  # 只看这天之后创建的记忆
 
+# 查看记忆（只读）
+node consolidate/cli.ts --ls                    # 个人库 + 团队库列表
+node consolidate/cli.ts --ls --scope team --show-pending   # 团队库含待裁决
+
 # 审核台（S9）：pending 已落库但不进检索
 node consolidate/cli.ts --review list               # 看待裁决队列
 node consolidate/cli.ts --approve <doc_id>          # 通过 → 进入检索
