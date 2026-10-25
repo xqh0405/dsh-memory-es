@@ -82,6 +82,27 @@ window.__ModuleLoader__.load({
       maintSnapshot: '快照',
       maintCron: '定时任务',
       maintResult: '结果',
+      labelPersonal: '个人库',
+      labelTeam: '团队库',
+      labelPending: '待裁决',
+      labelDir: '目录',
+      labelFiles: '文件数',
+      labelManagedBy: '管理者',
+      labelEntry: '配置行',
+      labelUser: '用户',
+      labelAuditIndex: '审计库',
+      labelReader: '只读身份',
+      labelWriter: '写身份',
+      labelConsolidator: '整理身份',
+      labelEmbedding: '向量模型',
+      labelSource: '来源',
+      stActive: '有效',
+      stPending: '待裁决',
+      stApproved: '已通过',
+      stRejected: '已驳回',
+      stSuperseded: '已撤回',
+      stAuto: '自动',
+      stExpired: '已过期',
       maintCliMissing: 'CLI 源码未随面板部署，整理与导出不可用',
       configTitle: '配置',
       configSave: '保存',
@@ -101,6 +122,27 @@ window.__ModuleLoader__.load({
       maintSnapshot: 'Snapshots',
       maintCron: 'Scheduled job',
       maintResult: 'Result',
+      labelPersonal: 'Personal',
+      labelTeam: 'Team',
+      labelPending: 'Pending',
+      labelDir: 'Directory',
+      labelFiles: 'Files',
+      labelManagedBy: 'Managed by',
+      labelEntry: 'Entry',
+      labelUser: 'User',
+      labelAuditIndex: 'Audit index',
+      labelReader: 'Reader identity',
+      labelWriter: 'Writer identity',
+      labelConsolidator: 'Consolidator identity',
+      labelEmbedding: 'Embedding model',
+      labelSource: 'Source',
+      stActive: 'active',
+      stPending: 'pending',
+      stApproved: 'approved',
+      stRejected: 'rejected',
+      stSuperseded: 'superseded',
+      stAuto: 'auto',
+      stExpired: 'expired',
       maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
       configTitle: 'Configuration',
       indexNames: '索引',
@@ -173,6 +215,27 @@ window.__ModuleLoader__.load({
       maintSnapshot: 'Snapshots',
       maintCron: 'Scheduled job',
       maintResult: 'Result',
+      labelPersonal: 'Personal',
+      labelTeam: 'Team',
+      labelPending: 'Pending',
+      labelDir: 'Directory',
+      labelFiles: 'Files',
+      labelManagedBy: 'Managed by',
+      labelEntry: 'Entry',
+      labelUser: 'User',
+      labelAuditIndex: 'Audit index',
+      labelReader: 'Reader identity',
+      labelWriter: 'Writer identity',
+      labelConsolidator: 'Consolidator identity',
+      labelEmbedding: 'Embedding model',
+      labelSource: 'Source',
+      stActive: 'active',
+      stPending: 'pending',
+      stApproved: 'approved',
+      stRejected: 'rejected',
+      stSuperseded: 'superseded',
+      stAuto: 'auto',
+      stExpired: 'expired',
       maintCliMissing: 'CLI sources were not shipped with the panel; consolidation and export are unavailable',
       configTitle: 'Configuration',
       configSave: 'Save',
@@ -320,6 +383,23 @@ window.__ModuleLoader__.load({
       const payload = await res.json()
       if (!payload.ok) throw new Error(payload.error || `HTTP ${res.status}`)
       return payload.value
+    }
+
+    const STATE_KEYS = {
+      active: 'stActive',
+      pending: 'stPending',
+      approved: 'stApproved',
+      rejected: 'stRejected',
+      superseded: 'stSuperseded',
+      auto: 'stAuto',
+      expired: 'stExpired',
+    }
+
+    /** 状态值中文化：不认识的值原样返回（宁可露原文，也别猜错语义） */
+    function stateLabel(value, t) {
+      if (!value) return ''
+      const key = STATE_KEYS[value]
+      return key ? t(key) : value
     }
 
     function shortTime(value) {
@@ -484,9 +564,9 @@ window.__ModuleLoader__.load({
         card(t('maintConsolidate'),
           h('div', null,
             line(t('maintLastRun'), data.lastRunAt || t('maintNever')),
-            line('personal', data.counts.personal),
-            line('team', data.counts.team),
-            line('pending', data.counts.pending),
+            line(t('labelPersonal'), data.counts.personal),
+            line(t('labelTeam'), data.counts.team),
+            line(t('labelPending'), data.counts.pending),
           ),
           [
             h('button', {
@@ -510,9 +590,9 @@ window.__ModuleLoader__.load({
 
         card(t('maintExport'),
           h('div', null,
-            line('dir', data.mirror.dir),
+            line(t('labelDir'), data.mirror.dir),
             line(t('maintLastRun'), data.mirror.latest || t('maintNever')),
-            line('files', data.mirror.exists ? data.mirror.files.length : 0),
+            line(t('labelFiles'), data.mirror.exists ? data.mirror.files.length : 0),
             data.mirror.files.length > 0
               ? h('div', { style: { ...S.mono, ...S.muted, fontSize: 11.5, marginTop: 4 } }, data.mirror.files.join('  '))
               : null,
@@ -527,14 +607,14 @@ window.__ModuleLoader__.load({
 
         card(t('maintSnapshot'),
           h('div', null,
-            line('managed by', data.snapshot.managedBy),
+            line(t('labelManagedBy'), data.snapshot.managedBy),
             h('p', { style: { ...S.muted, fontSize: 12, margin: '4px 0 0', lineHeight: 1.6 } }, data.snapshot.note),
           ),
         ),
 
         card(t('maintCron'),
           h('div', null,
-            line('managed by', data.cron.managedBy),
+            line(t('labelManagedBy'), data.cron.managedBy),
             h('p', { style: { ...S.muted, fontSize: 12, margin: '4px 0 0', lineHeight: 1.6 } }, data.cron.note),
           ),
         ),
@@ -659,15 +739,15 @@ window.__ModuleLoader__.load({
         h('div', { style: S.card },
           h('h3', { style: { margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t('configReadonly')),
           [
-            ['entry', data.readonly.entryLabel],
-            ['userId', data.readonly.userId],
-            ['personal', data.readonly.personalIndex],
-            ['team', data.readonly.teamIndex],
-            ['audit', data.readonly.auditIndex],
-            ['reader', data.readonly.reader],
-            ['writer', data.readonly.writer],
-            ['consolidator', `${data.readonly.consolidator}${data.readonly.consolidatorConfigured ? '' : '（密码未配置）'}`],
-            ['embedding', data.readonly.embedding],
+            [t('labelEntry'), data.readonly.entryLabel],
+            [t('labelUser'), data.readonly.userId],
+            [t('labelPersonal'), data.readonly.personalIndex],
+            [t('labelTeam'), data.readonly.teamIndex],
+            [t('labelAuditIndex'), data.readonly.auditIndex],
+            [t('labelReader'), data.readonly.reader],
+            [t('labelWriter'), data.readonly.writer],
+            [t('labelConsolidator'), `${data.readonly.consolidator}${data.readonly.consolidatorConfigured ? '' : '（密码未配置）'}`],
+            [t('labelEmbedding'), data.readonly.embedding],
           ].map(([label, value]) =>
             h('div', { key: label, style: { display: 'flex', gap: 10, marginBottom: 4, fontSize: 12 } },
               h('span', { style: { width: 130, ...S.muted } }, label),
@@ -749,7 +829,7 @@ window.__ModuleLoader__.load({
           const conflict = row.conflictWith ? conflicts.get(row.conflictWith) : null
           return h('div', { key: row.id, style: { ...S.card, marginBottom: 12 } },
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' } },
-              h('span', { style: S.pill('warn') }, row.reviewState || 'pending'),
+              h('span', { style: S.pill('warn') }, stateLabel(row.reviewState || 'pending', t)),
               h('span', { style: { ...S.mono, ...S.muted } }, row.domain || '-'),
               h('span', { style: { ...S.mono, ...S.muted } }, row.topicKey || '-'),
               h('span', { style: { flex: 1 } }),
@@ -757,7 +837,7 @@ window.__ModuleLoader__.load({
             ),
             h('p', { style: { margin: '0 0 8px', fontSize: 13, lineHeight: 1.7, color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap' } }, row.content),
             row.sourceUser
-              ? h('p', { style: { ...S.mono, ...S.muted, margin: '0 0 8px' } }, `source: ${row.sourceUser} / ${row.sourceMemoryId || '-'}`)
+              ? h('p', { style: { ...S.mono, ...S.muted, margin: '0 0 8px' } }, `${t('labelSource')}：${row.sourceUser} / ${row.sourceMemoryId || '-'}`)
               : null,
 
             conflict
@@ -949,7 +1029,9 @@ window.__ModuleLoader__.load({
                           h('td', { style: { ...S.td, ...S.mono } }, row.memoryType || '-'),
                           h('td', { style: S.td },
                             h('span', { style: S.pill(row.reviewState === 'pending' ? 'warn' : 'ok') },
-                              row.reviewState ? `${row.status}/${row.reviewState}` : row.status),
+                              row.reviewState
+                                ? `${stateLabel(row.status, t)}/${stateLabel(row.reviewState, t)}`
+                                : stateLabel(row.status, t)),
                           ),
                           h('td', { style: { ...S.td, ...S.mono } }, shortTime(row.updatedAt)),
                           h('td', { style: S.td },
@@ -994,7 +1076,12 @@ window.__ModuleLoader__.load({
                   [t('colScope'), selected.scope],
                   [t('colDomain'), selected.domain],
                   [t('colType'), selected.memoryType],
-                  [t('colStatus'), selected.reviewState ? `${selected.status}/${selected.reviewState}` : selected.status],
+                  [
+                    t('colStatus'),
+                    selected.reviewState
+                      ? `${stateLabel(selected.status, t)}/${stateLabel(selected.reviewState, t)}`
+                      : stateLabel(selected.status, t),
+                  ],
                   ['topic_key', selected.topicKey || '-'],
                   ['source_user', selected.sourceUser || '-'],
                   ['source_memory_id', selected.sourceMemoryId || '-'],

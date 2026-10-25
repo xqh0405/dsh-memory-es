@@ -829,7 +829,7 @@ async function writeSelfTest(ctx) {
       } catch {
         /* 原始片段 */
       }
-      console.error(`[memory-es-panel] 配置写入自检（空操作）HTTP ${res2.status} ${info}`)
+      console.error(`[记忆库面板] 配置写入自检（空操作）HTTP ${res2.status} ${info}`)
       try {
         rmSync('/data/dsh/profiles/web/.memory-es-selftest-config')
       } catch {
@@ -879,7 +879,7 @@ async function selfTest(ctx) {
   const result = await call('/overview')
 
   if (result.status !== 200) {
-    console.error(`[memory-es-panel] 自检失败 HTTP ${result.status} ${result.body.slice(0, 240)}`)
+    console.error(`[记忆库面板] 自检失败 HTTP ${result.status} ${result.body.slice(0, 240)}`)
     return
   }
   try {
@@ -924,9 +924,10 @@ async function selfTest(ctx) {
     }
 
     console.error(
-      `[memory-es-panel] 自检通过 entry=${payload.value?.config?.entryLabel ?? '?'} es=${es.reachable ? 'up' : 'down'} ` +
-        `personal=${counts.personal} team=${counts.team} pending=${counts.pending} recent=${payload.value?.recent?.length ?? 0} | ` +
-        `list: ${listInfo} | review: ${pendingInfo} | config: ${configInfo} | maint: ${maintInfo}`,
+      `[记忆库面板] 自检通过 | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
+        `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
+        `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
+        `浏览: ${listInfo} | 审核: ${pendingInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
@@ -941,7 +942,7 @@ export function apply(ctx) {
       path: ROUTE,
       handler: (req, res) => handle(ctx, req, res),
     })
-    console.error(`[memory-es-panel] 已注册只读路由 ${ROUTE}/{overview,memories}`)
+    console.error(`[记忆库面板] 已注册只读接口 ${ROUTE}/{overview,memories,review/pending,config,maintenance}`)
     void selfTest(ctx)
     void writeSelfTest(ctx)
     return dispose
