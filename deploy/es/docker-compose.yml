@@ -24,6 +24,7 @@ services:
       - xpack.security.transport.ssl.truststore.password=${CERT_PASS:-changeme}
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:?需要 deploy/es/.env 里的 ELASTIC_PASSWORD}
       - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - path.repo=/usr/share/elasticsearch/snapshots   # snapshot 仓库根目录（fs repo 必须在其下）
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile:  { soft: 65536, hard: 65536 }
@@ -35,6 +36,7 @@ services:
       - ./data:/usr/share/elasticsearch/data
       - ./certs:/usr/share/elasticsearch/config/certs
       - ./plugins/analysis-ik:/usr/share/elasticsearch/plugins/analysis-ik
+      - ./snapshots:/usr/share/elasticsearch/snapshots   # snapshot 产出；备份任务拷这个目录
     ports:
       - "127.0.0.1:9200:9200"              # 只绑回环，不对外暴露
     healthcheck:

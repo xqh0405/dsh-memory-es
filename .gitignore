@@ -180,6 +180,7 @@ deploy/es/.env
 deploy/es/certs/
 deploy/es/data/
 deploy/es/plugins/
+deploy/es/snapshots/
 /tmp/
 node_modules/
 lib/
