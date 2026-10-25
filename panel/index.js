@@ -37,6 +37,8 @@ const DEFAULTS = {
   },
   embedding: { url: 'http://127.0.0.1:11434', model: 'bge-m3', dims: 1024 },
   defaults: { domain: 'general' },
+  // 入库后的自动蒸馏（默认关：要花 token，用户在看板上自己打开）
+  distill: { enabled: false, provider: '', model: '', timeoutMs: 30000 },
 }
 
 /** 只合并已知的两层键：配置是固定 schema，不需要通用深合并 */
@@ -177,6 +179,19 @@ function indexNames(config) {
     team: config.index.team,
     audit: AUDIT_INDEX,
   }
+}
+
+/**
+ * 把面板提交的字符串/布尔统一成配置里该有的类型。
+ * 前端复选框传 true/false，输入框传字符串——这里一次收敛，别在写路径上散落类型判断。
+ */
+function coerceFieldValue(change) {
+  if (change.type === 'number') return Number(change.value)
+  if (change.type === 'boolean') {
+    const v = change.value
+    return v === true || v === 'true' || v === 1 || v === '1' || v === 'on'
+  }
+  return String(change.value)
 }
 
 /** 能否审核 = 有团队库写权限：单账号 + teamWrite，或旧的整理身份 */
@@ -592,6 +607,10 @@ const EDITABLE = [
   { path: ['embedding', 'model'], label: 'Embedding 模型', type: 'string' },
   { path: ['embedding', 'dims'], label: '向量维度', type: 'number' },
   { path: ['defaults', 'domain'], label: '默认 domain', type: 'string' },
+  // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用
+  { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
+  { path: ['distill', 'model'], label: '蒸馏模型', type: 'string', hint: '留空 = 用宿主第一个可用模型' },
+  { path: ['distill', 'timeoutMs'], label: '蒸馏超时(ms)', type: 'number' },
 ]
 
 function pick(config, path) {
@@ -664,7 +683,10 @@ async function handleConfigWrite(ctx, res, req) {
 
   for (const change of changes) {
     const [group, key] = change.key.split('.')
-    const value = change.type === 'number' ? Number(change.value) : String(change.value)
+    const value = coerceFieldValue(change)
+    if (change.type === 'boolean' && typeof value !== 'boolean') {
+      return json(res, 400, { ok: false, error: `${change.key} 只能是 true/false` })
+    }
     if (change.type === 'number' && !Number.isFinite(value)) {
       return json(res, 400, { ok: false, error: `${change.key} 必须是数字` })
     }
@@ -1252,6 +1274,7 @@ export function apply(ctx) {
  */
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
+  coerceFieldValue,
   entryLabels,
   findEntryRow,
   handleCapabilities,

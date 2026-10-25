@@ -105,7 +105,8 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
 })
 
 // ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
-const { handleCapabilities, handleReviewAction } = await import('../panel/index.js')
+const panel = await import('../panel/index.js')
+const { handleCapabilities, handleReviewAction } = panel
 
 const fs = await import('node:fs')
 const os = await import('node:os')
@@ -208,3 +209,16 @@ if (validateConfig) {
     assert.ok(problems.some((p) => p.includes('userId')), `实际：${problems}`)
   })
 }
+
+// ── 配置写入的类型收敛：布尔开关别把 true 写成字符串 "true" ──────────────
+test('coerceFieldValue：布尔/数字/字符串各归各位', () => {
+  const { coerceFieldValue } = panel
+  assert.equal(coerceFieldValue({ type: 'boolean', value: true }), true)
+  assert.equal(coerceFieldValue({ type: 'boolean', value: 'true' }), true)
+  assert.equal(coerceFieldValue({ type: 'boolean', value: 'false' }), false)
+  assert.equal(coerceFieldValue({ type: 'boolean', value: false }), false)
+  assert.equal(coerceFieldValue({ type: 'number', value: '30000' }), 30000)
+  assert.equal(coerceFieldValue({ type: 'string', value: 'bge-m3' }), 'bge-m3')
+  // 重点：布尔字段不能变成字符串，否则插件侧 z.boolean() 会拒配置
+  assert.notEqual(coerceFieldValue({ type: 'boolean', value: 'true' }), 'true')
+})

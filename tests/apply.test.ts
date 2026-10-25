@@ -159,6 +159,9 @@ describe('Config schema 默认值', () => {
     assert.equal(config.es.url, 'https://127.0.0.1:9200')
     assert.equal(config.es.requestTimeoutMs, 8000)
     assert.equal(config.index.personalPrefix, 'personal_memory_')
+    // 默认关闭：蒸馏要花 token，必须由用户在看板上显式打开
+    assert.equal(config.distill.enabled, false)
+    assert.equal(config.distill.timeoutMs, 30000)
     assert.equal(config.index.team, 'team_knowledge')
     assert.equal(config.embedding.model, 'bge-m3')
     assert.equal(config.embedding.dims, 1024)

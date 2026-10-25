@@ -712,8 +712,9 @@ window.__ModuleLoader__.load({
       }, [load])
 
       const data = state.data
+      const norm = (value) => (typeof value === 'boolean' ? String(value) : String(value ?? ''))
       const changed = data
-        ? data.fields.filter((field) => String(draft[field.key] ?? '') !== String(field.value ?? ''))
+        ? data.fields.filter((field) => norm(draft[field.key]) !== norm(field.value))
         : []
 
       const save = () => {
@@ -742,12 +743,22 @@ window.__ModuleLoader__.load({
           data.fields.map((field) =>
             h('div', { key: field.key, style: { display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 } },
               h('label', { style: { width: 130, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, field.label),
-              h('input', {
-                style: { ...S.input, flex: 1 },
-                type: field.type === 'number' ? 'number' : 'text',
-                value: draft[field.key] ?? '',
-                onChange: (event) => setDraft((prev) => ({ ...prev, [field.key]: event.target.value })),
-              }),
+              field.type === 'boolean'
+                ? h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', flex: 1, fontSize: 12.5 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: draft[field.key] === true || draft[field.key] === 'true',
+                      onChange: (event) => setDraft((prev) => ({ ...prev, [field.key]: event.target.checked })),
+                    }),
+                    h('span', { style: S.muted }, field.hint ?? ''),
+                  )
+                : h('input', {
+                    style: { ...S.input, flex: 1 },
+                    type: field.type === 'number' ? 'number' : 'text',
+                    value: draft[field.key] ?? '',
+                    placeholder: field.hint ?? '',
+                    onChange: (event) => setDraft((prev) => ({ ...prev, [field.key]: event.target.value })),
+                  }),
               h('code', { style: { ...S.mono, ...S.muted, width: 170 } }, field.key),
             ),
           ),

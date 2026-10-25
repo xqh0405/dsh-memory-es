@@ -121,7 +121,8 @@ export const Config: z<ConfigType> = z.object({
       .description('memory_save 未显式给 domain 时的缺省值；建议按项目填（如 lottery-cloud）。'),
   }),
   distill: z.object({
-    enabled: z.boolean().default(true),
+    // 默认关闭：蒸馏要花 token，等用户在看板上明确打开（2026-10-26 用户定的）
+    enabled: z.boolean().default(false),
     provider: z.string().default(''),
     model: z.string().default(''),
     timeoutMs: z.number().default(30_000),
