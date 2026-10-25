@@ -101,6 +101,13 @@ window.__ModuleLoader__.load({
       labelConsolidator: '整理身份',
       labelEmbedding: '向量模型',
       labelSource: '来源',
+      filterDomain: '领域',
+      filterType: '类型',
+      filterAll: '全部',
+      reviewPage: '第',
+      mirrorPreview: '查看内容',
+      mirrorEmpty: '（文件为空）',
+      mirrorTooBig: '文件超过 256 KB，不在面板里预览',
       stActive: '有效',
       stPending: '待裁决',
       stApproved: '已通过',
@@ -196,6 +203,13 @@ window.__ModuleLoader__.load({
       labelConsolidator: 'Consolidator identity',
       labelEmbedding: 'Embedding model',
       labelSource: 'Source',
+      filterDomain: 'Domain',
+      filterType: 'Type',
+      filterAll: 'All',
+      reviewPage: 'Page',
+      mirrorPreview: 'Preview',
+      mirrorEmpty: '(empty file)',
+      mirrorTooBig: 'File is larger than 256 KB; preview disabled',
       stActive: 'active',
       stPending: 'pending',
       stApproved: 'approved',
@@ -489,8 +503,10 @@ window.__ModuleLoader__.load({
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
     function Maintenance({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
+
       const [busy, setBusy] = React.useState('')
       const [result, setResult] = React.useState(null)
+      const [preview, setPreview] = React.useState(null)
 
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
@@ -575,7 +591,48 @@ window.__ModuleLoader__.load({
             line(t('maintLastRun'), data.mirror.latest || t('maintNever')),
             line(t('labelFiles'), data.mirror.exists ? data.mirror.files.length : 0),
             data.mirror.files.length > 0
-              ? h('div', { style: { ...S.mono, ...S.muted, fontSize: 11.5, marginTop: 4 } }, data.mirror.files.join('  '))
+              ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 } },
+                  data.mirror.files.map((name) =>
+                    h('button', {
+                      key: name,
+                      type: 'button',
+                      style: { ...S.btn, fontSize: 11.5, padding: '2px 8px' },
+                      onClick: () => {
+                        setPreview({ loading: true, name })
+                        apiGet('/maintenance/mirror', { name })
+                          .then((value) => setPreview({ loading: false, ...value }))
+                          .catch((error) => setPreview({ loading: false, name, error: String(error.message ?? error) }))
+                      },
+                    }, name),
+                  ),
+                )
+              : null,
+            preview
+              ? h('div', { style: { marginTop: 8, padding: '8px 10px', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-2)' } },
+                  h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 } },
+                    h('span', { style: { ...S.mono, fontSize: 12 } }, preview.name),
+                    preview.size !== undefined ? h('span', { style: { ...S.muted, fontSize: 11.5 } }, `${preview.size} B`) : null,
+                    h('span', { style: { flex: 1 } }),
+                    h('button', { type: 'button', style: { ...S.btn, fontSize: 11.5, padding: '2px 8px' }, onClick: () => setPreview(null) }, t('close')),
+                  ),
+                  preview.loading
+                    ? h('span', { style: S.muted }, t('loading'))
+                    : preview.error
+                    ? h('span', { style: S.err }, preview.error)
+                    : preview.truncated
+                    ? h('span', { style: { ...S.muted, fontSize: 12 } }, t('mirrorTooBig'))
+                    : h('pre', {
+                        style: {
+                          margin: 0,
+                          maxHeight: 260,
+                          overflow: 'auto',
+                          fontSize: 11.5,
+                          lineHeight: 1.6,
+                          whiteSpace: 'pre-wrap',
+                          color: 'var(--dsw-alias-label-secondary)',
+                        },
+                      }, preview.content === '' ? t('mirrorEmpty') : preview.content),
+                )
               : null,
           ),
           [h('button', {
@@ -746,13 +803,17 @@ window.__ModuleLoader__.load({
       const [reason, setReason] = React.useState('')
       const [busy, setBusy] = React.useState(false)
       const [done, setDone] = React.useState('')
+      const [page, setPage] = React.useState(0)
+      const size = 20
 
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
-        apiGet('/review/pending', { size: '50' })
+        apiGet('/review/pending', { size: String(size), page: String(page) })
           .then((data) => setState({ loading: false, error: '', data }))
           .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
-      }, [])
+      }, [page])
+
+      const totalPages = Math.max(1, Math.ceil((state.data?.total ?? 0) / size))
 
       React.useEffect(() => {
         load()
@@ -809,6 +870,26 @@ window.__ModuleLoader__.load({
 
         !state.loading && !state.error && rows.length === 0
           ? h('div', { style: S.card }, h('p', { style: S.muted }, t('reviewEmpty')))
+          : null,
+
+        (data?.total ?? 0) > size
+          ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
+              h('span', { style: { fontSize: 12, ...S.mono, ...S.muted } },
+                `${t('reviewPage')} ${page + 1}/${totalPages} · ${t('total')} ${data?.total ?? 0}`),
+              h('span', { style: { flex: 1 } }),
+              h('button', {
+                type: 'button',
+                style: { ...S.btn, opacity: page > 0 ? 1 : 0.5 },
+                disabled: page <= 0,
+                onClick: () => setPage((value) => Math.max(0, value - 1)),
+              }, t('prev')),
+              h('button', {
+                type: 'button',
+                style: { ...S.btn, opacity: page + 1 < totalPages ? 1 : 0.5 },
+                disabled: page + 1 >= totalPages,
+                onClick: () => setPage((value) => Math.min(totalPages - 1, value + 1)),
+              }, t('next')),
+            )
           : null,
 
         rows.map((row) => {
@@ -897,24 +978,60 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = React.useState('')
       const [status, setStatus] = React.useState('active')
       const [includePending, setIncludePending] = React.useState(true)
+      const [domains, setDomains] = React.useState([])
+      const [types, setTypes] = React.useState([])
       const [page, setPage] = React.useState(0)
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       const [selected, setSelected] = React.useState(null)
       const size = 20
+
+      // 过滤器候选值来自 /facets（后端聚合，前端不猜有哪些 domain）
+      React.useEffect(() => {
+        apiGet('/facets')
+          .then((value) => setFacets({ domains: value.domains ?? [], types: value.types ?? [] }))
+          .catch(() => setFacets({ domains: [], types: [] }))
+      }, [])
+      const [facets, setFacets] = React.useState({ domains: [], types: [] })
 
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
         const params = { scope, page: String(page), size: String(size), status }
         if (query.trim() !== '') params.q = query.trim()
         if (includePending) params.includePending = '1'
+        if (domains.length > 0) params.domain = domains.join(',')
+        if (types.length > 0) params.type = types.join(',')
         apiGet('/memories', params)
           .then((data) => setState({ loading: false, error: '', data }))
           .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
-      }, [scope, page, status, query, includePending])
+      }, [scope, page, status, query, includePending, domains, types])
 
       React.useEffect(() => {
         load()
       }, [load])
+
+      const toggle = (list, setList, value) => {
+        setPage(0)
+        setList(list.includes(value) ? list.filter((item) => item !== value) : [...list, value])
+      }
+
+      const filterRow = (label, items, selectedList, setList) =>
+        items.length === 0
+          ? null
+          : h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 } },
+              h('span', { style: { fontSize: 12, ...S.muted, width: 40 } }, label),
+              items.slice(0, 12).map((item) =>
+                h('button', {
+                  key: item.key,
+                  type: 'button',
+                  style: {
+                    ...S.pill(selectedList.includes(item.key) ? 'ok' : 'idle'),
+                    cursor: 'pointer',
+                    border: 'none',
+                  },
+                  onClick: () => toggle(selectedList, setList, item.key),
+                }, `${item.key} ${item.count}`),
+              ),
+            )
 
       const data = state.data
       const rows = data?.rows ?? []
@@ -979,6 +1096,8 @@ window.__ModuleLoader__.load({
             t('includePending'),
           ),
         ),
+        filterRow(t('filterDomain'), facets.domains, domains, setDomains),
+        filterRow(t('filterType'), facets.types, types, setTypes),
 
         state.loading ? h('p', { style: S.muted }, t('loading')) : null,
         state.error

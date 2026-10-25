@@ -298,8 +298,9 @@ async function handleMemories(ctx, res, url) {
   const page = Math.max(0, Number.parseInt(params.get('page') ?? '0', 10) || 0)
   const size = Math.min(100, Math.max(1, Number.parseInt(params.get('size') ?? '20', 10) || 20))
   const query = (params.get('q') ?? '').trim()
-  const domains = params.getAll('domain').filter(Boolean)
-  const types = params.getAll('type').filter(Boolean)
+  // 前端按逗号拼（省参数），也兼容多次传参
+  const domains = params.getAll('domain').flatMap((value) => value.split(',')).map((v) => v.trim()).filter(Boolean)
+  const types = params.getAll('type').flatMap((value) => value.split(',')).map((v) => v.trim()).filter(Boolean)
   const status = (params.get('status') ?? 'active').trim()
   const includePending = params.get('includePending') === '1'
 
@@ -403,13 +404,17 @@ async function handlePending(ctx, res, url) {
   const config = configRow.value
   const names = indexNames(config)
   const client = createReadClient(() => resolveClientConfig(ctx))
-  const limit = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '20', 10) || 20))
+  const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '20', 10) || 20))
+  const page = Math.max(0, Number.parseInt(url.searchParams.get('page') ?? '0', 10) || 0)
 
   const result = await client.search(names.team, {
-    size: limit,
+    from: page * size,
+    size,
     _source: { excludes: ['embedding'] },
     query: pendingQuery(),
-    sort: [{ promoted_at: 'asc' }],
+    // promoted_at 有并列（同一次整理推上来的），补 doc_id 保证翻页稳定。
+    // 注意不能用 _id：ES 默认禁止对 _id 做 fielddata 排序（400 实测过）。
+    sort: [{ promoted_at: 'asc' }, { doc_id: 'asc' }],
   })
   const rows = (result.hits?.hits ?? []).map((hit) => {
     const row = projectHit(hit, 'team')
@@ -432,6 +437,8 @@ async function handlePending(ctx, res, url) {
     ok: true,
     value: {
       total: num(result.hits?.total?.value),
+      page,
+      size,
       rows,
       conflicts,
       canWrite: Boolean(config.identity.consolidatorUsername && config.identity.consolidatorPassword),
@@ -694,6 +701,72 @@ async function handleConfigWrite(ctx, res, req) {
   })
 }
 
+/** GET /facets：浏览页过滤器的候选值（domain / memory_type，按文档数降序） */
+async function handleFacets(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  const aggBody = {
+    size: 0,
+    query: { term: { status: 'active' } },
+    aggs: {
+      domains: { terms: { field: 'domain', size: 30 } },
+      types: { terms: { field: 'memory_type', size: 30 } },
+    },
+  }
+  const [personal, team] = await Promise.all([
+    client.search(names.personal, aggBody).catch(() => ({ aggregations: {} })),
+    client.search(names.team, aggBody).catch(() => ({ aggregations: {} })),
+  ])
+
+  const merge = (field) => {
+    const buckets = new Map()
+    for (const side of [personal, team]) {
+      for (const bucket of side.aggregations?.[field]?.buckets ?? []) {
+        buckets.set(bucket.key, (buckets.get(bucket.key) ?? 0) + bucket.doc_count)
+      }
+    }
+    return [...buckets.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({ key, count }))
+  }
+
+  json(res, 200, { ok: true, value: { domains: merge('domains'), types: merge('types') } })
+}
+
+/** GET /maintenance/mirror?name=xxx.md：读镜像文件内容（只看不写） */
+async function handleMirrorFile(ctx, res, url) {
+  const name = (url.searchParams.get('name') ?? '').trim()
+  // 只允许镜像目录下的纯文件名：出现路径分隔符或 .. 一律拒绝
+  if (name === '' || name.includes('/') || name.includes('\\') || name.includes('..') || !name.endsWith('.md')) {
+    return json(res, 400, { ok: false, error: '文件名不合法（只接受镜像目录下的 .md 文件名）' })
+  }
+  const { existsSync, readFileSync, statSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const full = join(MIRROR_DIR, name)
+  if (!existsSync(full)) return json(res, 404, { ok: false, error: `镜像目录里没有 ${name}` })
+
+  const stat = statSync(full)
+  if (stat.size > 256 * 1024) {
+    return json(res, 200, {
+      ok: true,
+      value: { name, size: stat.size, mtime: stat.mtime.toISOString(), truncated: true, content: '' },
+    })
+  }
+  json(res, 200, {
+    ok: true,
+    value: {
+      name,
+      size: stat.size,
+      mtime: stat.mtime.toISOString(),
+      truncated: false,
+      content: readFileSync(full, 'utf8'),
+    },
+  })
+}
+
 /** 维护页状态：计数、最近整理、镜像目录、快照与定时任务的静态事实 */
 const STATE_DIR = '/data/dsh/memory-es-state'
 const MIRROR_DIR = '/data/dsh/memory-mirror'
@@ -815,6 +888,8 @@ async function handle(ctx, req, res) {
     if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
     if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
     if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res)
+    if (path === '/maintenance/mirror' && req.method === 'GET') return await handleMirrorFile(ctx, res, url)
+    if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
@@ -1035,6 +1110,26 @@ async function selfTest(ctx) {
     } catch {
       configInfo = `HTTP ${configRes.status} 非 JSON`
     }
+    const facetsRes = await call('/facets')
+    let facetsInfo = `HTTP ${facetsRes.status}`
+    try {
+      const body = JSON.parse(facetsRes.body)
+      facetsInfo = body.ok
+        ? `ok domains=${body.value?.domains?.length ?? 0} types=${body.value?.types?.length ?? 0}`
+        : `err ${body.error}`
+    } catch {
+      facetsInfo = `HTTP ${facetsRes.status} 非 JSON`
+    }
+
+    const mirrorRes = await call('/maintenance/mirror?name=INDEX.md')
+    let mirrorInfo = `HTTP ${mirrorRes.status}`
+    try {
+      const body = JSON.parse(mirrorRes.body)
+      mirrorInfo = body.ok ? `ok ${body.value?.size ?? 0}B` : `err ${body.error}`
+    } catch {
+      mirrorInfo = `HTTP ${mirrorRes.status} 非 JSON`
+    }
+
     const maintRes = await call('/maintenance')
     let maintInfo = `HTTP ${maintRes.status}`
     try {
@@ -1051,7 +1146,8 @@ async function selfTest(ctx) {
         `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
         `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
-        `审核: ${pendingInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
+        `审核: ${pendingInfo} | 过滤候选: ${facetsInfo} | 镜像预览: ${mirrorInfo} | ` +
+        `配置: ${configInfo} | 维护: ${maintInfo}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)
