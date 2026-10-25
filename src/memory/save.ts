@@ -24,6 +24,10 @@ import { dedupeBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
+import { assertDocOwner, personalIndexFor } from './common.ts'
+
+// F3 的断言搬到 common.ts（三个写侧工具共用），这里转出保持老调用点与测试不受影响
+export { assertDocOwner } from './common.ts'
 
 /** §3.3 的枚举，顺序即给模型看的顺序 */
 export const MEMORY_TYPES = ['preference', 'fact', 'task_progress', 'decision', 'context'] as const
@@ -90,18 +94,6 @@ function isIsoDate(value: Date): string {
 }
 
 /**
- * F3：写前断言归属一致。故意做成独立的纯函数——不然它会在“重构改错注入点”时
- * 跟着一起被改掉，那条断言就永远为真。
- */
-export function assertDocOwner(doc: Record<string, unknown>, userId: string): void {
-  if (doc.user_id !== userId) {
-    throw new Error(
-      `memory_save: F3 校验失败——待写文档 user_id（${String(doc.user_id)}）与 identity.userId（${userId}）不一致，已拒绝写入`,
-    )
-  }
-}
-
-/**
  * 纯函数：输入 → 待写文档。所有字段都显式给，**不读外部状态**（时钟/随机数/配置由参数进）。
  * 返回 index 而不是让调用方再拼一次，是为了让「文档里的 user_id」与「写进哪个索引」同源。
  */
@@ -164,7 +156,7 @@ export function buildMemoryDoc(
   }
 
   // F2 的同一性：索引名与 user_id 必须同源（前缀 + 同一 userId）
-  const index = `${deps.personalPrefix}${userId}`
+  const index = personalIndexFor(deps.personalPrefix, userId)
   return { doc, index, contentSha256: doc.content_sha256 as string }
 }
 
@@ -177,7 +169,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   const now = deps.now?.() ?? new Date()
   const newId = deps.newId ?? randomUUID
   const log = deps.log ?? (() => {})
-  const index = `${deps.personalPrefix}${deps.userId}`
+  const index = personalIndexFor(deps.personalPrefix, deps.userId)
 
   // 先算一遍拿到 sha 与校验（也会在这里拦空内容/超长），再决定是否去重
   const probe = buildMemoryDoc(input, deps, { now, memoryId: newId(), embedding: null })

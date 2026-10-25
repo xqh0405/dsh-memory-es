@@ -197,7 +197,7 @@ describe('assertDocOwner（F3）', () => {
   test('不一致时报错并点明两边值', () => {
     assert.throws(
       () => assertDocOwner({ user_id: 'someone-else' }, 'xqh'),
-      /F3 校验失败.*someone-else.*xqh/s,
+      /身份校验失败.*someone-else.*xqh/s,
     )
   })
 })

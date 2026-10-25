@@ -17,7 +17,9 @@ import { Config, personalIndexName, validateConfig, type ConfigType } from './co
 import { createEmbedder } from './embedding.ts'
 import { createEsClient } from './es/http.ts'
 import { defineSaveTool } from './memory/save.ts'
+import { definePromoteTool } from './memory/promote.ts'
 import { defineSearchTool } from './memory/search.ts'
+import { defineStatusTool } from './memory/status.ts'
 
 export { Config }
 export type { ConfigType }
@@ -98,6 +100,34 @@ export function apply(ctx: Context, config: ConfigType): void {
         }),
       ),
     'dsh-memory-es.search',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineStatusTool({
+          userId,
+          personalPrefix,
+          reader,
+          writer,
+          log: (event) => logger.info('status %o', event),
+        }),
+      ),
+    'dsh-memory-es.status',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        definePromoteTool({
+          userId,
+          personalPrefix,
+          reader,
+          writer,
+          log: (event) => logger.info('promote %o', event),
+        }),
+      ),
+    'dsh-memory-es.promote',
   )
 
   logger.info(
