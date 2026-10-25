@@ -182,6 +182,36 @@ function indexNames(config) {
 }
 
 /**
+ * 复用 dsh 自己的鉴权闸（ctx.connection.admit）。
+ *
+ * 为什么必须有：dsh 的原生路由（/api/*）是逐路由调用 `connection.admit(req)` 才 401 的，
+ * 不是全局中间件 —— 我们自己注册的 prefix 路由**不会自动被拦**。2026-10-26 实测：
+ * 不带 token 从局域网打 `http://192.168.50.114:3080/memory-es/api/memories` 返回 200 和全部记忆，
+ * 而同主机的 `/api/health` 返回 401。等于把整个记忆库开给了同一网段的任何人。
+ *
+ * 取不到 connection 服务时**失败关闭**（503）：宁可面板不可用，也不能裸奔。
+ * 返回 null = 放行；返回数字 = 该用这个 HTTP 状态拒绝。
+ */
+function admitRequest(ctx, req) {
+  let connection
+  try {
+    connection = typeof ctx.get === 'function' ? ctx.get('connection') : ctx.connection
+  } catch {
+    connection = undefined
+  }
+  if (!connection || typeof connection.admit !== 'function') return 503
+  try {
+    const admission = connection.admit(req)
+    if (admission && typeof admission === 'object' && 'rejection' in admission) {
+      return Number(admission.rejection) || 401
+    }
+    return null
+  } catch {
+    return 401
+  }
+}
+
+/**
  * 把面板提交的字符串/布尔统一成配置里该有的类型。
  * 前端复选框传 true/false，输入框传字符串——这里一次收敛，别在写路径上散落类型判断。
  */
@@ -1258,7 +1288,16 @@ export function apply(ctx) {
     const dispose = ctx.webServer.register({
       kind: 'prefix',
       path: ROUTE,
-      handler: (req, res) => handle(ctx, req, res),
+      handler: (req, res) => {
+        // 鉴权必须在任何业务分支之前：漏一次就等于整个记忆库对外开放
+        const rejection = admitRequest(ctx, req)
+        if (rejection !== null) {
+          res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(rejection === 503 ? 'memory-es panel: 鉴权服务不可用，已拒绝请求\n' : 'unauthorized\n')
+          return
+        }
+        return handle(ctx, req, res)
+      },
     })
     console.error(`[记忆库面板] 已注册只读接口 ${ROUTE}/{overview,memories,review/pending,config,maintenance}`)
     void selfTest(ctx)
@@ -1274,6 +1313,7 @@ export function apply(ctx) {
  */
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
+  admitRequest,
   coerceFieldValue,
   entryLabels,
   findEntryRow,

@@ -113,7 +113,8 @@ export function bm25Body(query: string, options: MetaFilterOptions = {}, topK = 
           {
             multi_match: {
               query: q,
-              fields: ['content^2', 'semantic_keywords^1.5'],
+              // summary 是蒸馏产出的一句话，检索时也要吃（否则辛苦蒸馏的摘要白存）
+              fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
               type: 'best_fields',
             },
           },

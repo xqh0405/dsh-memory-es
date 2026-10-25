@@ -222,3 +222,25 @@ test('coerceFieldValue：布尔/数字/字符串各归各位', () => {
   // 重点：布尔字段不能变成字符串，否则插件侧 z.boolean() 会拒配置
   assert.notEqual(coerceFieldValue({ type: 'boolean', value: 'true' }), 'true')
 })
+
+// ── 鉴权闸：面板路由必须复用 dsh 的 connection.admit（2026-10-26 修的真漏洞）──
+test('admitRequest：未登录返回 401，可信来源放行', () => {
+  const { admitRequest } = panel
+  const denied = { get: (name) => (name === 'connection' ? { admit: () => ({ rejection: 401 }) } : undefined) }
+  assert.equal(admitRequest(denied, {}), 401)
+
+  const forbidden = { get: () => ({ admit: () => ({ rejection: 403 }) }) }
+  assert.equal(admitRequest(forbidden, {}), 403)
+
+  const allowed = { get: () => ({ admit: () => ({ peer: { id: 'p1' } }) }) }
+  assert.equal(admitRequest(allowed, {}), null)
+})
+
+test('admitRequest：没有 connection 服务时失败关闭（503），不能放行', () => {
+  const { admitRequest } = panel
+  assert.equal(admitRequest({ get: () => undefined }, {}), 503)
+  assert.equal(admitRequest({}, {}), 503)
+  // admit 自己抛错也不能当成放行
+  const broken = { get: () => ({ admit: () => { throw new Error('boom') } }) }
+  assert.equal(admitRequest(broken, {}), 401)
+})
