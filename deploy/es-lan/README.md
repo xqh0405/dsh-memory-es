@@ -84,3 +84,47 @@ bash scripts/init-user.sh <uid> --team-read   # 其余成员
 配置写在 `profiles/web/cordis.patch.yml` 的 `- id: dsh-memory-es` 段里，
 `es.url` 用 `https://dsh-es:9200`，`caCertPath` 指 `/home/node/ca-memory-es.crt`
 （CA 放在 home 卷 `dsh-home-<uid>` 里）。
+
+`dsh-mnemon` 与本插件的工具名不冲突：本插件占 `memory_*`（search/save/promote/distill/
+update_status），mnemon 占 `mnemon_*`。两个可以并存，迁移完成后 `memory_search` 查的是
+ES 新库，`mnemon_recall` 还是旧库。
+
+## 个人记忆迁移（从 dsh-mnemon 的 SQLite）
+
+每个容器的个人记忆在 home 卷里：
+
+```
+/docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/data/default/mnemon.db
+```
+
+表 `insights` 是记忆正文（`edges` 是关系图，本插件的索引没有对应概念，不迁）。
+
+**必须重算向量**：mnemon 用 nomic-embed-text（768 维），本库 mapping 是 bge-m3（1024 维），
+维度不同不能复用，强行写会 400。125 宿主 Ollama 已有 `bge-m3:latest`。
+
+```bash
+cd /docker/dsh-es
+ES_PW=$(grep '^MEM_PASSWORD=' users/<uid>.env | cut -d= -f2-)
+python3 scripts/migrate-mnemon.py \
+  --db /docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/data/default/mnemon.db \
+  --user <uid> \
+  --es https://192.168.1.125:9200 --ca /docker/dsh-es/certs/ca.crt \
+  --username mem-user-<uid> --password-env ES_PW \
+  --ollama http://127.0.0.1:11434 --model bge-m3
+```
+
+要点：
+
+- **幂等**：以 mnemon 的 insight id 作 ES 文档 id，重复跑覆盖同一条，不会翻倍
+- 密码走环境变量（`--password-env`），不进 argv
+- 只迁 `deleted_at is null` 的条目；`content` 超 4000 字符截断
+- `category` 映射到 memory_type：`insight`/`general` 并入 `fact`（mnemon 的分类比本插件多两档）
+- `distill_state` 直接写 `done`：这些是已经整理过的旧记忆，再走一遍后台蒸馏只会被重写
+- `domain` 统一 `general`（mnemon 没有 domain 概念），分类信息保留在 `semantic_keywords`
+- 个人账号没有 `indices:admin/refresh` 权限，脚本末尾的手动 refresh 会 403 —— 不是错误，
+  等 `refresh_interval`（5s）自动可见
+- 先 `--dry-run` 看条数，再 `--limit 5` 试点，最后全量
+
+2026-10-26 实测：只有 `xqh` 有数据（250 条，全部带向量），其余 8 个容器的 `insights` 为空
+（`tanxu` 有 1 条但已软删除）。
+
