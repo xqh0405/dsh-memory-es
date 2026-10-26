@@ -29,6 +29,8 @@ window.__ModuleLoader__.load({
       tabMaint: '维护',
       cardPersonal: '个人记忆',
       cardTeam: '团队知识',
+      cardDocs: '文档',
+      cardDocChunks: '分块',
       cardPending: '待裁决',
       cardAudit: '审计事件',
       cardAuditNA: '需配置整理身份（identity.consolidatorPassword）后可见',
@@ -48,7 +50,7 @@ window.__ModuleLoader__.load({
       includePending: '含待裁决',
       colContent: '内容',
       colScope: '库',
-      colDomain: 'domain',
+      colDomain: '领域',
       colType: '类型',
       colStatus: '状态',
       colUpdated: '更新时间',
@@ -92,6 +94,7 @@ window.__ModuleLoader__.load({
       maintResult: '结果',
       labelPersonal: '个人库',
       labelTeam: '团队库',
+      labelDocs: '文档数',
       labelPending: '待裁决',
       labelDir: '目录',
       labelFiles: '文件数',
@@ -106,6 +109,13 @@ window.__ModuleLoader__.load({
       labelSource: '来源',
       filterDomain: '领域',
       filterType: '类型',
+      tpContext: '上下文',
+      tpFact: '事实',
+      tpPreference: '偏好',
+      tpInsight: '洞察',
+      tpDecision: '决定',
+      tpGeneral: '通用',
+      dmGeneral: '通用',
       filterAll: '全部',
       reviewPage: '第',
       mirrorPreview: '查看内容',
@@ -141,6 +151,8 @@ window.__ModuleLoader__.load({
       tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
       cardTeam: 'Team',
+      cardDocs: 'Docs',
+      cardDocChunks: 'chunks',
       cardPending: 'Pending review',
       cardAudit: 'Audit events',
       cardAuditNA: 'visible once identity.consolidatorPassword is configured',
@@ -197,6 +209,7 @@ window.__ModuleLoader__.load({
       maintResult: 'Result',
       labelPersonal: 'Personal',
       labelTeam: 'Team',
+      labelDocs: 'Docs',
       labelPending: 'Pending',
       labelDir: 'Directory',
       labelFiles: 'Files',
@@ -211,6 +224,13 @@ window.__ModuleLoader__.load({
       labelSource: 'Source',
       filterDomain: 'Domain',
       filterType: 'Type',
+      tpContext: 'Context',
+      tpFact: 'Fact',
+      tpPreference: 'Preference',
+      tpInsight: 'Insight',
+      tpDecision: 'Decision',
+      tpGeneral: 'General',
+      dmGeneral: 'General',
       filterAll: 'All',
       reviewPage: 'Page',
       mirrorPreview: 'Preview',
@@ -387,6 +407,31 @@ window.__ModuleLoader__.load({
       superseded: 'stSuperseded',
       auto: 'stAuto',
       expired: 'stExpired',
+    }
+
+    // 记忆类型中文化：只翻语义明确的枚举值，认不出的原样露出
+    const TYPE_KEYS = {
+      context: 'tpContext',
+      fact: 'tpFact',
+      preference: 'tpPreference',
+      insight: 'tpInsight',
+      decision: 'tpDecision',
+      general: 'tpGeneral',
+    }
+
+    // 领域里只有「未分类」这个语义值需要翻；lottery-cloud 之类是业务代号，原样保留
+    const DOMAIN_KEYS = { general: 'dmGeneral' }
+
+    function typeLabel(value, t) {
+      if (!value) return '-'
+      const key = TYPE_KEYS[value]
+      return key ? t(key) : value
+    }
+
+    function domainLabel(value, t) {
+      if (!value) return '-'
+      const key = DOMAIN_KEYS[value]
+      return key ? t(key) : value
     }
 
     /** 状态值中文化：不认识的值原样返回（宁可露原文，也别猜错语义） */
@@ -574,7 +619,7 @@ window.__ModuleLoader__.load({
 
         card(t('maintConsolidate'),
           h('div', null,
-            line(t('maintLastRun'), data.lastRunAt || t('maintNever')),
+            line(t('maintLastRun'), data.lastRunAt ? shortTime(data.lastRunAt) : t('maintNever')),
             line(t('labelPersonal'), data.counts.personal),
             line(t('labelTeam'), data.counts.team),
             line(t('labelDocs'), data.counts.docs),
@@ -603,7 +648,7 @@ window.__ModuleLoader__.load({
         card(t('maintExport'),
           h('div', null,
             line(t('labelDir'), data.mirror.dir),
-            line(t('maintLastRun'), data.mirror.latest || t('maintNever')),
+            line(t('maintLastRun'), data.mirror.latest ? shortTime(data.mirror.latest) : t('maintNever')),
             line(t('labelFiles'), data.mirror.exists ? data.mirror.files.length : 0),
             data.mirror.files.length > 0
               ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 } },
@@ -1040,7 +1085,7 @@ window.__ModuleLoader__.load({
         setList(list.includes(value) ? list.filter((item) => item !== value) : [...list, value])
       }
 
-      const filterRow = (label, items, selectedList, setList) =>
+      const filterRow = (label, items, selectedList, setList, format = (k) => k) =>
         items.length === 0
           ? null
           : h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 } },
@@ -1055,7 +1100,7 @@ window.__ModuleLoader__.load({
                     border: 'none',
                   },
                   onClick: () => toggle(selectedList, setList, item.key),
-                }, `${item.key} ${item.count}`),
+                }, `${format(item.key)} ${item.count}`),
               ),
             )
 
@@ -1122,8 +1167,8 @@ window.__ModuleLoader__.load({
             t('includePending'),
           ),
         ),
-        filterRow(t('filterDomain'), facets.domains, domains, setDomains),
-        filterRow(t('filterType'), facets.types, types, setTypes),
+        filterRow(t('filterDomain'), facets.domains, domains, setDomains, (k) => domainLabel(k, t)),
+        filterRow(t('filterType'), facets.types, types, setTypes, (k) => typeLabel(k, t)),
 
         state.loading ? h('p', { style: S.muted }, t('loading')) : null,
         state.error
@@ -1156,8 +1201,8 @@ window.__ModuleLoader__.load({
                           h('td', { style: { ...S.td, maxWidth: 360 } },
                             row.content.length > 80 ? `${row.content.slice(0, 80)}…` : row.content),
                           h('td', { style: S.td }, h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal'))),
-                          h('td', { style: { ...S.td, ...S.mono } }, row.domain || '-'),
-                          h('td', { style: { ...S.td, ...S.mono } }, row.memoryType || '-'),
+                          h('td', { style: { ...S.td, ...S.mono } }, domainLabel(row.domain, t)),
+                          h('td', { style: { ...S.td, ...S.mono } }, typeLabel(row.memoryType, t)),
                           h('td', { style: S.td },
                             h('span', { style: S.pill(row.reviewState === 'pending' ? 'warn' : 'ok') },
                               row.reviewState
@@ -1176,7 +1221,7 @@ window.__ModuleLoader__.load({
               h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' } },
                 h('span', { style: { fontSize: 12, ...S.muted } },
                   [
-                    `${t('total')} ${total} ${t('rows')} · personal ${data?.totals?.personal ?? 0} / team ${data?.totals?.team ?? 0}`,
+                    `${t('total')} ${total} ${t('rows')} · ${t('scopePersonal')} ${data?.totals?.personal ?? 0} / ${t('scopeTeam')} ${data?.totals?.team ?? 0}`,
                     data?.truncated ? `· ${t('browseTruncated')}` : '',
                   ].join(' ')),
                 h('span', { style: { flex: 1 } }),
@@ -1208,8 +1253,8 @@ window.__ModuleLoader__.load({
                 [
                   ['id', selected.id],
                   [t('colScope'), selected.scope],
-                  [t('colDomain'), selected.domain],
-                  [t('colType'), selected.memoryType],
+                  [t('colDomain'), domainLabel(selected.domain, t)],
+                  [t('colType'), typeLabel(selected.memoryType, t)],
                   [
                     t('colStatus'),
                     selected.reviewState

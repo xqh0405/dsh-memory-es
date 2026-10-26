@@ -982,12 +982,12 @@ async function handleMaintenanceGet(ctx, res) {
       cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },
       // 静态事实：这两件事不由面板管，写清楚免得误以为是面板漏了功能
       snapshot: {
-        managedBy: 'ES SLM（策略 dsh_memory_daily，每日 03:30，保留 14 天）',
-        note: 'reader 身份没有 cluster:monitor 权限，面板读不到快照状态；用 curl 或 Kibana 看 _snapshot。',
+        managedBy: 'ES 快照生命周期管理（策略 dsh_memory_daily，每日 03:30 执行，保留 14 天）',
+        note: '只读身份没有 cluster:monitor 权限，面板读不到快照状态；请用 curl 或 Kibana 查看 _snapshot。',
       },
       cron: {
-        managedBy: '宿主 crontab（scripts/memory-cron.sh，默认关闭）',
-        note: '开关在 <repo>/.state/cron.env 的 MEMCRON_ENABLED；面板不代改宿主 cron。',
+        managedBy: '宿主机 crontab（脚本 scripts/memory-cron.sh，默认关闭）',
+        note: '总开关在记忆库仓库的 .state/cron.env 里（变量 MEMCRON_ENABLED）；面板不会代改宿主机 cron。',
       },
     },
   })
