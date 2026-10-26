@@ -9,10 +9,10 @@
     "memory",
     "elasticsearch"
   ],
-  "homepage": "https://gitee.com/xqh/dsh-memory-es",
+  "homepage": "https://github.com/xqh0405/dsh-memory-es",
   "repository": {
     "type": "git",
-    "url": "https://gitee.com/xqh/dsh-memory-es.git"
+    "url": "https://github.com/xqh0405/dsh-memory-es.git"
   },
   "author": "xqh",
   "license": "MIT",

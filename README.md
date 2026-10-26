@@ -21,7 +21,7 @@
 **本仓库不提交构建产物**（`lib/` 在 `.gitignore` 里），所以安装分两步：先构建，再作为本地包装进 profile。
 
 ```bash
-git clone https://gitee.com/xqh/dsh-memory-es.git
+git clone https://github.com/xqh0405/dsh-memory-es.git
 cd dsh-memory-es
 
 # 1. 构建：装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
