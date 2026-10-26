@@ -22,6 +22,7 @@ import { MEMORY_PROMPT_SECTION } from './prompt.ts'
 import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
+import { defineDocSearchTool } from './memory/doc-search.ts'
 import { defineSearchTool } from './memory/search.ts'
 import { defineStatusTool } from './memory/status.ts'
 
@@ -157,6 +158,22 @@ export function apply(ctx: Context, config: ConfigType): void {
         }),
       ),
     'dsh-memory-es.search',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineDocSearchTool({
+          userId,
+          docPrefix: config.index.docPrefix,
+          reader,
+          embed,
+          dims: config.embedding.dims,
+          retrieval: config.retrieval,
+          log: (event) => logger.info('doc_search %o', event),
+        }),
+      ),
+    'dsh-memory-es.doc-search',
   )
 
   ctx.effect(

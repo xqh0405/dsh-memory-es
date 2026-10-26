@@ -19,6 +19,8 @@ export interface ConfigType {
   }
   index: {
     personalPrefix: string
+    /** 文档索引前缀；实际索引 = 前缀 + identity.userId（与记忆分开，见 README 文档入库方案） */
+    docPrefix: string
     team: string
   }
   identity: {
@@ -75,6 +77,8 @@ export const Config: z<ConfigType> = z.object({
   index: z.object({
     personalPrefix: z.string().default('personal_memory_')
       .description('个人索引前缀；实际索引 = 前缀 + identity.userId（一人一索引）。'),
+    docPrefix: z.string().default('personal_doc_')
+      .description('个人文档索引前缀；实际索引 = 前缀 + identity.userId。与记忆索引分开：文档是长文切片，记忆是一句事实。'),
     team: z.string().default('team_knowledge')
       .description('团队知识库索引名。'),
   }),
