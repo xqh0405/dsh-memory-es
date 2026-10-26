@@ -89,23 +89,27 @@ bash scripts/init-user.sh <uid> --team-read   # 其余成员
 update_status），mnemon 占 `mnemon_*`。两个可以并存，迁移完成后 `memory_search` 查的是
 ES 新库，`mnemon_recall` 还是旧库。
 
-## 个人记忆迁移（从 dsh-mnemon 的 SQLite）
+## 个人记忆迁移（从 dsh-mnemon）
 
-每个容器的个人记忆在 home 卷里：
+⚠️ **一个容器的 `.mnemon` 里有三类东西，别只看其中一类就判「空库」**：
 
 ```
-/docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/data/default/mnemon.db
+/docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/
+  data/default/mnemon.db          # 记忆条目（insights 表）+ 关系图（edges，不迁）
+  runtime/memories.json           # 热记忆【结构源】；MEMORY.md/USER.md 只是它的文本投影
+  documents/active/<id>.md        # 项目文档（长文，不是"记忆条目"）
 ```
 
-表 `insights` 是记忆正文（`edges` 是关系图，本插件的索引没有对应概念，不迁）。
+`insights` 空不代表没记忆——热记忆和 Documents 都在，2026-10-26 排查时就栽在这一步。
 
-**必须重算向量**：mnemon 用 nomic-embed-text（768 维），本库 mapping 是 bge-m3（1024 维），
-维度不同不能复用，强行写会 400。125 宿主 Ollama 已有 `bge-m3:latest`。
+### 一、记忆条目（insights）
+
+表 `insights` 是结构化记忆（`edges` 是关系图，本插件没有对应概念，不迁）。
 
 ```bash
 cd /docker/dsh-es
 ES_PW=$(grep '^MEM_PASSWORD=' users/<uid>.env | cut -d= -f2-)
-python3 scripts/migrate-mnemon.py \
+python3 scripts/migrate-mnemon.py --source insights \
   --db /docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/data/default/mnemon.db \
   --user <uid> \
   --es https://192.168.1.125:9200 --ca /docker/dsh-es/certs/ca.crt \
@@ -113,18 +117,57 @@ python3 scripts/migrate-mnemon.py \
   --ollama http://127.0.0.1:11434 --model bge-m3
 ```
 
-要点：
+- 以 insight id 作 ES 文档 id，**幂等**
+- 只迁 `deleted_at is null`；`content` 超 4000 字符截断
+- `category` 映射：`insight`/`general` 并入 `fact`（mnemon 比本插件多两档）
+- `semantic_keywords` 收 tags + entities
 
-- **幂等**：以 mnemon 的 insight id 作 ES 文档 id，重复跑覆盖同一条，不会翻倍
+### 二、热记忆（runtime/memories.json）
+
+**必须从 `memories.json` 读，不要解析 `MEMORY.md`**：后者是前者的投影（`§` 分隔 + 元数据行），
+解析文本容易把 `[importance=...]` 行混进正文。结构源是
+`{version, entries:[{content, created_at, updated_at, target, importance, origin, branches?}]}`。
+
+```bash
+python3 scripts/migrate-mnemon.py --source runtime \
+  --runtime-file /docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/runtime/memories.json \
+  --user <uid> --es https://192.168.1.125:9200 --ca /docker/dsh-es/certs/ca.crt \
+  --username mem-user-<uid> --password-env ES_PW \
+  --ollama http://127.0.0.1:11434 --model bge-m3
+```
+
+- 热记忆没有 id，用 `sha256(用户|归一化正文)` 派生成 `rt-<32hex>` 作文档 id → **幂等**
+- `target=user`（用户画像）→ `memory_type=preference`；`target=memory` → `fact`
+- 正文里的 `[DSH·环境]` 这类前缀，取第一段作 `domain`（`dsh`），**正文原样保留**
+- `importance`（critical/normal/low）本插件的 mapping 没有对应字段，不迁
+
+### 三、Documents（不迁，另行处理）
+
+`documents/active/*.md` 是项目文档（xqh 361 篇 3.2M，多篇超过 4KB）。它们是"知识/文档"，
+不是「一句可独立成立的事实」，硬塞进 `personal_memory_*` 要么截断丢信息、要么撑爆 4000 字符上限。
+需要时另行决定去向（团队库 `team_knowledge` 或保留在 mnemon）。
+
+### 通用要点
+
+- **必须重算向量**：mnemon 是 nomic-embed-text（768 维），本库 mapping 是 bge-m3（1024 维），
+  维度不同不能复用，强行写会 400。125 宿主 Ollama 已有 `bge-m3:latest`。
 - 密码走环境变量（`--password-env`），不进 argv
-- 只迁 `deleted_at is null` 的条目；`content` 超 4000 字符截断
-- `category` 映射到 memory_type：`insight`/`general` 并入 `fact`（mnemon 的分类比本插件多两档）
-- `distill_state` 直接写 `done`：这些是已经整理过的旧记忆，再走一遍后台蒸馏只会被重写
-- `domain` 统一 `general`（mnemon 没有 domain 概念），分类信息保留在 `semantic_keywords`
-- 个人账号没有 `indices:admin/refresh` 权限，脚本末尾的手动 refresh 会 403 —— 不是错误，
+- `distill_state` 直接写 `done`：旧记忆已整理过，再走后台蒸馏只会被重写
+- 个人账号没有 `indices:admin/refresh` 权限，脚本末尾手动 refresh 会 403 —— 不是错误，
   等 `refresh_interval`（5s）自动可见
 - 先 `--dry-run` 看条数，再 `--limit 5` 试点，最后全量
 
-2026-10-26 实测：只有 `xqh` 有数据（250 条，全部带向量），其余 8 个容器的 `insights` 为空
-（`tanxu` 有 1 条但已软删除）。
+### 2026-10-26 实测
+
+| 容器 | insights | 热记忆 | Documents | 迁入后索引 |
+|---|---|---|---|---|
+| xqh | 250 | 78 | 361 篇 | 328 |
+| zhongjinqi | 0 | 12 | 20 篇 | 12 |
+| zhongyuhang | 0 | 10 | 1 篇 | 10 |
+| laoliu / liuxinling | 0 | 5 / 5 | 2 / 15 篇 | 5 / 5 |
+| molijin / tanxu / chencan | 0 | 3 / 3 / 3 | 4 / 2 / 1 篇 | 3 / 3 / 3 |
+| hongzhihui | 0 | 1 | 0 篇 | 1 |
+
+热记忆合计 120 条全部带向量。
+
 

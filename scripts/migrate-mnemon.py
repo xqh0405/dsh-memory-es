@@ -97,7 +97,10 @@ def embed_batch(ollama: str, model: str, texts: list[str], timeout: int = 180) -
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", required=True, help="mnemon.db 路径（只读打开）")
+    ap.add_argument("--source", choices=["insights", "runtime"], default="insights",
+                    help="insights=SQLite 的记忆条目；runtime=热记忆 MEMORY/USER（memories.json）")
+    ap.add_argument("--db", help="mnemon.db 路径（source=insights 时必填）")
+    ap.add_argument("--runtime-file", help="memories.json 路径（source=runtime 时必填）")
     ap.add_argument("--user", required=True, help="user_id（也是索引名后缀 personal_memory_<user>）")
     ap.add_argument("--es", required=True, help="ES 地址，如 https://192.168.1.125:9200")
     ap.add_argument("--ca", required=True, help="CA 证书路径（ca.crt）")
@@ -120,17 +123,32 @@ def main() -> int:
     index = f"personal_memory_{args.user}"
     es = args.es.rstrip("/")
 
-    con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
-        """
-        select id, content, category, importance, tags, entities,
-               created_at, updated_at
-        from insights
-        where deleted_at is null and content is not null and trim(content) <> ''
-        order by created_at
-        """
-    ).fetchall()
+    if args.source == "insights":
+        if not args.db:
+            print("source=insights 需要 --db", file=sys.stderr)
+            return 2
+        con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            """
+            select id, content, category, importance, tags, entities,
+                   created_at, updated_at
+            from insights
+            where deleted_at is null and content is not null and trim(content) <> ''
+            order by created_at
+            """
+        ).fetchall()
+    else:
+        if not args.runtime_file:
+            print("source=runtime 需要 --runtime-file", file=sys.stderr)
+            return 2
+        # 热记忆的结构化源；MEMORY.md 只是它的文本投影，不解析 Markdown
+        with open(args.runtime_file, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        entries = payload.get("entries", [])
+        rows = [e for e in entries if isinstance(e.get("content"), str) and e["content"].strip()]
+        rows.sort(key=lambda e: e.get("created_at") or "")
+
     if args.limit > 0:
         rows = rows[: args.limit]
     print(f"待迁移 {len(rows)} 条 → {index}" + ("（dry-run，不写）" if args.dry_run else ""))
@@ -149,32 +167,48 @@ def main() -> int:
             if not norm:
                 skipped += 1
                 continue
-            category = (r["category"] or "fact").strip()
-            mtype = CATEGORY_MAP.get(category, "fact")
 
-            keywords: list[str] = []
-            for key in ("tags", "entities"):
-                try:
-                    val = json.loads(r[key]) if r[key] else []
-                except (json.JSONDecodeError, TypeError):
-                    val = []
-                if isinstance(val, list):
-                    keywords.extend(str(x) for x in val)
+            if args.source == "insights":
+                category = (r["category"] or "fact").strip()
+                mtype = CATEGORY_MAP.get(category, "fact")
+                mem_id = r["id"]
+                keywords: list[str] = []
+                for key in ("tags", "entities"):
+                    try:
+                        val = json.loads(r[key]) if r[key] else []
+                    except (json.JSONDecodeError, TypeError):
+                        val = []
+                    if isinstance(val, list):
+                        keywords.extend(str(x) for x in val)
+                created, updated = r["created_at"], r["updated_at"]
+            else:
+                # 热记忆没有 id，用「用户 + 归一化正文」派生稳定 id，保证重跑幂等
+                mem_id = "rt-" + hashlib.sha256(f"{args.user}|{norm}".encode()).hexdigest()[:32]
+                # target=user 是用户画像（偏好），target=memory 是项目/环境事实
+                mtype = "preference" if (r.get("target") == "user") else "fact"
+                keywords = []
+                created, updated = r.get("created_at"), r.get("updated_at")
+
+            # 热记忆常带 `[DSH·环境]` 这类分类前缀：取第一段当 domain，正文保持原样
+            domain = "general"
+            m = re.match(r"^\[([^\]]{1,40})\]", content)
+            if m:
+                domain = m.group(1).split("·")[0].strip().lower() or "general"
 
             doc = {
-                "memory_id": r["id"],
+                "memory_id": mem_id,
                 "user_id": args.user,
                 "content": content,
                 "memory_type": mtype,
-                "domain": "general",
+                "domain": domain,
                 # 已整理过的旧记忆：直接标 done，避免后台蒸馏重复改写
                 "promote_state": "none",
                 "distill_state": "done",
                 "status": "active",
                 "privacy": "normal",
                 "content_sha256": sha256_hex(norm),
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
+                "created_at": created,
+                "updated_at": updated,
             }
             if keywords:
                 doc["semantic_keywords"] = " ".join(dict.fromkeys(keywords))
