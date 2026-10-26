@@ -135,9 +135,10 @@ if [ "$TIER" = "team-write" ]; then
   es_curl "$USER_NAME:$PW" -o /dev/null -w '%{http_code}\n' -X PUT "$ES/team_knowledge/_doc/__perm_probe?refresh=true" \
     -H 'Content-Type: application/json' \
     -d "{\"doc_id\":\"__perm_probe\",\"content\":\"权限探针\",\"memory_type\":\"fact\",\"domain\":\"selftest\",\"status\":\"superseded\",\"review_state\":\"pending\",\"updated_at\":\"$NOW\"}" || true
+  # 探针用完必须真删：早先这里只把 status 改成 superseded，文档仍留在团队库里，
+  # 每次建账号就多一条 __perm_probe 脏数据（2026-10-26 在 125 上实测发现）。
   printf '    清理探测文档：'
-  es_curl "$USER_NAME:$PW" -o /dev/null -w '%{http_code}\n' -X POST "$ES/team_knowledge/_update/__perm_probe?refresh=true" \
-    -H 'Content-Type: application/json' -d '{"doc":{"status":"superseded"}}' || true
+  es_curl "$USER_NAME:$PW" -o /dev/null -w '%{http_code}\n' -X DELETE "$ES/team_knowledge/_doc/__perm_probe?refresh=true" || true
   printf '    个人库不该被团队成员写：'
   es_curl "$USER_NAME:$PW" -o /dev/null -w '%{http_code}\n' -X POST "$ES/personal_memory_other/_doc/x?refresh=true" \
     -H 'Content-Type: application/json' -d '{}' || true
