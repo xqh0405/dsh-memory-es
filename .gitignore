@@ -190,9 +190,8 @@ node_modules/
 lib/
 .planning/
 .dsh-smoke/
-dsh_ai
 
-# ---- deploy/es-remote（第二套 ES 的运行时物：只在 192.168.1.125 上生成）----
+# ---- deploy/es-remote（第二套 ES 的运行时物：在容器化宿主机上生成）----
 deploy/es-remote/.env
 deploy/es-remote/certs/
 deploy/es-remote/data/

@@ -10,7 +10,7 @@
  *   node consolidate/cli.ts --approve <doc_id>     # 通过 → 进入检索
  *   node consolidate/cli.ts --reject <doc_id> --reason "结论与线上不符"
  *   node consolidate/cli.ts --withdraw <doc_id> --reason "这条知识已作废"
- *   ES_DIR=/path/to/deploy/es node consolidate/cli.ts   # 指向另一套部署（如 .125）
+ *   ES_DIR=/path/to/deploy/es node consolidate/cli.ts   # 指向另一套部署（容器化部署时用）
  *
  * 状态文件默认 `<repo>/.state/consolidate.json`（游标 + 已处理 + pending 队列）。
  *
@@ -232,7 +232,7 @@ Markdown 镜像（S10，只读导出）:
   MEM_PERSONAL_PREFIX  个人索引前缀（默认 personal_memory_）
   MEM_TEAM_INDEX       团队库索引名（默认 team_knowledge）
   MEM_AUDIT_INDEX      审计索引名（默认 memory_audit）
-  MEM_EMBEDDING_URL    向量服务地址（默认 http://127.0.0.1:11434；.125 上要写宿主地址）
+  MEM_EMBEDDING_URL    向量服务地址（默认 http://127.0.0.1:11434；容器里要写宿主地址）
   MEM_EMBEDDING_MODEL  向量模型（默认 bge-m3）
   MEM_EMBEDDING_DIMS   向量维度（默认 1024，必须与索引 dims 一致）`)
 }
@@ -286,7 +286,7 @@ async function main(): Promise<void> {
     : client(`mem-reader-${userId}`, env.MEM_READER_PASSWORD)
   const writer = single ? reader : client('mem-writer', env.MEM_WRITER_PASSWORD)
   const consolidator = single ? reader : client('mem-consolidator', env.MEM_CONSOLIDATOR_PASSWORD)
-  // 索引名/向量端点都从 .env 读：同一份代码要能在本机（127.0.0.1）和 .125（容器里访问宿主 Ollama）跑，
+  // 索引名/向量端点都从 .env 读：同一份代码要能在本机（127.0.0.1）和容器里（要访问宿主 Ollama）跑，
   // 硬编码会让「换部署」变成「改代码」。
   const personalPrefix = env.MEM_PERSONAL_PREFIX ?? 'personal_memory_'
   const personalIndex = `${personalPrefix}${userId}`

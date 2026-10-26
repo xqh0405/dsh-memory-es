@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 部署记忆库面板到 .125（或任意同构机器）。
+# 部署记忆库面板到远程主机上的 DSH 容器（DSH 跑在 docker 里时用）。
 #
 # 为什么要有这个脚本：面板在容器里有**两份副本** ——
 #   1) /data/dsh/local-plugins/dsh-memory-es-panel   源码目录（跑 CLI 的那份，不能在 node_modules 下跑 .ts）
@@ -7,28 +7,31 @@
 # 手工改一处忘另一处，就会出现"改了没生效"或"CLI 找不到"。脚本按顺序同步两边并打印自检行。
 #
 # 用法：
-#   ./scripts/deploy-panel.sh              # 全量同步 + 重装 + 重启 + 打印自检
-#   TRIGGER=0 ./scripts/deploy-panel.sh    # 不跑自检（自检需要启动，
+#   PANEL_HOST=user@host ./scripts/deploy-panel.sh            # 全量同步 + 重装 + 重启 + 打印自检
+#   TRIGGER=0 PANEL_HOST=user@host ./scripts/deploy-panel.sh  # 不跑自检（自检需要启动，
 #                                          # 只有 flag 触发的那两项写自检才需要额外放文件）
-#   PANEL_HOST=root@192.168.1.125 ./scripts/deploy-panel.sh
+#   可选：PANEL_SSH_KEY=~/.ssh/xxx 指定私钥（留空走 ssh 默认配置）；
+#         PANEL_CONTAINER 指定容器名（默认 dsh）；PANEL_PROFILE 指定 profile（默认 web）
 set -euo pipefail
 
-HOST="${PANEL_HOST:-root@192.168.1.125}"
-SSH_KEY="${PANEL_SSH_KEY:-$HOME/.ssh/dsh_ai}"
-CONTAINER="${PANEL_CONTAINER:-dsh-xqh}"
+HOST="${PANEL_HOST:?请用 PANEL_HOST=user@host 指定目标主机}"
+# 留空则走 ssh 默认配置（~/.ssh/config 或默认 IdentityFile）
+SSH_KEY="${PANEL_SSH_KEY:-}"
+CONTAINER="${PANEL_CONTAINER:-dsh}"
 PROFILE="${PANEL_PROFILE:-web}"
 LOCAL_PLUGIN="/data/dsh/local-plugins/dsh-memory-es-panel"
 PLUGIN_DIR="/data/dsh/local-plugins/dsh-memory-es"
 PROFILE_PLUGIN="/data/dsh/profiles/${PROFILE}/node_modules/dsh-memory-es-panel"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+if [ -n "$SSH_KEY" ]; then SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}"); fi
 
 echo "==> 打包（plugin + panel + consolidate + src）"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 # 插件包也要打包：lib 变了却只同步面板，会出现「面板是新版、插件是旧版」的漂移
-# （2026-10-26 实测 .125 的 lib 还停在 eb19905e，单账号 validateConfig 没进去）
+# （2026-10-26 实测：容器里的 lib 还停在旧提交，单账号 validateConfig 没进去）
 tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib package.json cordis.patch.yml
 tar -czf "$work/panel.tgz" -C "$REPO_ROOT" panel
 tar -czf "$work/cli.tgz" -C "$REPO_ROOT" consolidate src

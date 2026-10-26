@@ -1,18 +1,23 @@
-# 第二套 ES：跑在 192.168.1.125（es-host.local）上，给那边的 dsh-xqh 容器用。
+# 第二套 ES：给「DSH 本身跑在容器里」的场景用。ES 与 DSH 容器同在一个 docker 网络，
+# 彼此按容器名解析，因此不需要知道宿主 IP。
 #
 # 与 deploy/es/docker-compose.yml 的差异（只三处，其余刻意保持一致，便于两边对拍）：
-#  1. **加入 dsh-xqh 容器的 docker 网络**（external: dsh-xqh_default）——容器之间用容器名
-#     互相解析，所以 es.url 写 https://dsh-es-xqh:9200，而不依赖宿主 IP；
-#  2. **证书 SAN 必须带 dsh-es-xqh**（生成时 NODE_NAME=dsh-es-xqh CERT_DNS=dsh-es-xqh,localhost）；
+#  1. **加入 DSH 容器的 docker 网络**（external: ${DSH_NETWORK}）——容器之间用容器名
+#     互相解析，所以 es.url 写 https://<ES 容器名>:9200，而不依赖宿主 IP；
+#  2. **证书 SAN 必须带 ES 容器名**（生成时 NODE_NAME/CERT_DNS 都要给同一个名字）；
 #  3. 宿主机端口仍只绑 127.0.0.1（只给宿主机上的 init/curl 用），不对局域网暴露。
+#
+# 两个名字按你的部署覆盖（不覆盖则用下面的默认值）：
+#   DSH_NETWORK   已存在的、DSH 容器所在的网络名
+#   ES_CONTAINER  ES 容器名（也是证书 SAN 与 es.url 里的主机名）
 services:
   es01:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
-    container_name: dsh-es-xqh
+    container_name: ${ES_CONTAINER:-dsh-es-remote}
     restart: unless-stopped
     environment:
       - node.name=es01
-      - cluster.name=dsh-memory-es-xqh
+      - cluster.name=dsh-memory-es-remote
       - discovery.type=single-node
       - bootstrap.memory_lock=true
       - xpack.security.enabled=true
@@ -33,7 +38,7 @@ services:
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile:  { soft: 65536, hard: 65536 }
-    # 宿主 94 GiB 但是多人共用，给 4g 上限（heap 2g + 堆外 1g + page cache 1g）即可；
+    # 宿主内存有限，给 4g 上限（heap 2g + 堆外 1g + page cache 1g）即可；
     # 数据量级是几十 MB（文档 §5.4），不需要更大。
     mem_limit: 4g
     volumes:
@@ -52,9 +57,9 @@ services:
     networks:
       default:
         aliases:
-          - dsh-es-xqh
+          - ${ES_CONTAINER:-dsh-es-remote}
 
 networks:
   default:
-    name: dsh-xqh_default     # dsh-xqh 容器所在的网络（已存在）
+    name: ${DSH_NETWORK:-dsh_default}   # DSH 容器所在的网络（必须已存在）
     external: true

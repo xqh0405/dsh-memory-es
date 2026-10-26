@@ -2,7 +2,7 @@
  * 跑 consolidate CLI（P3）：整理任务与 Markdown 镜像都复用它，不重复实现第二套逻辑。
  *
  * 为什么要在容器里跑 CLI：`consolidate/` 的依赖链是纯 node 内置 + 相对导入（已核查），
- * Node ≥22.18 能直接跑 .ts，所以把源码随面板包一起放进容器即可——不需要在 .125 上克隆仓库。
+ * Node ≥22.18 能直接跑 .ts，所以把源码随面板包一起放进容器即可——不需要在目标主机上克隆仓库。
  *
  * 三个必须：
  *  1. CLI 的凭证只从 `$ES_DIR/.env` 读 → 每次调用临时生成 600 的 .env，调用完删掉；
@@ -26,8 +26,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  */
 const CLI_DIR_CANDIDATES = [
   process.env.MEMORY_ES_CLI_DIR,
-  '/data/dsh/local-plugins/dsh-memory-es-panel/cli',        // .125 容器内
-  join(homedir(), '.dsh/local-plugins/dsh-memory-es-panel/cli'), // .114 本机
+  '/data/dsh/local-plugins/dsh-memory-es-panel/cli',        // 容器内（DSH_HOME=/data/dsh）
+  join(homedir(), '.dsh/local-plugins/dsh-memory-es-panel/cli'), // 本机安装
   join(HERE, 'cli'),                                        // 兜底（node_modules 下跑不了，仅当装了本地目录）
 ].filter((value) => typeof value === 'string' && value !== '')
 

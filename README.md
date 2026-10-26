@@ -81,7 +81,7 @@ dsh plugin --profile web add "$PWD"
 | 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / mark_private）、`memory_promote`（只标候选） |
 
 | 进度 | S1~S10 完成：4 个工具 + 系统提示段 + 整理任务（默认 dry-run）+ 治理（审核队列/冲突/审计）+ Markdown 镜像 |
-| 部署形态 | **两套**：本机 .114（`deploy/es`）+ .125（`deploy/es-remote`，给 `dsh-xqh` 容器）。插件已装进 .125 容器的 web profile 并通过冒烟（模型自己调用 `memory_save` 落库、双路检索命中），详见开发文档 §5.7 |
+| 部署形态 | **两套**：本机（`deploy/es`）+ DSH 跑在容器里时（`deploy/es-remote`，ES 与该容器同在 docker 网络）。后者已实际装进容器 web profile 并通过冒烟（模型自己调用 `memory_save` 落库、双路检索命中），详见开发文档 §5.7 |
 
 ## 快速开始
 
@@ -110,7 +110,7 @@ node consolidate/cli.ts --reject <doc_id> --reason "结论与线上不符"
 node consolidate/cli.ts --withdraw <doc_id> --reason "这条知识已作废"
 
 # 设置面板（独立 bundle：Settings → 记忆库；P1 = 概览 + 记忆浏览，只读）
-#   装在 .125 的 web profile；改完要重启 dsh 才生效
+#   独立 bundle，装进 web profile 后重启 dsh 才生效
 ls panel/            # client.js 客户端 / index.js 宿主 / cordis.patch.yml
 
 # 定时任务（装好但默认关闭；开关在 .state/cron.env）
@@ -122,10 +122,11 @@ ls panel/            # client.js 客户端 / index.js 宿主 / cordis.patch.yml
 node consolidate/cli.ts --export              # 写 knowledge/<domain>.md + INDEX.md
 node consolidate/cli.ts --export --dry-run    # 只看会写哪些文件
 
-# 第二套（在 192.168.1.125 上跑，给 dsh-xqh 容器用）
-bash scripts/es-remote-up.sh  # 起 ES（加入 dsh-xqh_default 网络、SAN=dsh-es-xqh）
-ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-indices.sh
-ES_DIR=/docker/dsh/instances/xqh/es-memory/deploy/es-remote bash scripts/init-security.sh
+# 第二套：DSH 本身跑在容器里时用（ES 与 DSH 同在一个 docker 网络，按容器名互解析）
+#   在目标主机上执行；路径与网络名按你自己的部署改
+bash scripts/es-remote-up.sh  # 起 ES（加入 DSH 容器的网络、证书 SAN 带 ES 容器名）
+ES_DIR=/path/to/es-memory/deploy/es-remote bash scripts/init-indices.sh
+ES_DIR=/path/to/es-memory/deploy/es-remote bash scripts/init-security.sh
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig

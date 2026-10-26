@@ -186,7 +186,7 @@ function indexNames(config) {
  *
  * 为什么必须有：dsh 的原生路由（/api/*）是逐路由调用 `connection.admit(req)` 才 401 的，
  * 不是全局中间件 —— 我们自己注册的 prefix 路由**不会自动被拦**。2026-10-26 实测：
- * 不带 token 从局域网打 `http://192.168.50.114:3080/memory-es/api/memories` 返回 200 和全部记忆，
+ * 不带 token 从本机之外的地址打 `http://<宿主 IP>:3080/memory-es/api/memories` 返回 200 和全部记忆，
  * 而同主机的 `/api/health` 返回 401。等于把整个记忆库开给了同一网段的任何人。
  *
  * 取不到 connection 服务时**失败关闭**（503）：宁可面板不可用，也不能裸奔。
@@ -820,7 +820,7 @@ async function handleConfigWrite(ctx, res, req) {
       saved: changes.map((change) => change.key),
       // 关键提示：插件在 apply() 时建好 ES 客户端，配置变更必须重启 dsh 才真正生效
       restartRequired: true,
-      note: '已保存到 profile 配置。ES 客户端在插件加载时建立，需重启 dsh 后才生效（.125 是 docker restart dsh-xqh）。',
+      note: '已保存到 profile 配置。ES 客户端在插件加载时建立，需重启 dsh 后才生效（容器里是 docker restart <容器名>）。',
     },
   })
 }

@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# .125 的定时任务入口（在**宿主**上跑，用 docker exec 驱动容器里的 CLI）。
+# 容器化 DSH 的定时任务入口（在**宿主**上跑，用 docker exec 驱动容器里的 CLI）。
 #
 # 为什么不在容器里装 cron：dsh 容器里没有 crontab，也不该为一个任务往镜像里塞 cron；
 # 宿主的 crontab 更简单，且 9200 端口已 publish 到宿主回环，凭据从 deploy/es-remote/users/ 读。
 #
-# 用法（在 .125 宿主上）：
+# 用法（在目标宿主上）：
 #   memory-cron-remote.sh status
 #   memory-cron-remote.sh enable / disable
 #   memory-cron-remote.sh consolidate / export
 set -uo pipefail
 
-CONTAINER="${CONTAINER:-dsh-xqh}"
-ES_DIR="${ES_DIR:-/docker/dsh/instances/xqh/es-memory/deploy/es-remote}"
+CONTAINER="${CONTAINER:-dsh}"
+ES_DIR="${ES_DIR:-/srv/es-memory/deploy/es-remote}"
+ES_URL="${ES_URL:-https://dsh-es-remote:9200}"
 CLI_DIR="/data/dsh/local-plugins/dsh-memory-es-panel/cli"
-STATE_DIR="${STATE_DIR:-/docker/dsh/instances/xqh/es-memory/.state}"
+STATE_DIR="${STATE_DIR:-/srv/es-memory/.state}"
 CONF="$STATE_DIR/remote-cron.env"
 LOG="$STATE_DIR/cron.log"
 
 mkdir -p "$STATE_DIR"
-DEFAULT_CONF='# .125 的定时任务开关（由 memory-cron-remote.sh 维护）
+DEFAULT_CONF='# 容器化部署的定时任务开关（由 memory-cron-remote.sh 维护）
 MEMCRON_ENABLED=0
 CONSOLIDATE_APPLY=0
 '
@@ -68,7 +69,7 @@ run_cli() {
 
   local rc=0
   docker exec -u node -e ES_DIR=/tmp/mem-cron-env "$CONTAINER" sh -c \
-    "cd $CLI_DIR && node consolidate/cli.ts --es-url https://dsh-es-xqh:9200 --state /data/dsh/memory-es-state/consolidate.json $*" || rc=$?
+    "cd $CLI_DIR && node consolidate/cli.ts --es-url $ES_URL --state /data/dsh/memory-es-state/consolidate.json $*" || rc=$?
   docker exec "$CONTAINER" sh -c 'rm -rf /tmp/mem-cron-env' >/dev/null 2>&1 || true
   return "$rc"
 }
