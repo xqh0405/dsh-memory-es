@@ -65,7 +65,13 @@ export interface SaveDeps {
    * 写入成功后触发（**不要 await**）：插件层用它排队后台蒸馏。
    * save 必须立刻返回——蒸馏是"事后整理"，不能把入库卡在模型上。
    */
-  onSaved?: (info: { memoryId: string; content: string; domain: string }) => void
+  onSaved?: (info: {
+    memoryId: string
+    content: string
+    domain: string
+    /** 调用方（当前会话）的模型路由；蒸馏留空时用它，做到"用你正在用的模型" */
+    route?: { provider: string; model: string }
+  }) => void
   /** 取消信号（来自 exec.signal） */
   signal?: AbortSignal
   /** F2 注入源（来自 identity.userId） */
@@ -312,7 +318,31 @@ export function defineSaveTool(deps: SaveDeps) {
     // 取消时 http/embedding 会立刻中断在途请求并抛 aborted。
     timeoutMs: 20_000,
     async execute(args, exec) {
-      return await saveMemory({ ...deps, signal: exec.signal }, args)
+      // 会话模型路由：蒸馏配置留空时用它（做到"默认用当前会话模型"）。
+      // exec.agent.options 是本次调用的 agent 路由；嵌套/子代理调用也各自有值。
+      const agentOptions = (exec as { agent?: { options?: { provider?: string; model?: string } } })?.agent?.options
+      const route =
+        typeof agentOptions?.provider === 'string' &&
+        agentOptions.provider !== '' &&
+        typeof agentOptions?.model === 'string' &&
+        agentOptions.model !== ''
+          ? { provider: agentOptions.provider, model: agentOptions.model }
+          : undefined
+      const onSaved = deps.onSaved
+      return await saveMemory(
+        {
+          ...deps,
+          signal: exec.signal,
+          // 把路由绑进钩子，而不是让钩子去猜
+          onSaved:
+            onSaved === undefined
+              ? undefined
+              : (info) => {
+                  onSaved(route === undefined ? info : { ...info, route })
+                },
+        },
+        args,
+      )
     },
   })
 }

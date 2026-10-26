@@ -119,7 +119,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           embed,
           log: (event) => logger.info('save %o', event),
           // 入库后立刻返回，蒸馏在后台跑；失败只记日志，条目留在 distill_state=pending
-          onSaved: ({ memoryId, content, domain }) => {
+          onSaved: ({ memoryId, content, domain, route }) => {
             if (!distillEnabled) return
             void runDistillJob(
               {
@@ -134,7 +134,7 @@ export function apply(ctx: Context, config: ConfigType): void {
                 timeoutMs: config.distill.timeoutMs,
                 log: (event) => logger.info('distill-run %o', event),
               },
-              { memoryId, content, domain },
+              { memoryId, content, domain, route },
             )
           },
         }),

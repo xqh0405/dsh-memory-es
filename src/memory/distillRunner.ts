@@ -95,19 +95,34 @@ export function parseDistillOutput(text: string): ParsedDistill | null {
   }
 }
 
-/** 从宿主模型服务里挑一个可用模型；配置优先，否则取第一个 */
+/**
+ * 选模型路由，优先级：
+ *   1. 配置里写死的 provider + model（最明确）；
+ *   2. **调用方会话的模型**（memory_save 时带进来的 route）——"默认用你正在用的模型"；
+ *   3. 宿主模型列表的第一个（兜底，可能和你会话用的不是同一个，所以只作最后手段）。
+ */
 export function pickRoute(
   llm: NonNullable<DistillRunnerDeps['llm']>,
-  provider?: string,
-  model?: string,
-): { provider: string; model: string } | null {
-  if (provider !== undefined && provider !== '' && model !== undefined && model !== '') {
-    return { provider, model }
+  configProvider?: string,
+  configModel?: string,
+  sessionRoute?: { provider?: string; model?: string },
+): { provider: string; model: string; source: 'config' | 'session' | 'first' } | null {
+  if (configProvider !== undefined && configProvider !== '' && configModel !== undefined && configModel !== '') {
+    return { provider: configProvider, model: configModel, source: 'config' }
+  }
+  if (
+    sessionRoute !== undefined &&
+    typeof sessionRoute.provider === 'string' &&
+    sessionRoute.provider !== '' &&
+    typeof sessionRoute.model === 'string' &&
+    sessionRoute.model !== ''
+  ) {
+    return { provider: sessionRoute.provider, model: sessionRoute.model, source: 'session' }
   }
   if (typeof llm.listModels !== 'function') return null
   let models: unknown[]
   try {
-    models = llm.listModels(provider) ?? []
+    models = llm.listModels(configProvider) ?? []
   } catch {
     return null
   }
@@ -116,7 +131,9 @@ export function pickRoute(
     const record = entry as Record<string, unknown>
     const p = record.provider ?? record.providerId
     const m = record.model ?? record.id ?? record.modelId
-    if (typeof p === 'string' && typeof m === 'string' && p !== '' && m !== '') return { provider: p, model: m }
+    if (typeof p === 'string' && typeof m === 'string' && p !== '' && m !== '') {
+      return { provider: p, model: m, source: 'first' }
+    }
   }
   return null
 }
@@ -144,7 +161,12 @@ export interface DistillJobResult {
  */
 export async function runDistillJob(
   deps: DistillRunnerDeps,
-  job: { memoryId: string; content: string; domain: string },
+  job: {
+    memoryId: string
+    content: string
+    domain: string
+    route?: { provider: string; model: string }
+  },
 ): Promise<DistillJobResult> {
   const log = deps.log ?? (() => {})
   const startedAt = Date.now()
@@ -153,7 +175,7 @@ export async function runDistillJob(
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_llm_service' })
     return { ok: false, reason: 'no_llm_service' }
   }
-  const route = pickRoute(llm, deps.provider, deps.model)
+  const route = pickRoute(llm, deps.provider, deps.model, job.route)
   if (!route) {
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_model' })
     return { ok: false, reason: 'no_model' }
@@ -192,6 +214,7 @@ export async function runDistillJob(
       ok: true,
       ms: Date.now() - startedAt,
       model: `${route.provider}/${route.model}`,
+      route_source: route.source,
       changed: result.changed,
     })
     return { ok: true, changed: result.changed }

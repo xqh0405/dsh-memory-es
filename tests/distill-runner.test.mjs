@@ -34,10 +34,15 @@ test('系统提示词强调保留数字/路径/命令（防止提炼成空话）
   assert.match(DISTILL_SYSTEM, /数字|版本号|路径|命令|错误码/)
 })
 
-test('pickRoute：配置优先，其次从 listModels 里挑', () => {
+test('pickRoute：配置 > 会话模型 > 列表第一个', () => {
   const llm = { listModels: () => [{ provider: 'deepseek', model: 'deepseek-chat' }] }
-  assert.deepEqual(pickRoute(llm, 'p', 'm'), { provider: 'p', model: 'm' })
-  assert.deepEqual(pickRoute(llm), { provider: 'deepseek', model: 'deepseek-chat' })
+  const session = { provider: 'siliconflow', model: 'qwen3-32b' }
+  // 配置写死时最优先
+  assert.deepEqual(pickRoute(llm, 'p', 'm', session), { provider: 'p', model: 'm', source: 'config' })
+  // 配置留空 → 用会话模型（不是列表第一个）
+  assert.deepEqual(pickRoute(llm, '', '', session), { provider: 'siliconflow', model: 'qwen3-32b', source: 'session' })
+  // 连会话模型都没有才回落
+  assert.deepEqual(pickRoute(llm, '', '', undefined), { provider: 'deepseek', model: 'deepseek-chat', source: 'first' })
   assert.equal(pickRoute({ listModels: () => [] }), null)
 })
 
