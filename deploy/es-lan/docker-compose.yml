@@ -54,3 +54,34 @@ services:
       timeout: 5s
       retries: 30
       start_period: 40s
+    # 除了自己的默认网络，还要加入每个成员容器所在的网络：
+    #   docker 的 DOCKER-ISOLATION 会丢掉「不同 bridge 之间」的转发，所以同宿主上的
+    #   dsh-<uid> 容器**不能**通过宿主 IP 访问映射端口（实测超时 133s，而 11434 那种
+    #   直连宿主的端口是通的 —— 两者路径不同，别用后者推断前者）。
+    #   加入同一网络后容器内用 https://dsh-es:9200（证书 SAN 已含 dsh-es）。
+    #   ⚠️ 新增成员时在这里补一个网络，否则他只能走宿主 IP、且只在他自己机器上可用。
+    networks:
+      - default
+      - dsh-xqh
+      - dsh-chencan
+      - dsh-hongzhihui
+      - dsh-laoliu
+      - dsh-liuxinling
+      - dsh-molijin
+      - dsh-tanxu
+      - dsh-zhongjinqi
+      - dsh-zhongyuhang
+
+networks:
+  default:
+    name: dsh-es_default
+  # 下面 9 个都是各 DSH 容器的 compose 项目网络，必须已存在
+  dsh-xqh:          { name: dsh-xqh_default,          external: true }
+  dsh-chencan:      { name: dsh-chencan_default,      external: true }
+  dsh-hongzhihui:   { name: dsh-hongzhihui_default,   external: true }
+  dsh-laoliu:       { name: dsh-laoliu_default,       external: true }
+  dsh-liuxinling:   { name: dsh-liuxinling_default,   external: true }
+  dsh-molijin:      { name: dsh-molijin_default,      external: true }
+  dsh-tanxu:        { name: dsh-tanxu_default,        external: true }
+  dsh-zhongjinqi:   { name: dsh-zhongjinqi_default,   external: true }
+  dsh-zhongyuhang:  { name: dsh-zhongyuhang_default,  external: true }
