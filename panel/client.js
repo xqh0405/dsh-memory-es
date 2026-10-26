@@ -453,6 +453,14 @@ window.__ModuleLoader__.load({
           h(StatCard, { label: t('cardPersonal'), value: show(counts.personal) }),
           h(StatCard, { label: t('cardTeam'), value: show(counts.team) }),
           h(StatCard, {
+            label: t('cardDocs'),
+            value: show(counts.docs),
+            hint:
+              counts.docChunks === undefined || counts.docChunks === null || counts.docChunks <= 0
+                ? ''
+                : `${counts.docChunks} ${t('cardDocChunks')}`,
+          }),
+          h(StatCard, {
             label: t('cardPending'),
             value: show(counts.pending),
             hint: counts.pending > 0 ? '→ ' + t('tabBrowse') : '',
@@ -569,6 +577,7 @@ window.__ModuleLoader__.load({
             line(t('maintLastRun'), data.lastRunAt || t('maintNever')),
             line(t('labelPersonal'), data.counts.personal),
             line(t('labelTeam'), data.counts.team),
+            line(t('labelDocs'), data.counts.docs),
             line(t('labelPending'), data.counts.pending),
           ),
           [

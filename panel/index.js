@@ -23,7 +23,7 @@ const AUDIT_INDEX = 'memory_audit'
 /** 配置默认值与 `src/config.ts` 保持一致（只用于面板兜底，不替代插件校验） */
 const DEFAULTS = {
   es: { url: 'https://127.0.0.1:9200', caCertPath: 'deploy/es/certs/ca.crt', requestTimeoutMs: 8000 },
-  index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
+  index: { personalPrefix: 'personal_memory_', docPrefix: 'personal_doc_', team: 'team_knowledge' },
   identity: {
     userId: '',
     // 单账号模式（推荐）
@@ -176,6 +176,7 @@ const str = (value) => (typeof value === 'string' ? value : '')
 function indexNames(config) {
   return {
     personal: `${config.index.personalPrefix}${config.identity.userId}`,
+    docs: `${config.index.docPrefix ?? 'personal_doc_'}${config.identity.userId}`,
     team: config.index.team,
     audit: AUDIT_INDEX,
   }
@@ -314,7 +315,7 @@ async function handleOverview(ctx, res) {
     }))
     .catch(() => null)
 
-  const [health, personalCount, teamCount, pendingCount, personalRecent, teamRecent] = await Promise.all([
+  const [health, personalCount, teamCount, pendingCount, personalRecent, teamRecent, docStat] = await Promise.all([
     // 用「读一次个人库」当可达性探测：reader 角色没有 cluster:monitor/health 权限，
     // 直接打 /_cluster/health 会 403，把健康的库误判成 down（2026-10-25 踩过）。
     client
@@ -358,6 +359,19 @@ async function handleOverview(ctx, res) {
       })
       .then((r) => (r.hits?.hits ?? []).map((hit) => projectHit(hit, 'team')))
       .catch(() => []),
+    // 文档库：一次查询同时拿 chunk 总数与文档篇数（cardinality 去重 doc_id）。
+    // 索引不存在时（还没入库）返回 -1，与 personal/team 的"查不到"口径一致。
+    client
+      .search(names.docs, {
+        size: 0,
+        aggs: { docs: { cardinality: { field: 'doc_id' } } },
+        track_total_hits: true,
+      })
+      .then((r) => ({
+        chunks: num(r.hits?.total?.value),
+        docs: num(r.aggregations?.docs?.value),
+      }))
+      .catch(() => ({ chunks: -1, docs: -1 })),
   ])
 
   const recent = [...personalRecent, ...teamRecent]
@@ -376,6 +390,8 @@ async function handleOverview(ctx, res) {
       counts: {
         personal: personalCount,
         team: teamCount,
+        docs: docStat ? docStat.docs : -1,
+        docChunks: docStat ? docStat.chunks : -1,
         pending: pendingCount,
         audit: auditStat ? auditStat.total : null,
         auditLast7d: auditStat ? auditStat.last7d : null,
@@ -1296,6 +1312,7 @@ async function selfTest(ctx) {
     console.error(
       `[记忆库面板] 自检通过 | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
         `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
+        `文档=${counts.docs ?? '—'}(${counts.docChunks ?? '—'} 块) ` +
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
         `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
         `审核: ${pendingInfo} | 过滤候选: ${facetsInfo} | 镜像预览: ${mirrorInfo} | ` +

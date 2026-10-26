@@ -2,5 +2,8 @@
   "meta": {
     "title": "记忆库面板",
     "description": "在设置里查看 dsh-memory-es 的记忆库：工具、提示段、常用命令与存储布局。"
-  }
+  },
+  "cardDocs": "文档",
+  "cardDocChunks": "块",
+  "labelDocs": "文档"
 }
