@@ -170,4 +170,81 @@ python3 scripts/migrate-mnemon.py --source runtime \
 
 热记忆合计 120 条全部带向量。
 
+## 文档入库方案（personal_doc_<uid>）
+
+### 为什么另开索引，不塞进 personal_memory_<uid>
+
+| | 记忆条目 | 文档 |
+|---|---|---|
+| 粒度 | 一句能独立成立的事实 | 整篇（平均 8~10 KB） |
+| 插件限制 | `content` ≤ 4000 字符 | 远超 |
+| 去重口径 | 归一化正文的 sha256 | 按 chunk 哈希 |
+| 混在一起的后果 | 撑爆上限；`memory_search` 返回一堆文档碎片，把"事实"淹掉 | |
+
+所以：**记忆归 `personal_memory_<uid>`，文档归 `personal_doc_<uid>`**，一人一套，ACL 同源。
+
+### 索引结构
+
+模板 `personal_doc_template`（`_index_template`，priority 100），一人一个索引 `personal_doc_<uid>`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `doc_id` | keyword | 原文档 id，同一篇的多个 chunk 共享，用来聚合 |
+| `chunk_index` / `chunk_total` | integer | 块序号/总数 |
+| `title` / `title_keyword` | text(ik) / keyword | 标题（分词检索 + 精确匹配） |
+| `description` | text(ik) | 作者写的摘要（"什么时候该读这篇"），检索增强 |
+| `section_path` | text(ik) | 在文档里的位置，如 `北单接入 > 五、home_pm` |
+| `content` | text(ik_max_word, ik_smart) | 块正文 |
+| `embedding` | dense_vector(1024, cosine) | bge-m3 |
+| `source_path` / `source_paths` | keyword | 关联代码文件 |
+| `domain` / `tags` | keyword | 业务域 |
+| `content_sha256` | keyword | chunk 级幂等 |
+
+ES 文档 id = `{doc_id}-{chunk_index}`，重跑覆盖同一块。
+
+### 切片策略（脚本 `scripts/migrate-docs.py`）
+
+1. 先按 Markdown 标题切成 section —— 标题本身就是语义边界
+2. section 还长，按空行段落切
+3. 仍超长，按句子切（目标 ~1000 字符、重叠 150，避免拦腰截断）
+4. 每块记下 `section_path`
+
+**向量输入 = title + description + section_path + 正文**。
+单看一段正文常常"不知道在讲什么"；标题和摘要拼进去能明显提升语义召回。
+但 `content` 字段只存正文，不给模型看重复元数据。
+
+### 检索
+
+关键词与向量各走一路再融合（和 `memory_search` 同样的 RRF 思路）：
+
+```json
+// 关键词（标题/摘要权重高于正文）
+{"multi_match":{"query":"GC 风暴","fields":["title^3","description^2","content^2","section_path"]}}
+
+// 向量
+{"knn":{"field":"embedding","query_vector":[...],"k":20,"num_candidates":100}}
+```
+
+**建议按 `doc_id` 聚合后再返回**：同一篇命中多个 chunk 时，用户要的是"哪篇文档相关 + 命中的片段"，
+不是一屏同一标题的碎片。
+
+### ⚠️ 插件侧还没有 doc_search
+
+当前插件只有 `memory_search`（查记忆）与 `memory_search(scope=team)`（查团队库），
+**没有查文档索引的工具**。要让它可被模型直接调用，需要：
+
+1. `src/memory/search.ts` 加一条 route（`personal_doc_<uid>`），或新写 `doc_search` 工具；
+2. 在 `lib/` 重新构建；
+3. 同步到 9 个容器的 `local-plugins` 并**重启容器**（bundle 列表只在启动时读）。
+
+在那之前，文档检索可以：
+- 走 ES 直接查（`curl` / 面板），或
+- 由 `scripts/doc-search.py`（待写）在宿主侧查完再回给模型。
+
+### 2026-10-26 实测
+
+xqh 361 篇 → **2736 块**（平均 7.6 块/篇），关键词（北单 12 命中、Maven 9 命中）与
+kNN（自匹配 score 1.0）均正常，IK 分词生效。
+
+
 
