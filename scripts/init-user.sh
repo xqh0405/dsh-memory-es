@@ -85,11 +85,12 @@ echo "== 2/3 本用户角色（个人读写，只限自己的索引）=="
 admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<JSON
 {
   "indices": [
-    { "names": ["$PERSONAL"], "privileges": ["read", "index", "view_index_metadata"] }
+    { "names": ["$PERSONAL", "personal_doc_${UID_ARG}"],
+      "privileges": ["read", "index", "delete", "view_index_metadata"] }
   ]
 }
 JSON
-echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} 读写（不是 personal_memory_* 通配）"
+echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_${UID_ARG} 读/写/删（不是通配）"
 
 echo "== 3/3 用户与密码 =="
 mkdir -p "$USERS_DIR"
