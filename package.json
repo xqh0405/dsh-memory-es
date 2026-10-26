@@ -2,6 +2,19 @@
   "name": "dsh-memory-es",
   "version": "0.1.0",
   "description": "DSH 记忆插件：Elasticsearch 双层记忆库（团队知识 + 个人记忆）",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "elasticsearch"
+  ],
+  "homepage": "https://gitee.com/xqh/dsh-memory-es",
+  "repository": {
+    "type": "git",
+    "url": "https://gitee.com/xqh/dsh-memory-es.git"
+  },
+  "author": "xqh",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

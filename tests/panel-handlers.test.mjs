@@ -244,3 +244,51 @@ test('admitRequest：没有 connection 服务时失败关闭（503），不能�
   const broken = { get: () => ({ admit: () => { throw new Error('boom') } }) }
   assert.equal(admitRequest(broken, {}), 401)
 })
+
+// ── 写盘类型：布尔字段绝不能变成字符串（2026-10-26 线上报错复现）──
+test('coerceFieldValue：字段定义说了算，客户端传 type=string 也按 boolean 转', () => {
+  const { coerceFieldValue, fieldTypeOf } = panel
+  assert.equal(fieldTypeOf('distill.enabled'), 'boolean')
+  assert.equal(fieldTypeOf('es.requestTimeoutMs'), 'number')
+  // 旧客户端把复选框当文本框：type=string + "true"
+  assert.equal(coerceFieldValue({ key: 'distill.enabled', type: 'string', value: 'true' }), true)
+  assert.equal(coerceFieldValue({ key: 'distill.enabled', value: true }), true)
+  // 数字字段同理
+  assert.equal(coerceFieldValue({ key: 'es.requestTimeoutMs', type: 'string', value: '8000' }), 8000)
+})
+
+test('写盘后的配置能被 schemastery 接受（boolean 不是 "true"）', async () => {
+  const z = (await import('@deepseek-ai/schemastery')).default
+  const { coerceFieldValue } = panel
+  const schema = z.object({
+    distill: z.object({ enabled: z.boolean().default(false), model: z.string().default(''), timeoutMs: z.number().default(30000) }),
+  })
+  const value = coerceFieldValue({ key: 'distill.enabled', type: 'string', value: 'true' })
+  assert.equal(typeof value, 'boolean')
+  // 这里若写成 String(value) 就会复现 "expected boolean but got true"
+  assert.doesNotThrow(() => schema({ distill: { enabled: value } }))
+  assert.throws(() => schema({ distill: { enabled: String(value) } }), /expected boolean/)
+})
+
+// ── 写盘结果：布尔必须保持布尔（线上报错的直接回归测试）──
+test('applyConfigChanges：boolean 原样写入，不变成字符串', async () => {
+  const z = (await import('@deepseek-ai/schemastery')).default
+  const { applyConfigChanges, coerceFieldValue } = panel
+  const changes = [{ key: 'distill.enabled', type: 'string', value: 'true' }]
+  const resolved = new Map([['distill.enabled', coerceFieldValue(changes[0])]])
+  const current = {
+    es: { url: 'https://127.0.0.1:9200' },
+    distill: { enabled: false, provider: '', model: '', timeoutMs: 30000 },
+  }
+  const next = applyConfigChanges(current, changes, resolved)
+  assert.equal(typeof next.distill.enabled, 'boolean')
+  assert.equal(next.distill.enabled, true)
+  // 其余分组原样带回（configEditor 要完整 raw config）
+  assert.equal(next.es.url, 'https://127.0.0.1:9200')
+
+  const schema = z.object({
+    es: z.object({ url: z.string() }),
+    distill: z.object({ enabled: z.boolean().default(false), provider: z.string().default(''), model: z.string().default(''), timeoutMs: z.number().default(30000) }),
+  })
+  assert.doesNotThrow(() => schema(next), '写盘结果必须能通过插件 schema')
+})

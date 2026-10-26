@@ -212,12 +212,40 @@ function admitRequest(ctx, req) {
 }
 
 /**
+ * 把改动写进 configEditor 要求的"完整 raw config"里：两层浅拷贝，只覆盖白名单路径。
+ * `resolved` 是校验阶段算好的值（类型已按字段定义转换），这里**绝不再次 String()**——
+ * 2026-10-26 的线上报错就是这么来的：写盘处 String(true) → "true" → schemastery 拒。
+ */
+function applyConfigChanges(current, changes, resolved) {
+  const next = {}
+  for (const [group, groupValue] of Object.entries(current ?? {})) {
+    next[group] = groupValue && typeof groupValue === 'object' ? { ...groupValue } : groupValue
+  }
+  for (const change of changes) {
+    const [group, key] = change.key.split('.')
+    if (next[group] === undefined || next[group] === null) next[group] = {}
+    next[group][key] = resolved.get(change.key)
+  }
+  return next
+}
+
+/**
+ * 字段定义（EDITABLE）是类型的唯一权威：客户端可能缓存了旧 JS，把复选框当文本框发字符串过来，
+ * 也可能干脆不传 type。按「服务端声明」转换，旧客户端就不会把布尔写成 "true"。
+ */
+function fieldTypeOf(key) {
+  const field = EDITABLE.find((item) => item.path.join('.') === key)
+  return field ? field.type : undefined
+}
+
+/**
  * 把面板提交的字符串/布尔统一成配置里该有的类型。
  * 前端复选框传 true/false，输入框传字符串——这里一次收敛，别在写路径上散落类型判断。
  */
 function coerceFieldValue(change) {
-  if (change.type === 'number') return Number(change.value)
-  if (change.type === 'boolean') {
+  const type = fieldTypeOf(change.key) ?? change.type
+  if (type === 'number') return Number(change.value)
+  if (type === 'boolean') {
     const v = change.value
     return v === true || v === 'true' || v === 1 || v === '1' || v === 'on'
   }
@@ -711,13 +739,17 @@ async function handleConfigWrite(ctx, res, req) {
   const currentValue = currentRow.ok ? currentRow.value : null
   const patched = currentValue ? JSON.parse(JSON.stringify(currentValue)) : {}
 
+  // 转换结果一次算好，校验与写盘共用同一份，避免两处逻辑漂移
+  const resolved = new Map()
   for (const change of changes) {
     const [group, key] = change.key.split('.')
     const value = coerceFieldValue(change)
-    if (change.type === 'boolean' && typeof value !== 'boolean') {
+    resolved.set(change.key, value)
+    const declaredType = fieldTypeOf(change.key) ?? change.type
+    if (declaredType === 'boolean' && typeof value !== 'boolean') {
       return json(res, 400, { ok: false, error: `${change.key} 只能是 true/false` })
     }
-    if (change.type === 'number' && !Number.isFinite(value)) {
+    if (declaredType === 'number' && !Number.isFinite(value)) {
       return json(res, 400, { ok: false, error: `${change.key} 必须是数字` })
     }
     if (patched[group] === undefined || patched[group] === null) patched[group] = {}
@@ -774,16 +806,8 @@ async function handleConfigWrite(ctx, res, req) {
 
   try {
     await editor.edit(target.entry, (current) => {
-      // 浅拷贝两层，只写白名单路径，其余原样带回（configEditor 要求返回完整 raw config）
-      const next = {}
-      for (const [group, groupValue] of Object.entries(current ?? {})) {
-        next[group] = groupValue && typeof groupValue === 'object' ? { ...groupValue } : groupValue
-      }
-      for (const change of changes) {
-        const [group, key] = change.key.split('.')
-        if (next[group] === undefined || next[group] === null) next[group] = {}
-        next[group][key] = change.type === 'number' ? Number(change.value) : String(change.value)
-      }
+      // 其余键原样带回（configEditor 要求返回完整 raw config）
+      const next = applyConfigChanges(current, changes, resolved)
       return next
     })
   } catch (error) {
@@ -1314,7 +1338,9 @@ export function apply(ctx) {
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
   admitRequest,
+  applyConfigChanges,
   coerceFieldValue,
+  fieldTypeOf,
   entryLabels,
   findEntryRow,
   handleCapabilities,

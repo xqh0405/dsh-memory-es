@@ -67,7 +67,8 @@ describe('bm25Body', () => {
           {
             multi_match: {
               query: '比赛腰斩怎么结算',
-              fields: ['content^2', 'semantic_keywords^1.5'],
+              // summary 是蒸馏产出的一句话，必须参与 BM25（否则蒸馏白存）
+              fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
               type: 'best_fields',
             },
           },

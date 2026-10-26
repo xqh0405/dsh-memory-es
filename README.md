@@ -2,6 +2,69 @@
 
 自研 DSH 记忆插件：以 Docker 部署的 Elasticsearch 为存储与检索后端，实现**团队共享知识库**与**个人记忆库**的双层隔离、AI 读写、定期整理入库与语义增强检索。
 
+## 前置条件
+
+插件这一层只提供「工具 + 提示词」，记忆的实际存储在外部。装之前先确认这些都在：
+
+| 依赖 | 要求 | 说明 |
+|---|---|---|
+| DSH | ≥ 0.2（开发与验证基于 0.2.1-rc.2） | 需要 `dsh.bundle` 支持 |
+| Node.js | ≥ 20（构建）；跑测试需 ≥ 22.18 | 测试直接执行 `.ts`，依赖 type stripping |
+| Elasticsearch | 8.x 单节点，开 security + TLS，装 IK 分词 | `scripts/es-up.sh` 会自动起容器、生成密码与证书、装 IK |
+| embedding 服务 | Ollama + `bge-m3`（1024 维） | `ollama pull bge-m3` |
+| Docker | 近期版本 | 只为跑 ES |
+
+`es-up.sh` 生成的自签证书、密码与数据都落在 `deploy/es/`，已 gitignore，不会进仓库。
+
+## 安装
+
+**本仓库不提交构建产物**（`lib/` 在 `.gitignore` 里），所以安装分两步：先构建，再作为本地包装进 profile。
+
+```bash
+git clone https://gitee.com/xqh/dsh-memory-es.git
+cd dsh-memory-es
+
+# 1. 构建：装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
+NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm bash scripts/build.sh
+
+# 2. 装进 profile（传绝对路径）
+dsh plugin --profile web add "$PWD"
+```
+
+第 2 步只是装依赖，**还要把它挂进 profile 的 bundle 列表才算启用**：编辑 `~/.dsh/profiles/web/package.json`，在 `dsh.profile.bundles` 数组里加一行 `"dsh-memory-es"`，然后重启 dsh。
+
+两个常见卡点：
+
+- **报「找不到 dsh 宿主包目录」**：`scripts/link-deps.sh` 默认从全局安装位置 `/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai` 取宿主包。dsh 装在别处时用 `DSH_HOST_PKGS=/path/to/@deepseek-ai bash scripts/build.sh` 覆盖。
+- **npm 直连超时**：构建要从 registry 装 devDeps，国内建议像上面那样带 `NPM_REGISTRY` 走镜像。
+
+升级不用重装：装的是本地目录依赖，`git pull` 后重跑一次 `bash scripts/build.sh` 即可，profile 里的产物会跟着变（pnpm 对目录依赖用硬链接）。
+
+装好后的判据：重启的 dsh 里出现 `memory_save` / `memory_search` / `memory_update_status` / `memory_promote` 四个工具；设置里出现「记忆库」面板（面板是仓库内的独立 bundle `panel/`，需单独安装才启用）。
+
+## 配置
+
+插件配置写在 profile 的 `cordis.patch.yml` 里（`- id: dsh-memory-es` 那一行的 `config`）。必填只有一项 `identity.userId`，其余有默认值：
+
+```yaml
+- id: dsh-memory-es
+  name: dsh-memory-es
+  config:
+    es:
+      url: https://127.0.0.1:9200
+      caCertPath: <仓库绝对路径>/deploy/es/certs/ca.crt
+    identity:
+      userId: <你的用户 id>          # 必填；个人索引名 = personal_memory_<userId>
+      username: mem-user-<你的用户 id>  # 单账号模式：个人库读写 + 团队库按 teamWrite
+      password: <从 deploy/es/.env 取>
+      teamWrite: false               # true = 有团队库写权限（能审核）
+    embedding:
+      model: bge-m3
+      dims: 1024
+```
+
+不填 `userId` 或凭据缺失时插件会 fail-fast 拒绝启动——这是刻意的（不写匿名记忆）。`scripts/init-security.sh` 会把生成的账号密码写进 `deploy/es/.env`，照着填即可。
+
 ## 现状（2026-10-25）
 
 | 部分 | 状态 |
