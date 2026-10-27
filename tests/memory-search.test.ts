@@ -238,7 +238,7 @@ describe('searchMemories 编排', () => {
     }
   })
 
-  test('给了 domain 就不再加兜底时间窗，filtered=true，且多值走 terms', async () => {
+  test('给了 domain 就不再加兜底时间窗，filtered=true，且多值走 terms（团队库额外放行 general）', async () => {
     const h = await harness({ [TEAM_INDEX]: { bm25: [hit('t1', 3)] } })
     try {
       const result = await searchMemories(h.deps(), {
@@ -251,9 +251,10 @@ describe('searchMemories 编排', () => {
         query: { bool: { filter: Array<Record<string, unknown>> } }
       }
       assert.equal(body.query.bool.filter.some((item) => 'range' in item), false)
+      // 按 domain 分层：团队库放行「本域 + general」，否则跨域通用知识永远看不到
       assert.deepEqual(
         body.query.bool.filter.find((item) => 'terms' in item),
-        { terms: { domain: ['lottery-cloud', 'backup-server'] } },
+        { terms: { domain: ['lottery-cloud', 'backup-server', 'general'] } },
       )
     } finally {
       await h.fake.close()

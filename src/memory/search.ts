@@ -30,6 +30,12 @@ export const MAX_RESULT_LIMIT = 20
 export const PROJECT_MAX_CHARS = 500
 /** 团队库在「没有任何收窄条件」时的兜底时间窗（§8.2） */
 export const TEAM_FALLBACK_WINDOW_DAYS = 365
+/**
+ * 团队库的「跨域通用」domain。
+ * 按 domain 分层后，查某个域时会把 general 一起放行——否则一条真正通用的知识
+ * （比如「Jenkins 部署静默空跑」）只能被恰好选对域的人看到。
+ */
+export const TEAM_GENERAL_DOMAIN = 'general'
 /** 个人库权重：个人记忆通常更贴近当前上下文（§8.3） */
 export const PERSONAL_WEIGHT = 1.2
 
@@ -124,10 +130,19 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   const { meta, filtered } = buildMeta(input, now)
 
   const personalIndex = `${deps.personalPrefix}${deps.userId}`
-  const teamMeta: MetaFilterOptions =
-    filtered || meta.updatedWithinDays !== undefined
+  // 团队库按 domain 分层：查某个域时只能看到「本域 + general（跨域通用）」，
+  // 看不到别的项目的专属知识。个人库不这么做——自己的记忆不需要按域隔离。
+  // 不传 domain 时保持全域检索（否则「我不知道这属于哪个域」会变成召回不到）。
+  const teamDomain =
+    input.domain && input.domain.length > 0
+      ? [...new Set([...input.domain, TEAM_GENERAL_DOMAIN])]
+      : undefined
+  const teamMeta: MetaFilterOptions = {
+    ...(filtered || meta.updatedWithinDays !== undefined
       ? meta
-      : { ...meta, updatedWithinDays: TEAM_FALLBACK_WINDOW_DAYS }
+      : { ...meta, updatedWithinDays: TEAM_FALLBACK_WINDOW_DAYS }),
+    domain: teamDomain,
+  }
 
   // 团队库的审核闸（S9）：pending（待人工裁决）/ rejected（已驳回）都不该出现在检索结果里。
   // 个人库没有 review_state 字段，所以只能加在 teamMeta 上，不能塞进共用的 meta。

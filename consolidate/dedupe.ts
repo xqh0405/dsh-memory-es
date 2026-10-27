@@ -36,24 +36,37 @@ export interface DedupeDecision {
 }
 
 export const SIMILAR_DUPLICATE = 0.9
-export const SIMILAR_SAME_TOPIC = 0.6
+
+/**
+ * 「疑似重复」下界：0.75~0.9 一律进人工队列。
+ *
+ * 旧值曾是 0.6，且**额外要求 topic_key 相同**——那个条件让这道闸实际永不触发。
+ * topic_key = `domain:sha256(正文前 60 字)`（见 distill.ts），只能识别「开头相同」的主题，
+ * 同一件事换个说法就变成不同 key。2026-10-27 实测 9 条候选里 5 条落在 0.766~0.883，
+ * 却全部被判 new 直接入库。所以判断依据换成纯相似度，topic_key 只在报告文案里做补充说明。
+ */
+export const SIMILAR_SUSPECT = 0.75
+
+/** @deprecated 旧名，仅为兼容外部引用保留；语义已由 SIMILAR_SUSPECT 取代 */
+export const SIMILAR_SAME_TOPIC = SIMILAR_SUSPECT
 
 /**
  * 纯判定：给定「团队库里的精确命中」与「kNN 邻居」，决定这条该怎么处理。
  *
  * @param input.shaHit 团队库里 content_sha256 精确命中的 doc_id（null = 没命中）
  * @param input.neighbors kNN 邻居（按相似度降序；本函数不依赖顺序，自己取最大）
- * @param input.topicKey 待写条目的 topic_key
+ * @param input.topicKey 待写条目的 topic_key（**只用于文案，不再作为闸门**）
  */
 export function decideDedupe(input: {
   shaHit: string | null
   neighbors: readonly NeighborHit[]
   topicKey: string
   duplicateThreshold?: number
+  /** 疑似重复下界；保留旧参数名以兼容既有调用与测试 */
   sameTopicThreshold?: number
 }): DedupeDecision {
   const duplicateThreshold = input.duplicateThreshold ?? SIMILAR_DUPLICATE
-  const sameTopicThreshold = input.sameTopicThreshold ?? SIMILAR_SAME_TOPIC
+  const suspectThreshold = input.sameTopicThreshold ?? SIMILAR_SUSPECT
 
   if (input.shaHit !== null) {
     return { verdict: 'duplicate', reason: '团队库已有相同 content_sha256', neighborId: input.shaHit, topScore: 1 }
@@ -72,19 +85,21 @@ export function decideDedupe(input: {
       topScore: best.score,
     }
   }
-  if (best.score >= sameTopicThreshold && best.topicKey !== undefined && best.topicKey === input.topicKey) {
+  if (best.score >= suspectThreshold) {
+    const sameTopic = best.topicKey !== undefined && best.topicKey === input.topicKey
     return {
       verdict: 'pending',
-      reason: `同 topic_key 且相似度 ${best.score.toFixed(3)} 落在 ${sameTopicThreshold}~${duplicateThreshold}，可能是同主题不同结论，进人工队列`,
+      reason: sameTopic
+        ? `同 topic_key 且相似度 ${best.score.toFixed(3)} 落在 ${suspectThreshold}~${duplicateThreshold}，可能是同主题不同结论，进人工队列`
+        : `相似度 ${best.score.toFixed(3)} 落在 ${suspectThreshold}~${duplicateThreshold}，near-duplicate 但 topic_key 不同（可能是换个说法讲同一件事），进人工队列由人裁决`,
       neighborId: best.id,
       topScore: best.score,
     }
   }
-  // 走到这里有两种情况：① 相似度不够；② 相似度落在 0.6~0.9 但 topic_key 不同。
-  // 文案必须分开——否则会打印出「相似度 0.789 低于 0.6」这种自相矛盾的报告（S8 实测踩到）。
-  const reason =
-    best.score < sameTopicThreshold
-      ? `最近邻相似度 ${best.score.toFixed(3)} 低于 ${sameTopicThreshold}，判新条目`
-      : `最近邻相似度 ${best.score.toFixed(3)} 在 ${sameTopicThreshold}~${duplicateThreshold}，但 topic_key 不同（判不同主题）`
-  return { verdict: 'new', reason, neighborId: best.id, topScore: best.score }
+  return {
+    verdict: 'new',
+    reason: `最近邻相似度 ${best.score.toFixed(3)} 低于 ${suspectThreshold}，判新条目`,
+    neighborId: best.id,
+    topScore: best.score,
+  }
 }
