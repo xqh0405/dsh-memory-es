@@ -286,5 +286,74 @@ POST /_snapshot/fs_repo/<snap>/_restore?wait_for_completion=true
 `include_global_state` 必须 `false`，否则与现有集群状态冲突。
 2026-10-28 实测：21 分片全部成功，9 条一条不差。
 
+## 文件级备份（backup-server）
+
+ES snapshot 保证一致性，但产出就落在 `/docker/dsh-es/snapshots`——**跟数据同一个磁盘**，
+机器整台没了就一起没。所以还需要 backup-server 把它送出本机。
+
+分工：ES snapshot 负责「数据」，backup-server 负责「配置 + 密钥 + 把快照送出本机」。
+
+### 挂载（`/docker/backup/docker-compose.yml`）
+
+```yaml
+      - /docker/dsh-es:/backup-src/dsh-es:ro
+```
+
+改完 `docker-compose up -d --no-deps backup-server` 重建容器（`restart` 不生效）。
+
+### 权限：两个坑，实测踩过
+
+容器的应用进程以 **uid 1000**（appuser）跑，不是 root。所以宿主机上 root 私有的文件
+它读不到，表现是备份跑完 `status=failed`、`tar: ... Cannot open: Permission denied`，
+但归档其实已经生成并上传（缺文件），很容易被当成成功。
+
+```bash
+# 1) root:root 600 的编排与密钥 → 组可读（root 仍是拥有者）
+chown root:dsh /docker/dsh-es/.env /docker/dsh-es/docker-compose.yml
+chmod 640      /docker/dsh-es/.env /docker/dsh-es/docker-compose.yml
+# 2) 成员账号目录
+chown -R root:dsh /docker/dsh-es/users && chmod 750 /docker/dsh-es/users
+chmod 640 /docker/dsh-es/users/*.env
+# 3) scripts/ 原本是 711（可执行不可读）→ 备份必须能读
+chown -R root:dsh /docker/dsh-es/scripts
+find /docker/dsh-es/scripts -type d -exec chmod 750 {} \;
+find /docker/dsh-es/scripts -type f -name "*.sh*" -exec chmod 750 {} \;
+find /docker/dsh-es/scripts -type f ! -name "*.sh*" -exec chmod 640 {} \;
+```
+
+改完用真实身份自查，比看日志快：
+
+```bash
+docker exec -u 1000:1000 backup-server sh -c \
+  'find /backup-src/dsh-es -path /backup-src/dsh-es/data -prune -o -type f ! -readable -print'
+# 应无输出
+```
+
+### 对象与策略
+
+| 项 | 值 |
+|---|---|
+| 文件备份对象 | `ES 知识库（dsh-es）`，根 `/backup-src/dsh-es`，排除 `data/*` |
+| 策略 | `ES 知识库每日备份`：`target=file`、`kind=full`、cron `30 4 * * *`、保留 30 天 / 最少 7 份 |
+| 存储 | storage #2（s3 `backup-dsh`） |
+
+- **必须排在 SLM 之后**（SLM 03:30 打快照），否则可能把写了一半的快照打包进去。
+- 保留 30 天 > ES 端 14 天：两端别同时清空。
+- 排除 `data/*` 的理由同「不要拷 data 目录」：Lucene 段在运行中复制必然不一致。
+  归档里会留一个空的 `data/` 目录条目，是正常的。
+- 策略必须显式绑 `fileset_ids`，没绑就静默跳过、连失败通知都不发。
+
+### 验证
+
+```bash
+# 归档清单（外层是未压缩 tar，数据在内层分片 tar.gz）
+POST /api/runs/<id>/archive-ticket          → url
+GET  <url> -o run.tar
+tar -xf run.tar && tar -tzf <fileset>.p0001.tar.gz | head
+```
+
+2026-10-28 实测：338 文件 / 88.58 MB → 66.91 MB，391 个成员，
+`data/` 下无实际文件，`.env`、`certs/`、`users/`、`scripts/`、`snapshots/`（321 项）全部在内。
+
 
 
