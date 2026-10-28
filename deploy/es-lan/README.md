@@ -329,6 +329,21 @@ docker exec -u 1000:1000 backup-server sh -c \
 # 应无输出
 ```
 
+### 同一个坑在 `/docker/dsh` 上重演了 8 天
+
+DSH 平台配置那个文件集也栽在同一件事上：2026-10-21~28 连续 8 次 `status=failed`，
+报 `instances-passwords.txt` 与 `profiles/*/cordis.patch.yml.bak-*` 读不到，
+**但每次都照样把 2 GB 归档传上去了**——8 份失败包白占 13.5 GB。
+
+- 真正要备的（`instances-passwords.txt`、`instances/test/.env`）→ `chown root:dsh` + `640`
+- `.bak-*` 是 dsh 自己留的配置副本，恢复用不到，而且会不断再生 → 直接排除：
+  `instances/*/data/dsh/profiles/*/*.bak-*`、`instances/*/data/dsh/storages/*.bak-*`，
+  再加一条 `*.bak-*` 兜底
+- 失败包要显式清：`DELETE /api/runs/<id>?delete_archive=true&confirm=true`
+  （默认**只删记录、不动归档**，这是刻意的最后防线）
+
+判断「备份是否真的成功」不能只看状态：`failed` 也可能已经产出并上传了一个缺文件的包。
+
 ### 对象与策略
 
 | 项 | 值 |
