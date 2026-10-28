@@ -246,5 +246,45 @@ ES 文档 id = `{doc_id}-{chunk_index}`，重跑覆盖同一块。
 xqh 361 篇 → **2736 块**（平均 7.6 块/篇），关键词（北单 12 命中、Maven 9 命中）与
 kNN（自匹配 score 1.0）均正常，IK 分词生效。
 
+## 快照与恢复
+
+`path.repo=/usr/share/elasticsearch/snapshots`（挂 `./snapshots`）早在 compose 里就配好了，
+但 **`fs_repo` 仓库和 SLM 策略一直没注册** —— `init-snapshot.sh` 原先写死了 `.114` 的
+`deploy/es` + `https://127.0.0.1:9200`，在 125 上第一步就失败，于是 `snapshots/` 一直空着。
+现在脚本接受覆盖，125 上这样跑：
+
+```bash
+cd /docker/dsh-es
+ES_DIR=/docker/dsh-es ES=https://192.168.1.125:9200 ES_CURL_TIMEOUT=240 \
+  bash scripts/init-snapshot.sh
+```
+
+> `ES_CURL_TIMEOUT` 要放大：首次快照是增量链的第一个（≈全量），66 MB 文档库要几十秒，
+> 默认 15s 会被 curl 掐断。`wait_for_completion=true` 会等到分片真正写完。
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `fs_repo`（fs 类型，产出 `snapshots/fs_repo/`，compress） |
+| 策略 | `dsh_memory_daily`，cron `0 30 19 * * ?`（**UTC**，= 北京 03:30），保留 14 天 / 最少 3 个 |
+| 范围 | `personal_memory_*`、`personal_doc_*`、`team_knowledge`、`memory_audit`（`include_global_state` 另外带回 `.security-7` 与模板） |
+
+索引清单从 `.env` 的 `MEM_PERSONAL_PREFIX` / `MEM_TEAM_INDEX` / `MEM_AUDIT_INDEX` 派生，
+`MEM_DOC_PREFIX`（默认 `personal_doc_`）可覆盖。**别退回到只备份记忆库**：125 上文档库
+（`personal_doc_xqh` 4038 块 / 66 MB）比记忆库大一个量级，漏了等于白备份。
+
+`snapshots/` 权限收到 `700` —— 快照里含 `.security-7`（用户/角色/密码哈希）。
+
+### 恢复演练（恢复成新名字，不动线上索引）
+
+```
+POST /_snapshot/fs_repo/<snap>/_restore?wait_for_completion=true
+{"indices":"team_knowledge","include_global_state":false,
+ "rename_pattern":"(.+)","rename_replacement":"restoretest-$1"}
+```
+
+核对 `GET /restoretest-team_knowledge/_count` 与原条数一致后删除临时索引。
+`include_global_state` 必须 `false`，否则与现有集群状态冲突。
+2026-10-28 实测：21 分片全部成功，9 条一条不差。
+
 
 
