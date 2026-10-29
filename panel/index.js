@@ -605,7 +605,9 @@ async function handleDeleteMemory(ctx, res, req) {
       console.error(`[memory-es-panel] 删除审计写入失败 ${esId}: ${auditError}`)
     }
   } else {
-    auditError = '个人库删除无法写 memory_audit（个人账号没有该索引的写权限）'
+    // 个人删除按设计不审计（用户 2026-10-29 确认）：不是"没权限写"的缺陷，就别在响应里
+    // 编一条错误说明；auditWritten=false 如实返回即可
+    auditError = ''
   }
 
   console.error(`[memory-es-panel] 删除 ${scope} esId=${esId} deleted=${deleted} audit=${auditWritten} actor=${actor}`)

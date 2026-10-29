@@ -431,7 +431,7 @@ test('删除：删不存在的条目按幂等成功（404 → deleted=false）',
   }
 })
 
-test('删除：个人库删除成功，但如实报告写不了审计', async () => {
+test('删除：个人库删除成功，且按设计不写审计', async () => {
   const es = await startFakeEs({ canDeletePersonal: true })
   try {
     const res = fakeRes()
@@ -439,7 +439,7 @@ test('删除：个人库删除成功，但如实报告写不了审计', async ()
     assert.equal(res.statusCode, 200)
     const body = JSON.parse(res.body)
     assert.equal(body.value.deleted, true)
-    assert.equal(body.value.auditWritten, false, '个人账号没有 memory_audit 写权限，不能假装写了')
+    assert.equal(body.value.auditWritten, false, '个人删除按设计不审计，不能假装写了')
     assert.equal(es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc')).length, 0)
     const del = es.calls.find((c) => c.method === 'DELETE')
     assert.match(del.url, /personal_memory_xqh\/_doc\/doc-2/)
