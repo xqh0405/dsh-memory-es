@@ -55,6 +55,9 @@
     "build": "bash scripts/build.sh",
     "test": "bash scripts/test.sh",
     "test:integration": "node --test tests/es-integration.test.ts",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "eval": "node scripts/eval-search.ts",
+    "eval:prod": "node scripts/eval-search.ts --gate",
+    "eval:thresholds": "node scripts/eval-thresholds.ts"
   }
 }

@@ -1,9 +1,10 @@
 /**
  * `memory_search` 编排单测：用进程内假 ES 固定每一路的结果，验证
- * 两路并发 → 库内 RRF → 跨库加权合并/去重 → margin 判空 → 投影/截断。
+ * 两路并发 → 库内 RRF → 跨库加权合并/去重 → 分层置信判定 → 投影/截断。
  *
  * 重点守两条容易写错的语义：
- *  · margin 只用 kNN 原始 cosine，且**命中不足两条时不判空**（否则库里只有一条记忆就永远查不到）；
+ *  · 置信判定用 kNN 原始 cosine + BM25 首条分（先绝对后相对），且**命中不足两条时不判空**；
+ *  · 低置信**只标注、不丢弃**——丢信息的代价是模型以为没记过、转而凭印象编；
  *  · 向量不可用时只降级不报错，但 ES 报错必须**明确失败**（不做“猜到一半结果”）。
  */
 
@@ -29,7 +30,7 @@ const DIMS = 4
 const VECTOR = [0.1, 0.2, 0.3, 0.4]
 const NOW = new Date('2026-10-25T12:00:00.000Z')
 
-const retrieval: RetrievalConfig = { topK: 20, rrfK: 60, marginFloor: 0.05, limit: 8 }
+const retrieval: RetrievalConfig = { topK: 20, rrfK: 60, limit: 8 }
 
 function doc(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -145,15 +146,113 @@ describe('searchMemories 编排', () => {
     }
   })
 
-  test('kNN 前两名分数贴近（margin < 0.05）→ low_confidence，不返回半信半疑的结果', async () => {
+  test('top1 明显偏低 → low_confidence，但仍返回结果（不再丢弃）', async () => {
     const h = await harness({
       [PERSONAL_INDEX]: { bm25: [hit('p1', 3), hit('p2', 2)], knn: [hit('p1', 0.5), hit('p2', 0.49)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
       assert.equal(result.note, 'low_confidence')
-      assert.deepEqual(result.hits, [])
-      assert.match(result.text, /区分度太低/)
+      assert.equal(result.hits.length, 2, '低置信也要把候选给出去，让模型自己判断')
+      assert.match(result.text, /相关性偏低/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('top1 达到 autoPassTop1 → 即使 margin 很小也放行', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3), hit('p2', 2)], knn: [hit('p1', 0.85), hit('p2', 0.849)] },
+    })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'ok')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('中间区 margin 不够、但 BM25 够强 → 放行（关键词精确命中救回）', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 35), hit('p2', 2)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+    })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'ok')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('中间区 margin 与 BM25 都不够 → 低置信，但仍返回', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 5), hit('p2', 4)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+    })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'low_confidence')
+      assert.ok(result.hits.length > 0, '低置信不等于空结果')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('向量不可用（降级）时不判低置信——没有依据就别判', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 2)] },
+    })
+    try {
+      const result = await searchMemories(h.deps({ embed: null }), { query: 'q', scope: 'personal' })
+      assert.equal(result.degraded, true)
+      assert.equal(result.note, 'ok')
+      assert.equal(result.hits.length, 1)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('importance=critical 在编排层生效（乘子确实接上了，不是死分支）', async () => {
+    // 两路都是 p1 第一、p2 第二，RRF 分只差约 1.5%；p2 标 critical（×1.1）应当反超
+    const h = await harness({
+      [PERSONAL_INDEX]: {
+        bm25: [hit('p1', 30), hit('p2', 29, { importance: 'critical' })],
+        knn: [hit('p1', 0.7), hit('p2', 0.69, { importance: 'critical' })],
+      },
+    })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.hits[0].memory_id, 'm-p2', 'critical 的条目应被顶到第一')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('命中后回写热度（脚本 += 1），且不等待、不影响返回', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 30)], knn: [hit('p1', 0.9)] } })
+    try {
+      const deps = h.deps()
+      const result = await searchMemories(
+        { ...deps, hitRecorder: deps.reader as unknown as SearchDeps['hitRecorder'] },
+        { query: 'q', scope: 'personal' },
+      )
+      assert.equal(result.note, 'ok')
+      // 回写是 fire-and-forget：放一轮事件循环再断言
+      await new Promise((r) => setTimeout(r, 30))
+      const updates = h.requests.filter((r) => r.path.includes('/_update/'))
+      assert.equal(updates.length, 1, '一条命中 → 一次回写')
+      assert.match(updates[0].body, /hit_count/)
+      assert.match(updates[0].body, /last_hit_at/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('不配 hitRecorder 就不回写（默认不产生写流量）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 30)], knn: [hit('p1', 0.9)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      await new Promise((r) => setTimeout(r, 30))
+      assert.equal(h.requests.filter((r) => r.path.includes('/_update/')).length, 0)
     } finally {
       await h.fake.close()
     }

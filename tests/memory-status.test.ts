@@ -175,6 +175,34 @@ describe('updateStatus', () => {
     }
   })
 
+  test('archive：置 status=archived（移出检索，但不删除）', async () => {
+    const h = await startStateFake({ a: doc('a') })
+    try {
+      const result = await updateStatus(h.deps, { memory_id: 'a', action: 'archive', reason: '不再需要' })
+      assert.equal(result.status, 'archived')
+      assert.match(result.text, /仍可按 id 查回/)
+      assert.deepEqual(h.state.updates[0].patch, { status: 'archived', updated_at: NOW.toISOString() })
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('restore：恢复为 active，并清掉 superseded_by（否则检索还是挡住它）', async () => {
+    const h = await startStateFake({ a: doc('a', { status: 'superseded', superseded_by: 'newer' }) })
+    try {
+      const result = await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(result.status, 'active')
+      assert.equal(result.superseded_by, '')
+      assert.deepEqual(h.state.updates[0].patch, {
+        status: 'active',
+        superseded_by: null,
+        updated_at: NOW.toISOString(),
+      })
+    } finally {
+      await h.fake.close()
+    }
+  })
+
   test('mark_private：只改 privacy，状态保持不变', async () => {
     const h = await startStateFake({ a: doc('a') })
     try {

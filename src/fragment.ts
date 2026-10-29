@@ -43,7 +43,21 @@ export function sha256Hex(input: string): string {
  * RRF（Reciprocal Rank Fusion）融合多路结果：score = Σ 1/(k + rank)，rank 从 1 起。
  * 只依赖名次、不依赖各路分数尺度——这正是它适合混合 BM25 + cosine 的原因。
  */
-export function rrfFuse(routes: Hit[][], k = 60): Fused[] {
+export interface RrfOptions {
+  /**
+   * 两路名次一致时的额外加成（乘性，0.1 = 最多 +10%）。
+   * 0 = 关闭（默认）。
+   *
+   * 为什么值得加：RRF 只累加「名次贡献」，但「两路都排第 1」和「一路第 1、一路第 10」
+   * 在 RRF 里差别没有想象中大（1/61+1/61 vs 1/61+1/70）。这个 bonus 直接表达
+   * 「两个独立信号达成一致」——那比单路高分更可信。
+   */
+  agreementBonus?: number
+  /** 名次差达到多少时加成归零（按每一路的候选数 topK 取） */
+  span?: number
+}
+
+export function rrfFuse(routes: Hit[][], k = 60, options: RrfOptions = {}): Fused[] {
   const acc = new Map<string, Fused>()
   routes.forEach((hits, routeIdx) => {
     hits.forEach((hit, idx) => {
@@ -59,6 +73,18 @@ export function rrfFuse(routes: Hit[][], k = 60): Fused[] {
       }
     })
   })
+
+  const bonus = options.agreementBonus ?? 0
+  if (bonus > 0) {
+    const span = Math.max(1, options.span ?? 20)
+    for (const item of acc.values()) {
+      const ranks = item.routeRanks.filter((r): r is number => typeof r === 'number')
+      // 只有一路命中时没有「一致」可言，不加成
+      if (ranks.length < 2) continue
+      const gap = Math.max(...ranks) - Math.min(...ranks)
+      item.fusedScore *= 1 + bonus * Math.max(0, 1 - gap / span)
+    }
+  }
   return [...acc.values()].sort((a, b) => b.fusedScore - a.fusedScore)
 }
 
@@ -125,6 +151,118 @@ export function mergeScopes(
   }
 
   return [...best.values()].sort((a, b) => {
+    if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
+    if (a.origin !== b.origin) return a.origin === 'personal' ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
+}
+
+/**
+ * 按 memory_type 的半衰期（天）。
+ *
+ * 为什么按类型分：统一的 30 天对 `task_progress`（两周就该过时）太慢，
+ * 对 `fact` / `decision`（确认过的工程事实与口径）又太快——同一把尺子量不出差别。
+ *
+ * ⚠️ 数字**不是抄** LivingMemory 的：它的 TTL 描述的是「从对话里自动抽取的原子」的寿命
+ * （factual 180 天、planned 2 天），而我们的记忆是**模型显式保存、人确认过的稳定事实**，
+ * 语义更重，所以整体给得更长。照抄会把正当的知识提前衰减掉。
+ */
+export const MEMORY_TYPE_HALF_LIFE_DAYS: Readonly<Record<string, number>> = {
+  decision: 365, // 决定：用户定下的口径，一年内基本不变
+  fact: 365, // 事实：工程事实，确认过就长期成立
+  context: 180, // 背景：项目/环境背景，半年内仍有效
+  preference: 90, // 偏好：会变，但不像进度那样按周过期
+  task_progress: 14, // 进度：两周内还有意义
+}
+
+/** 未知类型/缺字段时的兜底半衰期（天），与 config 的 recencyHalfLifeDays 默认值一致 */
+export const DEFAULT_HALF_LIFE_DAYS = 30
+
+/**
+ * 排序信号配置（对应 config.ts 的 `ranking` 组）。
+ * 三项都是**乘子**，作用在跨库合并之后的 fusedScore 上——绝不混进 RRF 分
+ * （两者尺度差一个数量级，见 scoreMargin 的注释）。
+ */
+export interface RankingConfig {
+  /** importance 强度：0=关；1 表示 critical ×1.1 / low ×0.9 */
+  importanceWeight: number
+  /** 命中次数强度：hitWeight × log1p(hit_count)/10 */
+  hitWeight: number
+  /** 时间新鲜度强度：recencyWeight × exp(-ageDays / halfLife) */
+  recencyWeight: number
+  /** 时间衰减半衰期（天）：memory_type 不在上表时的兜底 */
+  recencyHalfLifeDays: number
+  /** 每命中一次，寿命延长多少（比例）；0 = 关闭强化 */
+  reinforcementPerHit: number
+  /** 强化封顶：总延长不超过这个比例，避免老条目「越用越不朽」 */
+  reinforcementCap: number
+  /** 两路名次一致的加成（乘性；0 = 关闭）。评测驱动，默认 0 */
+  agreementBonus: number
+}
+
+export const DEFAULT_RANKING: RankingConfig = {
+  importanceWeight: 1,
+  hitWeight: 0.2,
+  recencyWeight: 0.1,
+  recencyHalfLifeDays: DEFAULT_HALF_LIFE_DAYS,
+  reinforcementPerHit: 0.1,
+  reinforcementCap: 0.5,
+  agreementBonus: 0,
+}
+
+/**
+ * importance 的乘子取值。
+ * 刻意温和（±10%）：它是**微调**，不是主导——否则排序会退化成「按标签排」，
+ * 而真正相关的那条反而被一个 critical 标签压下去。
+ */
+export const IMPORTANCE_FACTORS: Readonly<Record<string, number>> = {
+  critical: 1.1,
+  normal: 1,
+  low: 0.9,
+}
+
+/**
+ * 在 `mergeScopes` 之后应用排序乘子。
+ *
+ * 三项信号的语义：
+ *  · importance —— 用户显式标注的重要度；
+ *  · hit_count  —— 被检索命中的次数（反馈信号，由 search 侧回写）；
+ *  · 时间新鲜度 —— 优先最近被命中/写入的条目（指数衰减）。
+ *
+ * 缺字段一律按中性处理（importance=normal、hit_count=0、时间未知不加不减），
+ * 这样老文档不需要回填也能参与排序。
+ */
+export function applyRanking(hits: readonly ScopedHit[], cfg: RankingConfig, now: Date): ScopedHit[] {
+  if (cfg.importanceWeight === 0 && cfg.hitWeight === 0 && cfg.recencyWeight === 0) return [...hits]
+  const ranked = hits.map((hit) => {
+    const src = hit.source
+    const imp = typeof src.importance === 'string' ? (IMPORTANCE_FACTORS[src.importance] ?? 1) : 1
+    const hitCount = typeof src.hit_count === 'number' && Number.isFinite(src.hit_count) ? src.hit_count : 0
+    const stamp =
+      typeof src.last_hit_at === 'string'
+        ? src.last_hit_at
+        : typeof src.updated_at === 'string'
+          ? src.updated_at
+          : ''
+    const at = Date.parse(stamp)
+    const ageDays = Number.isFinite(at) ? Math.max(0, (now.getTime() - at) / 86_400_000) : null
+
+    let factor = 1
+    factor += cfg.importanceWeight * (imp - 1)
+    factor += cfg.hitWeight * (Math.log1p(hitCount) / 10)
+    if (ageDays !== null) {
+      // 半衰期按类型取；被反复命中的条目寿命更长（封顶），
+      // 否则「用了三年的关键约定」和「三周前的一句随手记」会一样快地被衰减掉。
+      const base = typeof src.memory_type === 'string'
+        ? (MEMORY_TYPE_HALF_LIFE_DAYS[src.memory_type] ?? cfg.recencyHalfLifeDays)
+        : cfg.recencyHalfLifeDays
+      const growth = 1 + Math.min(cfg.reinforcementCap, hitCount * cfg.reinforcementPerHit)
+      const halfLife = base * growth
+      if (halfLife > 0) factor += cfg.recencyWeight * Math.exp(-ageDays / halfLife)
+    }
+    return factor === 1 ? hit : { ...hit, fusedScore: hit.fusedScore * factor }
+  })
+  return ranked.sort((a, b) => {
     if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
     if (a.origin !== b.origin) return a.origin === 'personal' ? -1 : 1
     return a.id.localeCompare(b.id)

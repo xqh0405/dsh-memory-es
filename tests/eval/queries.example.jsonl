@@ -1,0 +1,4 @@
+{"id":"q01","kind":"single","query":"某个配置项改完为什么没生效","expect":["<memory_id>"]}
+{"id":"q02","kind":"paraphrase","query":"包管理器连不上官方源怎么处理","expect":["<memory_id>"]}
+{"id":"q03","kind":"exact","query":"某函数的入参格式是什么","expect":["<memory_id>"]}
+{"id":"q04","kind":"noise","query":"库里完全没有的另一个技术栈问题","expect":[]}

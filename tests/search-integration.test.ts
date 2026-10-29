@@ -22,7 +22,7 @@ import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
 import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__search_it'
-const RETRIEVAL = { topK: 20, rrfK: 60, marginFloor: 0.05, limit: 8 }
+const RETRIEVAL = { topK: 20, rrfK: 60, limit: 8 }
 
 /** 三条主题互不相同的记忆，用来验“换说法也能命中”和“噪声不命中” */
 const MEMORIES = [

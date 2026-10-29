@@ -154,6 +154,9 @@ export function apply(ctx: Context, config: ConfigType): void {
           embed,
           dims: config.embedding.dims,
           retrieval: config.retrieval,
+          confidence: config.confidence,
+          ranking: config.ranking,
+          hitRecorder: writer,
           // 检索埋点（P1）：写 search_log_<uid>。权限没开时 index 会 403，
           // search.ts 内部降级为只打日志，检索结果不受影响。
           recorder: writer,

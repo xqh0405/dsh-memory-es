@@ -22,6 +22,8 @@ export type AuditEvent =
   | 'approved'
   | 'rejected'
   | 'withdrawn'
+  // 个人库独占的裁决（不写团队库）：也要留审计，否则事后答不了「为什么没晋升」
+  | 'personal_only'
 
 export interface AuditEntry {
   event: AuditEvent

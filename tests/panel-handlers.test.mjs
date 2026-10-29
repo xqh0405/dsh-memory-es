@@ -185,7 +185,7 @@ if (validateConfig) {
     es: { url: 'https://x:9200', caCertPath: '', requestTimeoutMs: 8000 },
     index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
     embedding: { url: 'http://127.0.0.1:11434', model: 'bge-m3', dims: 1024 },
-    retrieval: { topK: 10, rrfK: 60, marginFloor: 0.02, limit: 20 },
+    retrieval: { topK: 10, rrfK: 60, limit: 20 },
     defaults: { domain: 'general' },
   }
   const identity = (extra) => ({

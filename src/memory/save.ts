@@ -38,12 +38,17 @@ export type Privacy = (typeof PRIVACY_VALUES)[number]
 
 /** 一条记忆的正文上限：记忆是「一句可独立成立的事实」，不是文档搬运 */
 export const MAX_CONTENT_CHARS = 4_000
+
+/** 重要度：只做 ±10% 的排序微调（见 fragment.ts 的 IMPORTANCE_FACTORS），不主导检索 */
+export const IMPORTANCE_VALUES = ['critical', 'normal', 'low'] as const
+export type Importance = (typeof IMPORTANCE_VALUES)[number]
 /** ttl_days 上限（10 年）；再长就不该用过期的语义 */
 export const MAX_TTL_DAYS = 3_650
 
 export interface SaveInput {
   content: string
   memory_type?: MemoryType
+  importance?: Importance
   domain?: string
   privacy?: Privacy
   ttl_days?: number
@@ -136,6 +141,10 @@ export function buildMemoryDoc(
   if (!PRIVACY_VALUES.includes(privacy)) {
     throw new Error(`memory_save: 未知 privacy「${String(privacy)}」`)
   }
+  const importance = input.importance ?? 'normal'
+  if (!IMPORTANCE_VALUES.includes(importance)) {
+    throw new Error(`memory_save: 未知 importance「${String(importance)}」`)
+  }
 
   let expiresAt: string | undefined
   if (input.ttl_days !== undefined) {
@@ -152,7 +161,10 @@ export function buildMemoryDoc(
     user_id: userId,
     // 存原文（返回给模型看的是原文），哈希用归一化后的正文
     content: raw,
+    // 同一份正文的 standard 分词副本：只用于标识符精确匹配（见 es/dsl.ts 的 IDENTIFIER_FIELD）
+    content_exact: raw,
     memory_type: memoryType,
+    importance,
     domain: input.domain?.trim() || deps.defaultDomain,
     privacy,
     promote_state: 'none',
@@ -285,6 +297,12 @@ export function defineSaveTool(deps: SaveDeps) {
         type: 'string',
         enum: [...MEMORY_TYPES],
         description: '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景。',
+      },
+      importance: {
+        type: 'string',
+        enum: [...IMPORTANCE_VALUES],
+        description:
+          '重要度，缺省 normal。critical 只给「不看就会做错」的规则，别滥用；它只做约 ±10% 的排序微调，不会主导检索。',
       },
       domain: {
         type: 'string',

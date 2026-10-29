@@ -79,7 +79,7 @@ export interface RunReport {
   candidates: number
   skippedProcessed: number
   results: StepResult[]
-  counts: { promoted: number; duplicate: number; mergeCandidate: number; pending: number; blocked: number }
+  counts: { promoted: number; duplicate: number; mergeCandidate: number; pending: number; blocked: number; personalOnly: number }
   /** 模糊输入（embedding 不可用 → 该条没做 kNN 去重，只做了 sha 精确判定） */
   degraded: boolean
   state: ConsolidateState

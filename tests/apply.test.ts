@@ -15,7 +15,10 @@ import { apply, inject, name } from '../src/index.ts'
 import { sendJson, startFakeEs } from './helpers/fake-es.ts'
 
 /** 最小可用的 Config（默认值走 schema） */
-function baseConfig(overrides: Partial<ConfigType> = {}): ConfigType {
+// identity 允许只覆盖部分字段：schema 有默认值，测试只想改动其中一两项
+function baseConfig(
+  overrides: Partial<Omit<ConfigType, 'identity'>> & { identity?: Partial<ConfigType['identity']> } = {},
+): ConfigType {
   const parsed = Config({
     identity: { userId: 'xqh', readPassword: 'pw-reader', writerPassword: 'pw-writer' },
     ...overrides,

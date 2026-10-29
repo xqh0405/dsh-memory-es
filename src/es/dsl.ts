@@ -27,10 +27,19 @@ export interface EsTermsFilter {
 }
 
 export interface EsRangeFilter {
-  range: { updated_at: { gte: string } }
+  range: Record<string, { gte?: string; lte?: string; lt?: string; gt?: string }>
 }
 
-export type EsFilter = EsTermFilter | EsTermsFilter | EsRangeFilter
+export interface EsExistsFilter {
+  exists: { field: string }
+}
+
+/** `must_not` 里可以放任意过滤（阶段 3 用它表达「字段不存在」「未过期」） */
+export interface EsBoolFilter {
+  bool: { must_not: EsFilter[] }
+}
+
+export type EsFilter = EsTermFilter | EsTermsFilter | EsRangeFilter | EsExistsFilter | EsBoolFilter
 
 /** 单值写 string，多值写 string[] —— 多值走 `terms`（命中任一即可） */
 export type FilterValue = string | string[]
@@ -81,8 +90,25 @@ function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue 
   else filters.push({ terms: { [field]: values } })
 }
 
+/**
+ * 阶段 3 的两条「时效」过滤：被取代的条目、已过期的条目都不返回。
+ *
+ * 为什么抽成函数：测试要能原样引用这两条，否则每加一条过滤就得在 6 个用例里
+ * 手抄一遍期望值，抄错一次就是假绿。
+ */
+export function freshOnlyFilters(now: Date): EsFilter[] {
+  return [
+    // 用 `must_not exists` 而不是 `term: null`：字段缺失与字段为 null 是两回事，
+    // 前者才是「没有值」的稳妥判据。
+    { bool: { must_not: [{ exists: { field: 'superseded_by' } }] } },
+    // 不存在的 expires_at 不会被 range 匹配，所以 must_not range 天然保留它们
+    { bool: { must_not: [{ range: { expires_at: { lt: now.toISOString() } } }] } },
+  ]
+}
+
 export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   const filters: EsFilter[] = []
+  const now = options.now ?? new Date()
   const status = options.status === undefined ? 'active' : options.status
   if (status !== null) {
     filters.push({ term: { status } })
@@ -90,38 +116,95 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   pushValueFilter(filters, 'memory_type', options.memory_type)
   pushValueFilter(filters, 'domain', options.domain)
   pushValueFilter(filters, 'review_state', options.review_state ?? null)
+
   if (options.updatedWithinDays !== undefined) {
     assertPositiveInt(options.updatedWithinDays, 'updatedWithinDays')
-    const now = options.now ?? new Date()
     const gte = new Date(now.getTime() - options.updatedWithinDays * 86_400_000).toISOString()
     filters.push({ range: { updated_at: { gte } } })
   }
+  // 时效过滤放最后：语义上它们是「兜底排除」，与业务维度（status/type/domain/时间窗）分开
+  filters.push(...freshOnlyFilters(now))
   return filters
 }
 
+/**
+ * 标识符专用字段：用 `standard` 分析器存一份正文。
+ * IK 会把 `lot.bd_write_sync` 切碎（实测 BM25 只有 13.9），standard 按 UAX#29
+ * 保留完整 token，中文仍逐字可搜。
+ */
+export const IDENTIFIER_FIELD = 'content_exact'
+
+/** 标识符提权倍数：实测 q20 的 BM25 从 13.6 → 38.0（boost=5），刚好越过放行门槛 */
+export const IDENTIFIER_BOOST = 5
+
+/**
+ * 从查询里挑出「像标识符」的片段，用于 content_exact 的精确短语匹配。
+ *
+ * 判定刻意保守——只有下面任一条成立才算：
+ *  · 含分隔符 `._:/@#`（lot.bd_write_sync、docker-compose.yml、ssh.example.com）
+ *  · 驼峰（ZooKeeper、createOrder）
+ *  · 字母数字混合（E101、PM2、HTTP2）
+ *
+ * **纯字母缩写（TLS / CLI / API / TTL / OSD）不算**：它们是通用术语，不是标识符。
+ * 实测把 TLS 当标识符时，库里 SSL 证书相关的记忆被 phrase 命中、boost 5，
+ * 让一条 Kubernetes 噪声查询的 BM25 从 25.8 冲到 65.6，直接放行。
+ * 排除的办法不是维护黑名单（会漂移），而是要求「缩写必须含数字」。
+ *
+ * 普通英文单词（docker、lazy）同样不算：IK 下已能正常召回，加进 should 只会引入噪声。
+ */
+export function extractIdentifiers(text: string, max = 5): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of text.match(/[A-Za-z][A-Za-z0-9_.:/@#-]{2,}/g) ?? []) {
+    const token = raw.replace(/[._:/@#-]+$/, '') // 去掉尾部分隔符
+    if (token.length < 3 || seen.has(token)) continue
+    const hasLetter = /[A-Za-z]/.test(token)
+    const looksLike =
+      /[._:/@#]/.test(token) || // 分隔符
+      /[a-z][A-Z]/.test(token) || // 驼峰
+      (hasLetter && /\d/.test(token)) // 字母数字混合（含 E101 / PM2）
+    if (!looksLike) continue
+    seen.add(token)
+    out.push(token)
+    if (out.length >= max) break
+  }
+  return out
+}
+
 /** BM25 一路：content 权重 2、semantic_keywords 权重 1.5（文档 §8.1 的字段权重） */
-export function bm25Body(query: string, options: MetaFilterOptions = {}, topK = 20): SearchBody {
+export function bm25Body(
+  query: string,
+  options: MetaFilterOptions = {},
+  topK = 20,
+  identifiers: readonly string[] = [],
+): SearchBody {
   const q = query.trim()
   if (q === '') throw new Error('bm25Body: query 不能为空')
   assertPositiveInt(topK, 'topK')
+  const bool: Record<string, unknown> = {
+    must: [
+      {
+        multi_match: {
+          query: q,
+          // summary 是蒸馏产出的一句话，检索时也要吃（否则辛苦蒸馏的摘要白存）
+          fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
+          type: 'best_fields',
+        },
+      },
+    ],
+    filter: buildFilters(options),
+  }
+  // 标识符精确匹配作为加分项：must 里已经有主查询，should 不命中也不影响召回，
+  // 命中则把「精确问到某个函数/任务名」的结果顶上来。
+  if (identifiers.length > 0) {
+    bool.should = identifiers.map((token) => ({
+      match_phrase: { [IDENTIFIER_FIELD]: { query: token, boost: IDENTIFIER_BOOST } },
+    }))
+  }
   return {
     size: topK,
     _source: { excludes: [...DEFAULT_SOURCE_EXCLUDES] },
-    query: {
-      bool: {
-        must: [
-          {
-            multi_match: {
-              query: q,
-              // summary 是蒸馏产出的一句话，检索时也要吃（否则辛苦蒸馏的摘要白存）
-              fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
-              type: 'best_fields',
-            },
-          },
-        ],
-        filter: buildFilters(options),
-      },
-    },
+    query: { bool },
   }
 }
 

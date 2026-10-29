@@ -124,6 +124,8 @@ describe('buildMemoryDoc（纯函数）', () => {
     assert.equal(built.doc.created_at, NOW.toISOString())
     assert.equal(built.doc.updated_at, NOW.toISOString())
     assert.equal(built.doc.content, '  北单中断开奖要同时写 win_price 和 practical  ', '原文照存')
+    assert.equal(built.doc.content_exact, built.doc.content, '标识符字段与正文同源（standard 分词副本）')
+    assert.equal(built.doc.importance, 'normal', '缺省 normal：没有信号时排序不偏')
     assert.equal(built.contentSha256, sha256Hex(normalizeContent('  北单中断开奖要同时写 win_price 和 practical  ')))
     assert.deepEqual(built.doc.embedding, VECTOR)
   })
@@ -347,6 +349,7 @@ describe('defineSaveTool', () => {
     assert.deepEqual(Object.keys(parameters.properties).sort(), [
       'content',
       'domain',
+      'importance',
       'memory_type',
       'privacy',
       'ttl_days',

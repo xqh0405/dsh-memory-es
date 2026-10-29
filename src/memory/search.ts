@@ -15,11 +15,11 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { Embedder } from '../embedding.ts'
-import { bm25Body, knnBody, parseTimeRangeDays, type MetaFilterOptions } from '../es/dsl.ts'
+import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFilterOptions } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
-import { mergeScopes, projectHit, renderText, rrfFuse, scoreMargin } from '../fragment.ts'
+import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, type RankingConfig } from '../fragment.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
@@ -39,6 +39,79 @@ export const TEAM_GENERAL_DOMAIN = 'general'
 /** 个人库权重：个人记忆通常更贴近当前上下文（§8.3） */
 export const PERSONAL_WEIGHT = 1.2
 
+/**
+ * 置信判定的分层阈值（对应 config.ts 的 `confidence` 组）。
+ * 不传时用 DEFAULT_CONFIDENCE，便于测试与脚本各取所需。
+ */
+export interface ConfidenceConfig {
+  floorTop1: number
+  autoPassTop1: number
+  minMargin: number
+  minBm25: number
+}
+
+/**
+ * 默认阈值。**这是唯一来源**：config.ts 的 schema 默认值直接引它，
+ * 避免「代码默认」和「配置默认」两处各自漂移。
+ *
+ * 取值依据（2026-10-29，30 条评测集）：真命中的 top1 全部 ≥ 0.75，
+ * noise 全部 ≤ 0.797；把 autoPassTop1 定在 0.80 能让 noise 全部落进中间区，
+ * 再由 minMargin=0.025 / minBm25=30 逐个标注。
+ * ⚠️ noise 样本仅 6 条，参数贴边；扩到 20 条以上要重跑 `npm run eval:thresholds`。
+ */
+export const DEFAULT_CONFIDENCE: ConfidenceConfig = {
+  floorTop1: 0.6,
+  autoPassTop1: 0.8,
+  minMargin: 0.025,
+  minBm25: 30,
+}
+
+export interface ConfidenceInput {
+  /** kNN 第一名的 cosine；向量不可用时为 null */
+  top1: number | null
+  /** kNN 第二名；不足两条为 null */
+  top2: number | null
+  /** BM25 首条分；两路都空时为 0 */
+  bm25Top1: number
+}
+
+export type ConfidenceReason = 'ok' | 'narrow' | 'too-low' | 'no-vector'
+
+/**
+ * 分层置信判定（阶段 0.5，替代原来的单一 marginFloor）。
+ *
+ * 为什么不能只看 margin：候选池越大，top2 越贴近 top1，margin 整体下移。
+ * 实测 268 条时 margin 中位数 0.0208，而旧门槛 0.05 让 30/30 查询全部返回空。
+ *
+ * 判定顺序是「先绝对、后相对」：
+ *  1. 向量不可用 → 不判低置信（没有依据就别判）
+ *  2. top1 < floorTop1 → 明显无关
+ *  3. top1 >= autoPassTop1 → 放行（绝对相似度已经够高，不必再看 margin）
+ *  4. 只有一条候选 → 放行（没有第二名就没有「区分度」可言）
+ *  5. 中间区：margin >= minMargin 或 BM25 >= minBm25 → 放行，否则低置信
+ *
+ * ⚠️ 已知边界：真命中与噪声存在「三项全劣」的不可分对（见 docs/优化路线.md 阶段 0.5），
+ * 所以低置信只用于**标注**，不再丢弃结果。
+ */
+export function judgeConfidence(
+  input: ConfidenceInput,
+  cfg: ConfidenceConfig = DEFAULT_CONFIDENCE,
+): { low: boolean; reason: ConfidenceReason } {
+  if (input.top1 === null) return { low: false, reason: 'no-vector' }
+  if (input.top1 < cfg.floorTop1) return { low: true, reason: 'too-low' }
+  if (input.top1 >= cfg.autoPassTop1) return { low: false, reason: 'ok' }
+  // 只有一条候选时没有「区分度」可言：不能因为第二名不存在就判窄。
+  // （否则库里只存了一条相关记忆时，查询永远被判低置信。）
+  if (input.top2 === null) return { low: false, reason: 'ok' }
+  if (input.top1 - input.top2 >= cfg.minMargin) return { low: false, reason: 'ok' }
+  if (cfg.minBm25 > 0 && input.bm25Top1 >= cfg.minBm25) return { low: false, reason: 'ok' }
+  return { low: true, reason: 'narrow' }
+}
+
+/** 低置信时的固定提示：结果照常给，但要让模型知道「这是低置信」 */
+export const LOW_CONFIDENCE_HINT =
+  '以下结果的相关性偏低（候选之间区分度不足），请谨慎采信；如果与问题无关，就当作没有检索到。'
+
 export interface SearchInput {
   query: string
   scope?: SearchScope
@@ -51,7 +124,6 @@ export interface SearchInput {
 export interface RetrievalConfig {
   topK: number
   rrfK: number
-  marginFloor: number
   limit: number
 }
 
@@ -67,6 +139,15 @@ export interface SearchDeps {
   /** 索引 mapping 的向量维度（来自配置）；与 embedder 实际输出不一致时 knnBody 会抛 */
   dims: number
   retrieval: RetrievalConfig
+  /** 置信判定阈值；不传用 DEFAULT_CONFIDENCE（测试与脚本常用） */
+  confidence?: ConfidenceConfig
+  /** 排序乘子；不传用 DEFAULT_RANKING */
+  ranking?: RankingConfig
+  /**
+   * 命中回写（热度信号）：必须给写身份。不给就不记，检索结果不受影响。
+   * 用脚本 `+= 1`，并发检索时才不会丢更新。
+   */
+  hitRecorder?: Pick<EsClient, 'updateScript'> | null
   /** 注入时钟（团队库兜底时间窗要用） */
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
@@ -170,6 +251,9 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   }
 
   const topK = deps.retrieval.topK
+  // 标识符（lot.bd_write_sync / class 名 / 主机名）单独走 content_exact 精确匹配加分；
+  // IK 会把它们切碎，纯 BM25 分数压不住噪声（实测 13.9）。
+  const identifiers = extractIdentifiers(query)
   const tasks: Array<{ scope: Scope; route: 'bm25' | 'knn'; run: Promise<Hit[]> }> = []
 
   const pushRoute = (target: Scope, indexName: string, targetMeta: MetaFilterOptions): void => {
@@ -177,7 +261,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       scope: target,
       route: 'bm25',
       run: deps.reader
-        .search(indexName, bm25Body(query, targetMeta, topK), { signal: deps.signal })
+        .search(indexName, bm25Body(query, targetMeta, topK, identifiers), { signal: deps.signal })
         .then((r) => r.hits),
     })
     if (vector) {
@@ -212,15 +296,30 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   if (scope !== 'team') {
     const routes = [pick('personal', 'bm25')]
     if (vector) routes.push(pick('personal', 'knn'))
-    groups.push({ source: 'personal', hits: rrfFuse(routes, deps.retrieval.rrfK) })
+    groups.push({
+      source: 'personal',
+      hits: rrfFuse(routes, deps.retrieval.rrfK, {
+        agreementBonus: deps.ranking?.agreementBonus,
+        span: deps.retrieval.topK,
+      }),
+    })
   }
   if (scope !== 'personal') {
     const routes = [pick('team', 'bm25')]
     if (vector) routes.push(pick('team', 'knn'))
-    groups.push({ source: 'team', hits: rrfFuse(routes, deps.retrieval.rrfK) })
+    groups.push({
+      source: 'team',
+      hits: rrfFuse(routes, deps.retrieval.rrfK, {
+        agreementBonus: deps.ranking?.agreementBonus,
+        span: deps.retrieval.topK,
+      }),
+    })
   }
 
-  const merged = mergeScopes(groups, { weights: { personal: PERSONAL_WEIGHT } })
+  const mergedRaw = mergeScopes(groups, { weights: { personal: PERSONAL_WEIGHT } })
+  // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
+  // 系数默认温和（±10% 量级），归零即完全关闭。
+  const merged = applyRanking(mergedRaw, deps.ranking ?? DEFAULT_RANKING, now)
   const basis = `${scope === 'both' ? 'personal+team' : scope}:${degraded ? 'bm25' : 'bm25+knn'}`
 
   /**
@@ -250,7 +349,8 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     }
     if (extra.margin !== undefined) doc.margin = extra.margin
     try {
-      void recorder.index(index, doc, { refresh: false }).catch((err: unknown) => {
+      // 不传 refresh：埋点不需要立刻可见，而 WriteOptions 的 refresh 只接受 'true'|'wait_for'
+      void recorder.index(index, doc).catch((err: unknown) => {
         log({ tool: 'search', event: 'record_degraded', error: formatEsError(err) })
       })
     } catch (err) {
@@ -264,35 +364,69 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     return { hits: [], note: 'no_match', degraded, filtered, text: '没有找到相关记忆。' }
   }
 
-  // margin 只用 kNN 原始 cosine，且至少两条才有意义（见文件头第 3 条）
+  // 置信信号只取「主库」的一手分数：scope=both 时以个人库为准。
+  // 不能把两个库的 kNN 分数混在一起排序——候选池不同，混算出来的 margin 没有意义。
+  const primaryScope: Scope = scope === 'team' ? 'team' : 'personal'
   const knnScores = settled
-    .filter((item) => item.route === 'knn')
+    .filter((item) => item.route === 'knn' && item.scope === primaryScope)
     .flatMap((item) => item.hits.map((hit) => hit.score))
     .sort((a, b) => b - a)
+  const bm25Top1 = settled
+    .filter((item) => item.route === 'bm25' && item.scope === primaryScope)
+    .flatMap((item) => item.hits.map((hit) => hit.score))
+    .sort((a, b) => b - a)[0] ?? 0
   const margin = knnScores.length >= 2 ? scoreMargin(knnScores) : undefined
+  const verdict = judgeConfidence(
+    { top1: knnScores[0] ?? null, top2: knnScores[1] ?? null, bm25Top1 },
+    deps.confidence,
+  )
 
-  if (margin !== undefined && margin < deps.retrieval.marginFloor) {
+  const topMerged = merged.slice(0, limit)
+  const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin))
+
+  // 命中回写：fire-and-forget，失败只记日志——观测通道的可用性不该拖累检索。
+  if (deps.hitRecorder !== null && deps.hitRecorder !== undefined && topMerged.length > 0) {
+    const stamp = now.toISOString()
+    const recorder = deps.hitRecorder
+    void Promise.all(
+      topMerged.map((hit) => {
+        const index = hit.origin === 'team' ? deps.teamIndex : personalIndex
+        return recorder
+          .updateScript(index, hit.id, {
+            source:
+              'if (ctx._source.hit_count == null) { ctx._source.hit_count = 0 } ctx._source.hit_count += 1; ctx._source.last_hit_at = params.now',
+            params: { now: stamp },
+          })
+          .catch((err: unknown) => {
+            log({ tool: 'search', event: 'hit_record_degraded', error: formatEsError(err) })
+          })
+      }),
+    )
+  }
+
+  // 低置信不再丢弃结果：返回 + 标注，让模型自己判断。
+  // 丢信息的代价更高——模型会以为「没记过」，转而凭印象编。
+  if (verdict.low) {
     log({
       tool: 'search',
       user: deps.userId,
       ms: Date.now() - startedAt,
       routes: basis,
-      hits: 0,
+      hits: hits.length,
       degraded,
       margin,
       note: 'low_confidence',
+      reason: verdict.reason,
     })
-    record('low_confidence', 0, { margin })
+    record('low_confidence', hits.length, margin === undefined ? {} : { margin })
     return {
-      hits: [],
+      hits,
       note: 'low_confidence',
       degraded,
       filtered,
-      text: '没有足够相关的记忆（候选之间的区分度太低，宁可不给）。',
+      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}`,
     }
   }
-
-  const hits = merged.slice(0, limit).map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin))
   log({
     tool: 'search',
     user: deps.userId,
@@ -311,7 +445,7 @@ const DESCRIPTION = [
   '时机：动手前确认「这个项目以前怎么定的」；用户提到「之前说过 / 记过」；遇到似曾相识的报错。',
   '同一问题最多查一次，拿到结果就往前走；查不到就问人，不要凭印象编。',
   '返回精简结果（正文截断 500 字，不带向量）。note=no_match 表示确实没有；',
-  'note=low_confidence 表示候选区分度太低——别把它当证据用。',
+  'note=low_confidence 表示候选区分度偏低：结果仍会给出，但要谨慎采信。',
 ].join(' ')
 
 /** 把编排封成模型可见的工具定义 */

@@ -11,6 +11,10 @@
 
 import z from '@deepseek-ai/schemastery'
 
+// 置信阈值的唯一来源在 search.ts（实现与默认值放在一起，避免两处漂移）
+import { DEFAULT_CONFIDENCE } from './memory/search.ts'
+import { DEFAULT_RANKING } from './fragment.ts'
+
 export interface ConfigType {
   es: {
     url: string
@@ -22,6 +26,8 @@ export interface ConfigType {
     /** 文档索引前缀；实际索引 = 前缀 + identity.userId（与记忆分开，见 README 文档入库方案） */
     docPrefix: string
     team: string
+    /** 检索埋点前缀；实际索引 = 前缀 + identity.userId（只记查了什么/召回几条/耗时） */
+    searchLogPrefix: string
   }
   identity: {
     userId: string
@@ -49,8 +55,24 @@ export interface ConfigType {
   retrieval: {
     topK: number
     rrfK: number
-    marginFloor: number
     limit: number
+  }
+  /** 排序乘子（阶段 2） */
+  ranking: {
+    importanceWeight: number
+    hitWeight: number
+    recencyWeight: number
+    recencyHalfLifeDays: number
+    reinforcementPerHit: number
+    reinforcementCap: number
+    agreementBonus: number
+  }
+  /** 置信判定：分层阈值，见 schema 处注释 */
+  confidence: {
+    floorTop1: number
+    autoPassTop1: number
+    minMargin: number
+    minBm25: number
   }
   defaults: {
     domain: string
@@ -117,10 +139,47 @@ export const Config: z<ConfigType> = z.object({
       .description('每一路（BM25 / kNN）取的候选数。'),
     rrfK: z.number().step(1).default(60)
       .description('RRF 融合常数。'),
-    marginFloor: z.number().default(0.05)
-      .description('kNN 原始 cosine 分数的 top1-top2 差值下限，低于它判为“低置信”。'),
     limit: z.number().step(1).default(8)
       .description('返回给模型的最大条数。'),
+  }),
+  /**
+   * 置信判定（阶段 0.5）：分层规则，替代原来单一的 marginFloor。
+   *
+   * 为什么改：单一 margin 门槛在库变大后必然失效——候选池越大，top2 越贴近 top1。
+   * 实测 268 条时 margin 中位数 0.0208，而旧门槛 0.05 让 30/30 查询全部返回空。
+   *
+   * 而且「低置信」不再等于「不返回」：返回结果 + 标注，让模型自己判断，
+   * 比直接丢信息更好（丢信息的代价是模型以为没记过、转而凭印象编）。
+   */
+  confidence: z.object({
+    floorTop1: z.number().default(DEFAULT_CONFIDENCE.floorTop1)
+      .description('kNN 第一名 cosine 低于它 → 明显无关，判低置信。'),
+    autoPassTop1: z.number().default(DEFAULT_CONFIDENCE.autoPassTop1)
+      .description('kNN 第一名 cosine 达到它 → 直接放行，不再看 margin（绝对相似度已经够高）。'),
+    minMargin: z.number().default(DEFAULT_CONFIDENCE.minMargin)
+      .description('中间区：top1-top2 差值达到它 → 放行。'),
+    minBm25: z.number().default(DEFAULT_CONFIDENCE.minBm25)
+      .description('中间区：BM25 首条分数达到它 → 放行（关键词精确命中救回向量区分度不足的情况）。注意该阈值与语料规模相关，扩库后需重标定。'),
+  }),
+  /**
+   * 排序乘子（阶段 2）：作用在跨库合并之后，三项都可归零关闭。
+   * 默认值刻意温和（±10% 量级），importance 只是微调、不主导排序。
+   */
+  ranking: z.object({
+    importanceWeight: z.number().default(DEFAULT_RANKING.importanceWeight)
+      .description('importance 强度：0=关；1 表示 critical ×1.1 / low ×0.9。'),
+    hitWeight: z.number().default(DEFAULT_RANKING.hitWeight)
+      .description('命中次数强度：hitWeight × log1p(hit_count)/10。'),
+    recencyWeight: z.number().default(DEFAULT_RANKING.recencyWeight)
+      .description('时间新鲜度强度：recencyWeight × exp(-ageDays / halfLife)。'),
+    recencyHalfLifeDays: z.number().default(DEFAULT_RANKING.recencyHalfLifeDays)
+      .description('时间衰减半衰期（天）：memory_type 不在内置类型表里时的兜底。'),
+    reinforcementPerHit: z.number().default(DEFAULT_RANKING.reinforcementPerHit)
+      .description('每命中一次延长多少寿命比例（0 = 关闭）。内置类型表的半衰期会乘 (1 + min(cap, hit_count × 本值))。'),
+    reinforcementCap: z.number().default(DEFAULT_RANKING.reinforcementCap)
+      .description('强化封顶比例，避免老条目越用越不朽。'),
+    agreementBonus: z.number().default(DEFAULT_RANKING.agreementBonus)
+      .description('两路名次一致时的乘性加成（0.1 = 最多 +10%；0 = 关闭）。KK 融合只看名次，这个 bonus 补上「两路一致」这个信号。'),
   }),
   defaults: z.object({
     domain: z.string().default('general')

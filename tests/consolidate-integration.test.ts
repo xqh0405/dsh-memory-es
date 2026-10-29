@@ -242,7 +242,7 @@ function defineConsolidateIntegration(e: EsTestEnv): void {
           reader,
           embed,
           dims: 1024,
-          retrieval: { topK: 20, rrfK: 60, marginFloor: 0.05, limit: 8 },
+          retrieval: { topK: 20, rrfK: 60, limit: 8 },
         },
         { query: '北单中断开奖 写 win_price', scope: 'team', domain: [CONFLICT_DOMAIN], limit: 8 },
       )

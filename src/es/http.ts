@@ -167,6 +167,13 @@ export interface EsClient {
   index(indexName: string, doc: Record<string, unknown>, options?: WriteOptions): Promise<EsWriteResult>
   get(indexName: string, id: string, call?: CallOptions): Promise<EsGetResult>
   /** 局部更新（partial doc），writer 凭证 */
+  /** 脚本更新（热度回写用：`hit_count += 1` 必须原子，读-改-写会丢并发更新） */
+  updateScript(
+    indexName: string,
+    id: string,
+    script: { source: string; params?: Record<string, unknown> },
+    options?: WriteOptions & CallOptions,
+  ): Promise<EsWriteResult>
   update(
     indexName: string,
     id: string,
@@ -414,6 +421,20 @@ export function createEsClient(config: EsClientConfig): EsClient {
         id: typeof raw._id === 'string' ? raw._id : id,
         index: typeof raw._index === 'string' ? raw._index : indexName,
         source: (raw._source ?? {}) as Record<string, unknown>,
+      }
+    },
+
+    async updateScript(indexName, id, script, options = {}) {
+      const raw = await request<{ _id?: unknown; result?: unknown }>(
+        'POST',
+        `/${enc(indexName)}/_update/${enc(id)}${refreshQuery(options.refresh)}`,
+        { script: { lang: 'painless', source: script.source, params: script.params ?? {} } },
+        options.signal,
+      )
+      return {
+        id: typeof raw._id === 'string' ? raw._id : id,
+        result: typeof raw.result === 'string' ? raw.result : 'updated',
+        status: 200,
       }
     },
 

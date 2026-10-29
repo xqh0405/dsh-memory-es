@@ -1,11 +1,16 @@
 /**
  * `memory_update_status` —— 改记忆的状态，不物理删除（§3.4 模式 A / D4）。
  *
- * 三个动作：
+ * 五个动作：
  *  · `supersede`：旧文档置 `status=superseded` + `superseded_by`，**并回填新文档的 `supersedes`**
  *    （§3.4 要求「新文档 supersedes = 旧 memory_id」，不双写就没有可追溯的链）；
- *  · `expire`：置 `status=expired`；
+ *  · `expire`：置 `status=expired`（时间到了，自然失效）；
+ *  · `archive`：置 `status=archived`（人工判定不再需要，但保留可查）；
+ *  · `restore`：置回 `status=active`，并清除 `superseded_by`（撤回取代 / 恢复归档）；
  *  · `mark_private`：置 `privacy=private`（不参与整理任务）。
+ *
+ * **永不物理删除**：本模块只改状态，任何一条记忆都能按 id 查回来。
+ * 归档与过期都只是「移出检索」，不是销毁——审计要能回答「当时为什么这么定」。
  *
  * 写顺序是有讲究的：**先置旧文档 superseded，再回填新文档的 supersedes**。
  * 反过来若第二步失败，检索会同时返回新旧两版（错的结果）；这个顺序失败时只是「链缺一格」，
@@ -19,10 +24,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryStoreDeps } from './common.ts'
 import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
 
-export const STATUS_ACTIONS = ['supersede', 'expire', 'mark_private'] as const
+export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private'] as const
 export type StatusAction = (typeof STATUS_ACTIONS)[number]
 
-export const MEMORY_STATUSES = ['active', 'superseded', 'expired'] as const
+export const MEMORY_STATUSES = ['active', 'superseded', 'expired', 'archived'] as const
 export type MemoryStatus = (typeof MEMORY_STATUSES)[number]
 
 export interface UpdateStatusInput {
@@ -56,6 +61,8 @@ function describe(action: StatusAction, status: string, replacement: string): st
       : `已标记为 superseded，替代版本 ${replacement}`
   }
   if (action === 'expire') return '已标记为 expired（不再参与检索，但历史仍在）'
+  if (action === 'archive') return '已归档（不再参与检索，仍可按 id 查回；没有删除）'
+  if (action === 'restore') return '已恢复为 active（重新参与检索）'
   return `已标记为 private（不参与整理任务），状态仍为 ${status}`
 }
 
@@ -123,6 +130,39 @@ export async function updateStatus(
       superseded_by: replacementId,
       changed: oldWrite.result !== 'noop',
       text: describe(action, 'superseded', replacementId),
+    }
+  }
+
+  if (action === 'archive') {
+    await deps.writer.update(index, current.id, { status: 'archived', updated_at: now }, { refresh: 'wait_for' })
+    return {
+      memory_id: current.id,
+      action,
+      status: 'archived',
+      privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
+      superseded_by: typeof current.source.superseded_by === 'string' ? current.source.superseded_by : '',
+      changed: true,
+      text: describe(action, 'archived', ''),
+    }
+  }
+
+  if (action === 'restore') {
+    // 必须清掉 superseded_by：否则检索的 `must_not exists superseded_by` 仍会挡住它。
+    // 置 null 而不是删字段——ES 的 `exists` 对 null 返回 false，效果等价且不需要脚本权限。
+    await deps.writer.update(
+      index,
+      current.id,
+      { status: 'active', superseded_by: null, updated_at: now },
+      { refresh: 'wait_for', signal: deps.signal },
+    )
+    return {
+      memory_id: current.id,
+      action,
+      status: 'active',
+      privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
+      superseded_by: '',
+      changed: true,
+      text: describe(action, 'active', ''),
     }
   }
 

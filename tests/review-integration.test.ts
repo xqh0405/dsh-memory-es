@@ -45,7 +45,7 @@ function defineReviewIntegration(e: EsTestEnv): void {
     reader,
     embed,
     dims: 1024,
-    retrieval: { topK: 20, rrfK: 60, marginFloor: 0.05, limit: 8 },
+    retrieval: { topK: 20, rrfK: 60, limit: 8 },
   }
 
   const created: string[] = []

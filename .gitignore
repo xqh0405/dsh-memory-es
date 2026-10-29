@@ -15,7 +15,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -187,7 +187,8 @@ deploy/es/plugins/
 deploy/es/snapshots/
 /tmp/
 node_modules/
-lib/
+# 只忽略仓库根的构建产物；不能写 lib/，否则 scripts/lib 也会被吞
+/lib/
 .planning/
 .dsh-smoke/
 
@@ -202,3 +203,8 @@ deploy/es-remote/snapshots/
 
 # Markdown 镜像导出目录（生成物；回滚＝删掉它）
 knowledge/
+
+# 检索评测：query 与期望命中的 memory_id 都含真实业务信息，只留本地；
+# 格式见 tests/eval/queries.example.jsonl
+tests/eval/queries.jsonl
+tests/eval/baseline.json
