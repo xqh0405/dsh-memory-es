@@ -53,6 +53,10 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "domain":            { "type": "keyword" },
         "topic_key":         { "type": "keyword" },
         "privacy":           { "type": "keyword" },
+        "importance":        { "type": "keyword" },
+        "hit_count":         { "type": "integer" },
+        "last_hit_at":       { "type": "date" },
+        "superseded_at":     { "type": "date" },
         "blocked_reason":    { "type": "keyword" },
         "personal_only_reason": { "type": "text" },
 
@@ -107,6 +111,10 @@ put_index team_knowledge <<'JSON'
       "domain":            { "type": "keyword" },
       "topic_key":         { "type": "keyword" },
       "content_sha256":    { "type": "keyword" },
+      "importance":        { "type": "keyword" },
+      "hit_count":         { "type": "integer" },
+      "last_hit_at":       { "type": "date" },
+      "superseded_at":     { "type": "date" },
 
       "source_user":       { "type": "keyword" },
       "source_memory_id":  { "type": "keyword" },
