@@ -70,16 +70,20 @@ admin -X PUT "$ES/_security/role/mem_team_read" -d @- >/dev/null <<'JSON'
 JSON
 echo '  mem_team_read  → team_knowledge 只读'
 
-# 团队写：能写团队库，并且要能写审计（审核动作必须留痕）
+# 团队写：能写团队库，并且要能写审计（审核动作必须留痕）。
+# team_knowledge 带 delete：管理员要能删掉走错的团队记忆（插件本身只做 superseded 软删，
+# 这里的 delete 是给人工清理用的：误入库、脏数据、权限探针残留）。
+# memory_audit **不给 delete**：审计是治理证据，能删就等于能篡改；过期清理走
+# scripts/prune-audit.sh（elastic 身份 + 保留期）。
 admin -X PUT "$ES/_security/role/mem_team_write" -d @- >/dev/null <<'JSON'
 {
   "indices": [
-    { "names": ["team_knowledge"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "delete", "view_index_metadata"] },
     { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] }
   ]
 }
 JSON
-echo '  mem_team_write → team_knowledge 读写 + memory_audit 读写'
+echo '  mem_team_write → team_knowledge 读写删 + memory_audit 读写（审计不可删）'
 
 echo "== 2/3 本用户角色（个人读写，只限自己的索引）=="
 admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<JSON

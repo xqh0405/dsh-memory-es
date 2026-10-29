@@ -3,7 +3,7 @@
 #
 # 免费版（basic license）没有 DLS，所以隔离靠「一人一索引 + 索引级 ACL」：
 #   · 每个人一个账号 mem-user-<uid>：只能读写 personal_memory_<uid>（不是通配符）
-#   · 团队库按档位授权：mem_team_read（只读）/ mem_team_write（读写 + 写审计）
+#   · 团队库按档位授权：mem_team_read（只读）/ mem_team_write（读写删 + 写审计，审计不可删）
 #   · 每人的账号和密码由 scripts/init-user.sh 生成到 deploy/es/users/<uid>.env（600）
 #
 # ⚠️ mem_writer（能写 personal_memory_* 通配）是旧设计，本脚本**不再创建**；
@@ -52,12 +52,12 @@ echo '  mem_team_read → 只读 team_knowledge'
 admin -X PUT "$ES/_security/role/mem_team_write" -d @- >/dev/null <<'JSON'
 {
   "indices": [
-    { "names": ["team_knowledge"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "delete", "view_index_metadata"] },
     { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] }
   ]
 }
 JSON
-echo '  mem_team_write → 团队库读写 + 审计读写（审核员的角色；旧 mem_writer 通配已不再创建）'
+echo '  mem_team_write → 团队库读写删 + 审计读写（审核员的角色；审计不可删；旧 mem_writer 通配已不再创建）'
 
 admin -X PUT "$ES/_security/role/mem_consolidator" -d @- >/dev/null <<'JSON'
 {

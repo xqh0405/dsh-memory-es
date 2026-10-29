@@ -2,8 +2,11 @@
 # 清理过期的审计记录（memory_audit 只增不删，久了要收）。
 #
 # 为什么单独一个脚本：
-#   · delete_by_query 需要 delete 权限，而业务身份（mem_team_write / consolidator）**故意没有**
-#     delete —— 记忆不物理删是设计约束，所以这条清理必须用 elastic 管理员身份，单独放在这里。
+#   · delete_by_query 需要 delete 权限，而业务身份（mem_team_write / consolidator）对
+#     **memory_audit** 故意没有 delete —— 审计是治理证据，能删就等于能篡改，所以这条清理
+#     必须用 elastic 管理员身份，单独放在这里。
+#     （team_knowledge 的 delete 已下放给 mem_team_write，那是给管理员人工清理走错的记忆用的，
+#      与审计无关。）
 #   · 默认 **dry-run**（只报会被删多少条），要真删得显式 --apply，和整理任务一个口径。
 #
 # 用法：

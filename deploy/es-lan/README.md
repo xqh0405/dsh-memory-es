@@ -55,8 +55,10 @@ CA `certs/ca.crt`（分发给客户端，配 `NODE_EXTRA_CA_CERTS` / `--cacert`�
 
 | 档 | 角色 | 能力 |
 |---|---|---|
-| 普通成员 | `mem_personal_rw_<uid>` + `mem_team_read` | 个人库读写 + 团队库只读 |
-| 管理员（xqh） | 上面 + `mem_team_write` | 团队库读写 + `memory_audit` 写 |
+| 普通成员 | `mem_personal_rw_<uid>` + `mem_team_read` | 个人库读写删 + 团队库只读 |
+| 管理员（xqh） | 上面 + `mem_team_write` | 团队库读写**删** + `memory_audit` 写（审计不可删） |
+
+`memory_audit` 刻意不给 delete：审计是治理证据；过期清理走 `scripts/prune-audit.sh`（elastic 身份）。
 
 初始化顺序（全部幂等）：
 
