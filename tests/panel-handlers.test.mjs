@@ -328,7 +328,8 @@ async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, del
       if (req.url.includes('_search')) {
         return send(200, {
           hits: { total: { value: 0 }, hits: [] },
-          aggregations: { by_user: { buckets: indexBuckets } },
+          // docs: 维护页"文档数"的 cardinality 聚合（固定 42，方便断言它不再是占位）
+          aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 } },
         })
       }
       return send(200, {})
@@ -588,6 +589,9 @@ test('维护概览：带 user 时统计那个人的个人库', async () => {
     assert.equal(body.value.viewingOther, true)
     assert.ok(es.calls.some((c) => c.url.startsWith('/personal_memory_laoliu/_search')), '统计要落到目标用户的索引')
     assert.ok(!es.calls.some((c) => c.url.startsWith('/personal_memory_xqh/_search')))
+    // 文档数不再是 '-'：接口要真的返回这个字段，且落到目标用户的文档索引
+    assert.equal(body.value.counts.docs, 42)
+    assert.ok(es.calls.some((c) => c.url.startsWith('/personal_doc_laoliu/_search')))
   } finally {
     await es.close()
   }

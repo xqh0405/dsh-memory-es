@@ -1143,6 +1143,9 @@ async function handleMaintenanceGet(ctx, res, url) {
   const targetUser = wantUser || config.identity.userId
   const personalIndex =
     targetUser === config.identity.userId ? names.personal : `${config.index.personalPrefix}${targetUser}`
+  // 文档库也按目标用户算：前端那一行"文档数"以前永远是 '-'（接口根本没返回这个字段）
+  const docsIndex =
+    targetUser === config.identity.userId ? names.docs : `${config.index.docPrefix ?? 'personal_doc_'}${targetUser}`
 
   const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
@@ -1154,6 +1157,9 @@ async function handleMaintenanceGet(ctx, res, url) {
       .then((r) => num(r.hits?.total?.value)).catch(() => -1),
     client.search(names.team, { size: 0, query: { terms: { review_state: ['pending'] } }, track_total_hits: true })
       .then((r) => num(r.hits?.total?.value)).catch(() => -1),
+    // 一个文档切多个 chunk，_count 数的是块；按 doc_id 去重才是"文档数"
+    client.search(docsIndex, { size: 0, aggs: { docs: { cardinality: { field: 'doc_id' } } } })
+      .then((r) => num(r.aggregations?.docs?.value)).catch(() => -1),
   ])
 
   // 上次整理时间（CLI 的状态文件）
@@ -1184,7 +1190,7 @@ async function handleMaintenanceGet(ctx, res, url) {
   json(res, 200, {
     ok: true,
     value: {
-      counts: { personal: counts[0], team: counts[1], pending: counts[2] },
+      counts: { personal: counts[0], team: counts[1], pending: counts[2], docs: counts[3] },
       // 统计对应的用户（前端用来确认"这些数字是谁的"）
       userId: targetUser,
       viewingOther: targetUser !== config.identity.userId,
