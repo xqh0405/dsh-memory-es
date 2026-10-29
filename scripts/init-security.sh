@@ -59,6 +59,20 @@ admin -X PUT "$ES/_security/role/mem_team_write" -d @- >/dev/null <<'JSON'
 JSON
 echo '  mem_team_write → 团队库读写删 + 审计读写（审核员的角色；审计不可删；旧 mem_writer 通配已不再创建）'
 
+# 管理员角色（2026-10-29）：团队库维护 + 跨用户只读个人记忆。
+# 与 mem_team_write 分开是刻意的——"团队写"不该等于"能读所有人的个人库"。
+# 必须定义在本脚本里：重跑 init-security.sh 会覆盖角色，漏写就会被抹掉。
+admin -X PUT "$ES/_security/role/mem_admin" -d @- >/dev/null <<'JSON'
+{
+  "indices": [
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "delete", "view_index_metadata"] },
+    { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["personal_memory_*", "personal_doc_*"], "privileges": ["read", "index", "view_index_metadata"] }
+  ]
+}
+JSON
+echo '  mem_admin → 团队库读写删 + 审计读写 + 所有人的个人库通配读（含 index，整理回写用；不含 delete）'
+
 admin -X PUT "$ES/_security/role/mem_consolidator" -d @- >/dev/null <<'JSON'
 {
   "indices": [

@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'list-20261029'
+    const BUILD = 'admin-20261029'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -97,6 +97,12 @@ window.__ModuleLoader__.load({
       maintDryRun: '跑一次 dry-run',
       maintApply: '真写库',
       maintApplyWarn: '会写团队库，需确认',
+      userSelf: '我',
+      userFilterHint: '切换查看谁的个人记忆（管理员）',
+      viewingOther: '正在查看别人的个人记忆',
+      readOnlyOther: '只读，不能删除',
+      maintTargetUser: '目标用户',
+      maintOtherWarn: '整理别人的记忆会改写对方的 promote_state（标记已处理），不影响其检索与使用',
       maintExport: 'Markdown 镜像',
       maintExportNow: '立即导出',
       maintSnapshot: '快照',
@@ -280,6 +286,12 @@ window.__ModuleLoader__.load({
       maintDryRun: 'Run dry-run',
       maintApply: 'Apply to library',
       maintApplyWarn: 'writes the team index — needs confirmation',
+      userSelf: 'Me',
+      userFilterHint: 'Switch which user’s personal memory to view (admin)',
+      viewingOther: 'Viewing another user’s personal memory',
+      readOnlyOther: 'read-only, delete disabled',
+      maintTargetUser: 'Target user',
+      maintOtherWarn: 'Consolidating another user’s memory rewrites their promote_state (marked as processed); search and usage are unaffected',
       maintExport: 'Markdown mirror',
     }
 
@@ -615,12 +627,22 @@ window.__ModuleLoader__.load({
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
-    function Maintenance({ t, canReview }) {
+    function Maintenance({ t, canReview, caps }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
 
       const [busy, setBusy] = React.useState('')
       const [result, setResult] = React.useState(null)
       const [preview, setPreview] = React.useState(null)
+      // 整理谁的个人记忆：'' = 自己；管理员可切到别人（CLI 用 --user 指定）
+      const [targetUser, setTargetUser] = React.useState('')
+      const [users, setUsers] = React.useState([])
+
+      React.useEffect(() => {
+        if (!caps?.canAdmin) return
+        apiGet('/users')
+          .then((value) => setUsers(value.users ?? []))
+          .catch(() => setUsers([]))
+      }, [caps?.canAdmin])
 
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
@@ -638,6 +660,8 @@ window.__ModuleLoader__.load({
         setResult(null)
         const path = kind === 'export' ? '/maintenance/export' : '/maintenance/consolidate'
         const body = kind === 'export' ? {} : { apply: kind === 'apply', confirm: kind === 'apply' }
+        // 整理指定用户（'' = 自己）；导出与用户无关
+        if (kind !== 'export' && targetUser !== '') body.userId = targetUser
         apiPost(path, body)
           .then((value) => {
             setResult({ kind, value })
@@ -674,6 +698,29 @@ window.__ModuleLoader__.load({
 
         card(t('maintConsolidate'),
           h('div', null,
+            // 目标用户：管理员可以把别人的个人记忆整理进团队库
+            caps?.canAdmin
+              ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, fontSize: 12 } },
+                  h('span', { style: { width: 110, ...S.muted } }, t('maintTargetUser')),
+                  h('select', {
+                    style: S.select,
+                    value: targetUser,
+                    onChange: (event) => {
+                      setTargetUser(event.target.value)
+                      setResult(null)
+                    },
+                  },
+                    h('option', { value: '' }, `${t('userSelf')} · ${caps.userId || ''}`.trim()),
+                    users
+                      .filter((entry) => entry.userId !== caps.userId)
+                      .map((entry) => h('option', { key: entry.userId, value: entry.userId }, `${entry.userId} · ${entry.count}`)),
+                  ),
+                )
+              : null,
+            // 整理别人时把后果说清楚：只改 promote_state，不动个人记忆的可用性
+            caps?.canAdmin && targetUser !== ''
+              ? h('p', { style: { margin: '0 0 8px 118px', fontSize: 11.5, lineHeight: 1.6, color: 'var(--dsw-alias-state-warn-primary)' } }, t('maintOtherWarn'))
+              : null,
             line(t('maintLastRun'), data.lastRunAt ? shortTime(data.lastRunAt) : t('maintNever')),
             line(t('labelPersonal'), data.counts.personal),
             line(t('labelTeam'), data.counts.team),
@@ -1115,6 +1162,9 @@ window.__ModuleLoader__.load({
       const [delReason, setDelReason] = React.useState('')
       const [delBusy, setDelBusy] = React.useState(false)
       const [delResult, setDelResult] = React.useState(null)
+      // 管理员可以切换"看谁的个人库"（'' = 自己）；普通账号不渲染这个下拉
+      const [targetUser, setTargetUser] = React.useState('')
+      const [users, setUsers] = React.useState([])
       const size = 20
 
       // 过滤器候选值来自 /facets（后端聚合，前端不猜有哪些 domain）
@@ -1125,6 +1175,14 @@ window.__ModuleLoader__.load({
       }, [])
       const [facets, setFacets] = React.useState({ domains: [], types: [] })
 
+      // 管理员：拉一次"有记忆的用户"列表，供切换查看（普通账号不发这个请求）
+      React.useEffect(() => {
+        if (!caps?.canAdmin) return
+        apiGet('/users')
+          .then((value) => setUsers(value.users ?? []))
+          .catch(() => setUsers([]))
+      }, [caps?.canAdmin])
+
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
         const params = { scope, page: String(page), size: String(size), status }
@@ -1132,10 +1190,12 @@ window.__ModuleLoader__.load({
         if (includePending) params.includePending = '1'
         if (domains.length > 0) params.domain = domains.join(',')
         if (types.length > 0) params.type = types.join(',')
+        // 只有管理员切到别人时才有值；后端对非管理员忽略这个参数
+        if (targetUser !== '') params.user = targetUser
         apiGet('/memories', params)
           .then((data) => setState({ loading: false, error: '', data }))
           .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
-      }, [scope, page, status, query, includePending, domains, types])
+      }, [scope, page, status, query, includePending, domains, types, targetUser])
 
       React.useEffect(() => {
         load()
@@ -1210,6 +1270,26 @@ window.__ModuleLoader__.load({
               }, label),
             ),
           ),
+          // 管理员专用：切换"看谁的个人记忆"。普通账号不渲染，后端也不会返回别人的数据。
+          caps?.canAdmin
+            ? h('select', {
+                style: S.select,
+                value: targetUser,
+                title: t('userFilterHint'),
+                onChange: (event) => {
+                  const next = event.target.value
+                  setTargetUser(next)
+                  // 看别人的时候只可能是个人库，顺手锁到 personal
+                  if (next !== '') setScope('personal')
+                  setPage(0)
+                },
+              },
+                h('option', { value: '' }, `${t('userSelf')} · ${caps.userId || ''}`.trim()),
+                users
+                  .filter((entry) => entry.userId !== caps.userId)
+                  .map((entry) => h('option', { key: entry.userId, value: entry.userId }, `${entry.userId} · ${entry.count}`)),
+              )
+            : null,
           h('input', {
             style: S.input,
             placeholder: t('search'),
@@ -1264,6 +1344,12 @@ window.__ModuleLoader__.load({
             )
           : null,
 
+        // 看别人的个人库时明确标出来，免得把别人的记忆当成自己的
+        data?.viewingOther
+          ? h('p', { style: { margin: '0 0 8px', fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } },
+              `${t('viewingOther')}：${data.userId} · ${t('readOnlyOther')}`)
+          : null,
+
         state.loading || state.error
           ? null
           : h('div', { style: { ...S.card, padding: 0, overflow: 'hidden' } },
@@ -1290,7 +1376,8 @@ window.__ModuleLoader__.load({
                         h('button', { type: 'button', style: S.btn, onClick: () => setSelected(row) }, t('detail')),
                         // 个人记忆的删除按钮一律显示（本人的库本人能删）；
                         // 团队记忆要真持有 team_knowledge 的 delete 才出现——由后端问 ES 得出
-                        row.scope === 'personal' || caps?.canDeleteTeam === true
+                        // 看别人的个人记忆时不给删除（mem_admin 只有读+index，没有别人库的 delete）
+                        (row.scope === 'personal' && !data?.viewingOther) || caps?.canDeleteTeam === true
                           ? h('button', {
                               type: 'button',
                               style: { ...S.btn, color: 'var(--dsw-alias-state-danger-primary, #d33)' },
@@ -1438,7 +1525,7 @@ window.__ModuleLoader__.load({
     function MemoryPanel({ t }) {
       const [tab, setTab] = React.useState('overview')
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
-      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false })
+      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, userId: '' })
 
       React.useEffect(() => {
         apiGet('/capabilities')
@@ -1447,6 +1534,9 @@ window.__ModuleLoader__.load({
             canReview: Boolean(value.canReview),
             canMaintain: Boolean(value.canMaintain),
             role: value.role ?? '',
+            // 管理员 = 维护页 + 跨用户查看；userId 用于"用户"下拉里标出"我"
+            canAdmin: Boolean(value.canAdmin),
+            userId: value.userId ?? '',
             // 删除权限由后端问 ES 的 _has_privileges 得出，不是看配置声明
             canDeletePersonal: Boolean(value.canDeletePersonal),
             canDeleteTeam: Boolean(value.canDeleteTeam),
@@ -1482,7 +1572,8 @@ window.__ModuleLoader__.load({
             ['browse', t('tabBrowse')],
             // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
             ...(caps.canReview ? [['review', t('tabReview')]] : []),
-            ['maint', t('tabMaint')],
+            // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
+            ...(caps.canReview ? [['maint', t('tabMaint')]] : []),
             ['config', t('tabConfig')],
           ].map(([value, label]) =>
             h('button', {
@@ -1494,7 +1585,7 @@ window.__ModuleLoader__.load({
           ),
         ),
         tab === 'maint'
-          ? h(Maintenance, { t, canReview: caps.canReview })
+          ? h(Maintenance, { t, canReview: caps.canReview, caps })
           : tab === 'config'
           ? h(Config, { t })
           : tab === 'review'

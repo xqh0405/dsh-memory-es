@@ -2,8 +2,9 @@
 # 按「用户」建 ES 账号与角色（一用户一账号，替代原来按用途拆的 reader/writer/consolidator）。
 #
 # 三档团队权限：
-#   --team-write   个人读写 + 团队读写（管理员/审核员；面板会显示审核台）
-#   --team-read    个人读写 + 团队读（普通成员，默认）
+#   --team-write   管理员：个人读写 + mem_admin（团队库读写删、写审计、**跨用户只读个人库**；
+#                  面板会显示审核台与维护页，可整理/导出所有人的记忆）
+#   --team-read    个人读写 + 团队读（普通成员，默认；看不到维护页）
 #   --personal-only 只有个人读写（不参与团队库）
 #
 # 幂等：角色每次覆盖定义；用户每次重设角色；密码**默认沿用** users/<uid>.env 里已有的，
@@ -85,6 +86,24 @@ admin -X PUT "$ES/_security/role/mem_team_write" -d @- >/dev/null <<'JSON'
 JSON
 echo '  mem_team_write → team_knowledge 读写删 + memory_audit 读写（审计不可删）'
 
+# 管理员：团队库的全部维护动作，外加**跨用户查看个人记忆**（面板维护页要用）。
+#   · personal_memory_* / personal_doc_* 是**通配读**：basic license 没有 DLS，
+#     想看"所有人的个人记忆"只能给通配；这也是 mem_consolidator 当初存在的理由。
+#   · 额外给 personal_memory_* 的 index：整理任务回写 promote_state 要写别人的个人库，
+#     没这个权限时 CLI 会 403，整理跑不完。
+#   · **不给 delete**：能读能标状态就够，删别人的个人记忆太危险。
+#   · team_knowledge 的 delete 保留（管理员清误入库的团队记忆）。
+admin -X PUT "$ES/_security/role/mem_admin" -d @- >/dev/null <<'JSON'
+{
+  "indices": [
+    { "names": ["team_knowledge"], "privileges": ["index", "read", "delete", "view_index_metadata"] },
+    { "names": ["memory_audit"], "privileges": ["index", "read", "view_index_metadata"] },
+    { "names": ["personal_memory_*", "personal_doc_*"], "privileges": ["read", "index", "view_index_metadata"] }
+  ]
+}
+JSON
+echo '  mem_admin → 团队库读写删 + 审计读写 + 所有人的个人库通配读（含 index，整理回写用；不含 delete）'
+
 echo "== 2/3 本用户角色（个人读写，只限自己的索引）=="
 admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<JSON
 {
@@ -107,7 +126,9 @@ fi
 
 ROLES="[\"mem_personal_rw_${UID_ARG}\""
 case "$TIER" in
-  team-write) ROLES="$ROLES,\"mem_team_write\"]" ;;
+  # 管理员的组合换成 mem_admin（团队库维护 + 跨用户只读个人库）；
+  # mem_team_write 仍然定义着，只给还没迁移的老账号用
+  team-write) ROLES="$ROLES,\"mem_admin\"]" ;;
   team-read) ROLES="$ROLES,\"mem_team_read\"]" ;;
   personal-only) ROLES="$ROLES]" ;;
 esac

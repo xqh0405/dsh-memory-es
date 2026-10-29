@@ -106,7 +106,7 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
 
 // ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
 const panel = await import('../panel/index.js')
-const { handleCapabilities, handleDeleteMemory, handleReviewAction } = panel
+const { handleCapabilities, handleDeleteMemory, handleMemories, handleMaintenanceGet, handleReviewAction, handleUsers } = panel
 
 const fs = await import('node:fs')
 const os = await import('node:os')
@@ -301,7 +301,7 @@ const { createServer } = await import('node:http')
 const SINGLE = { userId: 'xqh', username: 'mem-user-xqh', password: 'pw', teamWrite: true }
 
 /** 假 ES：_has_privileges 按索引名分别回答，DELETE / 审计写入按参数给状态码 */
-async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200 } = {}) {
+async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, indexBuckets = [] } = {}) {
   const calls = []
   const server = createServer((req, res) => {
     const chunks = []
@@ -323,6 +323,14 @@ async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, del
         return send(deleteStatus, { result: deleteStatus === 404 ? 'not_found' : 'deleted' })
       }
       if (req.url.startsWith('/memory_audit/_doc')) return send(201, { result: 'created' })
+      // /users 用的 _index 聚合：任何 personal_memory_* 的 _search 都回同一份 buckets；
+      // 其他 _search 回空页（handleMemories 会拿它拼两库结果）
+      if (req.url.includes('_search')) {
+        return send(200, {
+          hits: { total: { value: 0 }, hits: [] },
+          aggregations: { by_user: { buckets: indexBuckets } },
+        })
+      }
       return send(200, {})
     })
   })
@@ -443,6 +451,88 @@ test('删除：个人库删除成功，且按设计不写审计', async () => {
     assert.equal(es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc')).length, 0)
     const del = es.calls.find((c) => c.method === 'DELETE')
     assert.match(del.url, /personal_memory_xqh\/_doc\/doc-2/)
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 维护页收拢到管理员 + 跨用户查看（2026-10-29）─────────────────────────
+const MEMBER = { userId: 'lisi', username: 'mem-user-lisi', password: 'pw', teamWrite: false }
+
+test('维护概览：非管理员 403，且一次都不碰 ES', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(MEMBER, es.url), res)
+    assert.equal(res.statusCode, 403, '维护页只有管理员能看，不能靠"界面没入口"兜底')
+    assert.equal(es.calls.length, 0)
+  } finally {
+    await es.close()
+  }
+})
+
+test('用户列表：非管理员 403', async () => {
+  const es = await startFakeEs({ indexBuckets: [{ key: 'personal_memory_xqh', doc_count: 3 }] })
+  try {
+    const res = fakeRes()
+    await handleUsers(ctxWithEs(MEMBER, es.url), res)
+    assert.equal(res.statusCode, 403)
+    assert.equal(es.calls.length, 0)
+  } finally {
+    await es.close()
+  }
+})
+
+test('用户列表：管理员拿到 [_index] 聚合并剥掉前缀', async () => {
+  const es = await startFakeEs({
+    indexBuckets: [
+      { key: 'personal_memory_xqh', doc_count: 268 },
+      { key: 'personal_memory_laoliu', doc_count: 5 },
+    ],
+  })
+  try {
+    const res = fakeRes()
+    await handleUsers(ctxWithEs(SINGLE, es.url), res)
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.self, 'xqh')
+    assert.deepEqual(body.value.users, [
+      { userId: 'xqh', count: 268 },
+      { userId: 'laoliu', count: 5 },
+    ])
+    // 通配索引名必须原样发出去（encodeURIComponent 不会编码 *）
+    assert.ok(es.calls.some((c) => c.url.startsWith('/personal_memory_*/_search')), '要查通配索引才能跨用户聚合')
+  } finally {
+    await es.close()
+  }
+})
+
+test('记忆浏览：管理员带 user 就查那个人的个人库', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMemories(ctxWithEs(SINGLE, es.url), res, new URL('http://x/memories?scope=personal&user=laoliu'))
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.userId, 'laoliu')
+    assert.equal(body.value.viewingOther, true)
+    assert.ok(es.calls.some((c) => c.url.startsWith('/personal_memory_laoliu/_search')))
+    assert.ok(!es.calls.some((c) => c.url.startsWith('/personal_memory_xqh/_search')), '不该同时查自己的库')
+  } finally {
+    await es.close()
+  }
+})
+
+test('记忆浏览：普通成员带 user 也只能看自己', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMemories(ctxWithEs(MEMBER, es.url), res, new URL('http://x/memories?scope=personal&user=xqh'))
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.userId, 'lisi', 'user 参数对非管理员无效')
+    assert.equal(body.value.viewingOther, false)
+    assert.ok(es.calls.some((c) => c.url.startsWith('/personal_memory_lisi/_search')))
   } finally {
     await es.close()
   }

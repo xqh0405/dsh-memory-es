@@ -259,6 +259,26 @@ function canReviewTeam(identity) {
   return Boolean(identity?.consolidatorUsername && identity?.consolidatorPassword)
 }
 
+/**
+ * 维护类接口的统一门禁（2026-10-29 收拢）：整理任务、导出镜像、镜像预览只有管理员能用。
+ *
+ * 为什么必须在后端做：前端只是把按钮置灰，接口一直是裸的——普通成员绕过 UI 直接 POST，
+ * 整理会真的跑一轮（读自己的个人库、算 embedding，写团队库时靠 ES 403 才失败）。
+ * 判据与审核台一致（canReviewTeam）；失败直接写 403 并返回 null。
+ */
+function requireAdmin(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) {
+    json(res, 503, { ok: false, error: configRow.error })
+    return null
+  }
+  if (!canReviewTeam(configRow.value.identity)) {
+    json(res, 403, { ok: false, error: '只有团队管理员可以使用维护功能（账号需要 mem_admin 角色）' })
+    return null
+  }
+  return configRow.value
+}
+
 /** 待裁决口径（概览计数与审核台队列共用，防止两处漂移） */
 function pendingQuery() {
   return { bool: { filter: [{ term: { review_state: 'pending' } }, { term: { status: 'active' } }] } }
@@ -429,6 +449,14 @@ async function handleMemories(ctx, res, url) {
   const status = (params.get('status') ?? 'active').trim()
   const includePending = params.get('includePending') === '1'
 
+  // 管理员可以看**别人**的个人库（mem_admin 的 personal_memory_* 通配读）；
+  // 普通账号传了 user 也不生效，永远只看自己。
+  const canAdmin = canReviewTeam(config.identity)
+  const wantUser = (params.get('user') ?? '').trim()
+  const targetUser = canAdmin && wantUser !== '' ? wantUser : config.identity.userId
+  const personalIndex =
+    targetUser === config.identity.userId ? names.personal : `${config.index.personalPrefix}${targetUser}`
+
   // 跨两库分页：from/size 对每个库各算一次再合并排序 → 翻页会重复或漏条。
   // 改成「每个库都从头取到第 page 页末尾，合并排序后再切片」，代价是深页取数多，故设窗口上限。
   const WINDOW_MAX = 500
@@ -467,7 +495,7 @@ async function handleMemories(ctx, res, url) {
 
   const emptyPage = { hits: { total: { value: 0 }, hits: [] } }
   const [personal, team] = await Promise.all([
-    scope !== 'team' ? client.search(names.personal, buildBody(false)) : Promise.resolve(emptyPage),
+    scope !== 'team' ? client.search(personalIndex, buildBody(false)) : Promise.resolve(emptyPage),
     scope !== 'personal' ? client.search(names.team, buildBody(true)) : Promise.resolve(emptyPage),
   ])
 
@@ -485,6 +513,9 @@ async function handleMemories(ctx, res, url) {
         personal: num(personal.hits?.total?.value),
         team: num(team.hits?.total?.value),
       },
+      // 告诉前端当前看的是谁的个人库，避免"看的是别人的记忆却以为是自己"
+      userId: targetUser,
+      viewingOther: targetUser !== config.identity.userId,
       page,
       size,
       rows,
@@ -520,6 +551,29 @@ function readJsonBody(req, limit = 64 * 1024) {
     })
     req.on('error', (error) => resolve({ ok: false, error: String(error?.message ?? error) }))
   })
+}
+
+/**
+ * GET /users：管理员用——列出"有个人记忆的用户"，供浏览页/维护页切换目标用户。
+ *
+ * 做法：对 `personal_memory_*` 做 size:0 的 `_index` 聚合。能这么干的前提是管理员持有
+ * mem_admin 的通配读；普通账号即使调到这里也会被 requireAdmin 挡住（不靠 ES 兜底）。
+ * 返回按条数降序，前端只展示 userId + 条数。
+ */
+async function handleUsers(ctx, res) {
+  const config = requireAdmin(ctx, res)
+  if (!config) return
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const prefix = config.index.personalPrefix
+  const result = await client.search(`${prefix}*`, {
+    size: 0,
+    aggs: { by_user: { terms: { field: '_index', size: 100 } } },
+  })
+  const users = (result.aggregations?.by_user?.buckets ?? [])
+    .map((bucket) => ({ userId: String(bucket.key).slice(prefix.length), count: num(bucket.doc_count) }))
+    .filter((entry) => entry.userId !== '')
+    .sort((a, b) => b.count - a.count)
+  json(res, 200, { ok: true, value: { self: config.identity.userId, users } })
 }
 
 /**
@@ -974,6 +1028,8 @@ async function handleCapabilities(ctx, res) {
     value: {
       // 审核 = 写团队库的能力；没有整理身份就是只读部署
       canReview,
+      // 管理员 = 维护页 + 跨用户查看（与 canReview 同源，单独命名让前端读起来更清楚）
+      canAdmin: canReview,
       canMaintain: cliAvailable(),
       // 删除按钮的显示条件：个人库问本人，团队库额外要求 team_knowledge 的 delete
       canDeletePersonal: del.personal,
@@ -1024,6 +1080,8 @@ async function handleFacets(ctx, res) {
 /** GET /maintenance/mirror?name=xxx.md：读镜像文件内容（只看不写） */
 async function handleMirrorFile(ctx, res, url) {
   const name = (url.searchParams.get('name') ?? '').trim()
+  // 镜像文件是团队库的导出视图，同样只给管理员看
+  if (!requireAdmin(ctx, res)) return
   // 只允许镜像目录下的纯文件名：出现路径分隔符或 .. 一律拒绝
   if (name === '' || name.includes('/') || name.includes('\\') || name.includes('..') || !name.endsWith('.md')) {
     return json(res, 400, { ok: false, error: '文件名不合法（只接受镜像目录下的 .md 文件名）' })
@@ -1057,9 +1115,9 @@ const STATE_DIR = '/data/dsh/memory-es-state'
 const MIRROR_DIR = '/data/dsh/memory-mirror'
 
 async function handleMaintenanceGet(ctx, res) {
-  const configRow = findEntryRow(ctx)
-  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
-  const config = configRow.value
+  // 维护页整体收拢到管理员：普通成员的维护 tab 也不再显示（前端），接口同样拦住
+  const config = requireAdmin(ctx, res)
+  if (!config) return
   const names = indexNames(config)
   const client = createReadClient(() => resolveClientConfig(ctx))
   const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
@@ -1128,17 +1186,25 @@ async function handleConsolidate(ctx, res, req) {
   if (apply && body.value?.confirm !== true) {
     return json(res, 400, { ok: false, error: '真写库需要 confirm:true' })
   }
-  const configRow = findEntryRow(ctx)
-  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  // 预演也要管理员：它会读个人库、打 embedding，普通账号不该能触发（2026-10-29 收拢）
+  const config = requireAdmin(ctx, res)
+  if (!config) return
   if (!cliAvailable()) {
     return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署（缺少 panel/cli/consolidate），无法触发整理' })
   }
 
-  const result = await runCli(configRow.value, apply ? ['--auto', '--apply'] : ['--auto'], { timeoutMs: 180_000 })
+  // 目标用户：管理员可以整理别人的个人记忆（CLI 的 --user 决定扫哪个 personal 索引）。
+  // 不传或传自己 = 整理自己那份。
+  const targetUser = str(body.value?.userId).trim() || config.identity.userId
+  const args = apply ? ['--auto', '--apply'] : ['--auto']
+  if (targetUser !== config.identity.userId) args.push('--user', targetUser)
+
+  const result = await runCli(config, args, { timeoutMs: 180_000 })
   json(res, 200, {
     ok: true,
     value: {
       mode: apply ? 'apply' : 'dry-run',
+      userId: targetUser,
       exitCode: result.code,
       lines: summarize(result.stdout),
       stderr: result.stderr.slice(-2000),
@@ -1150,13 +1216,13 @@ async function handleConsolidate(ctx, res, req) {
 async function handleExport(ctx, res, req) {
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
-  const configRow = findEntryRow(ctx)
-  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = requireAdmin(ctx, res)
+  if (!config) return
   if (!cliAvailable()) {
     return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署，无法导出' })
   }
   const dir = typeof body.value?.dir === 'string' && body.value.dir !== '' ? body.value.dir : MIRROR_DIR
-  const result = await runCli(configRow.value, ['--export', dir], { timeoutMs: 60_000 })
+  const result = await runCli(config, ['--export', dir], { timeoutMs: 60_000 })
   json(res, 200, {
     ok: true,
     value: { dir, exitCode: result.code, lines: summarize(result.stdout), stderr: result.stderr.slice(-2000) },
@@ -1176,6 +1242,8 @@ async function handle(ctx, req, res) {
     if (path === '/maintenance/mirror' && req.method === 'GET') return await handleMirrorFile(ctx, res, url)
     if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
     if (path === '/capabilities' && req.method === 'GET') return await handleCapabilities(ctx, res)
+    // 管理员专用：列出有个人记忆的用户（浏览页/维护页切换目标用户）
+    if (path === '/users' && req.method === 'GET') return await handleUsers(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
     if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
@@ -1422,9 +1490,14 @@ async function selfTest(ctx) {
     let maintInfo = `HTTP ${maintRes.status}`
     try {
       const body = JSON.parse(maintRes.body)
-      maintInfo = body.ok
-        ? `ok cli=${body.value?.cli?.available} mirror=${body.value?.mirror?.files?.length ?? 0}`
-        : `err ${body.error}`
+      if (maintRes.status === 403) {
+        // 普通成员看不到维护页，403 是**正常**状态而不是自检失败
+        maintInfo = 'skip(非管理员)'
+      } else {
+        maintInfo = body.ok
+          ? `ok cli=${body.value?.cli?.available} mirror=${body.value?.mirror?.files?.length ?? 0}`
+          : `err ${body.error}`
+      }
     } catch {
       maintInfo = `HTTP ${maintRes.status} 非 JSON`
     }
@@ -1493,8 +1566,13 @@ export {
   entryLabels,
   findEntryRow,
   handleCapabilities,
+  handleConsolidate,
   handleDeleteMemory,
+  handleExport,
+  handleMaintenanceGet,
+  handleMemories,
   handleReviewAction,
+  handleUsers,
   indexNames,
   mergeConfig,
   pendingQuery,
