@@ -261,6 +261,87 @@ describe('searchMemories 编排', () => {
     }
   })
 
+  test('检索埋点：ok 分支写入 search_log_<uid>，字段可被直接聚合', async () => {
+    const h = await harness({ [TEAM_INDEX]: { bm25: [hit('t1', 3)] } })
+    const recorded: Array<{ index: string; doc: Record<string, unknown> }> = []
+    try {
+      await searchMemories(
+        h.deps({
+          recorder: {
+            index: async (index: string, doc: Record<string, unknown>) => {
+              recorded.push({ index, doc })
+              return {} as never
+            },
+          },
+          searchLogIndex: 'search_log_xqh',
+        }),
+        { query: '北单中断开奖', scope: 'team' },
+      )
+      assert.equal(recorded.length, 1, '一次检索记一条')
+      assert.equal(recorded[0].index, 'search_log_xqh')
+      const doc = recorded[0].doc
+      assert.equal(doc.user_id, 'xqh')
+      assert.equal(doc.tool, 'search')
+      assert.equal(doc.query, '北单中断开奖')
+      assert.equal(doc.scope, 'team')
+      assert.equal(doc.note, 'ok')
+      assert.equal(doc.hits, 1)
+      assert.equal(doc.zero_hit, false)
+      assert.equal(doc.degraded, false)
+      assert.equal(typeof doc.ms, 'number')
+      assert.match(String(doc.routes), /^team:bm25\+knn$/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('检索埋点：空结果也要记（否则空结果率永远算不出来）', async () => {
+    const h = await harness({ [TEAM_INDEX]: { bm25: [] } })
+    const recorded: Array<Record<string, unknown>> = []
+    try {
+      const result = await searchMemories(
+        h.deps({
+          recorder: {
+            index: async (_index: string, doc: Record<string, unknown>) => {
+              recorded.push(doc)
+              return {} as never
+            },
+          },
+          searchLogIndex: 'search_log_xqh',
+        }),
+        { query: '不存在的主题', scope: 'team' },
+      )
+      assert.equal(result.note, 'no_match')
+      assert.equal(recorded.length, 1)
+      assert.equal(recorded[0].note, 'no_match')
+      assert.equal(recorded[0].zero_hit, true)
+      assert.equal(recorded[0].hits, 0)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('检索埋点写失败不影响检索结果（观测通道不能变成单点故障）', async () => {
+    const h = await harness({ [TEAM_INDEX]: { bm25: [hit('t1', 3)] } })
+    try {
+      const result = await searchMemories(
+        h.deps({
+          recorder: {
+            index: async () => {
+              throw new Error('security_exception: 403')
+            },
+          },
+          searchLogIndex: 'search_log_xqh',
+        }),
+        { query: '北单中断开奖', scope: 'team' },
+      )
+      assert.equal(result.note, 'ok', '埋点挂了检索仍要成功')
+      assert.equal(result.hits.length, 1)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
   test('time_range 解析成 updated_at 过滤（个人库也生效）', async () => {
     const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
     try {

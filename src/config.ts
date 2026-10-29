@@ -81,6 +81,8 @@ export const Config: z<ConfigType> = z.object({
       .description('个人文档索引前缀；实际索引 = 前缀 + identity.userId。与记忆索引分开：文档是长文切片，记忆是一句事实。'),
     team: z.string().default('team_knowledge')
       .description('团队知识库索引名。'),
+    searchLogPrefix: z.string().default('search_log_')
+      .description('检索埋点索引前缀；实际索引 = 前缀 + identity.userId。只存"查了什么、召回几条、耗时多少"，用于每日巡检的空结果率与 P95；写失败静默降级，绝不影响检索。'),
   }),
   identity: z.object({
     userId: z.string()

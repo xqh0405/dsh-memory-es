@@ -130,6 +130,29 @@ else
     kv "待审队列（pending）" "$PEND"
     [ "${PEND:-0}" -gt 0 ] 2>/dev/null && warn "有 ${PEND} 条待审：不过审就永远不进检索（cli --review list）"
 
+    # 检索埋点（P1）：空结果率与 P95 只能从这里来，会话日志里拿不到耗时
+    SL="search_log_${OWNER}"
+    SL_AGG=$(es "$ES_URL/$SL/_search?size=0" -d '{"size":0,"query":{"range":{"at":{"gte":"now-7d"}}},"aggs":{"zero":{"filter":{"term":{"zero_hit":true}}},"deg":{"filter":{"term":{"degraded":true}}},"p":{"percentiles":{"field":"ms","percents":[50,95]}},"n":{"terms":{"field":"note"}}}}' 2>/dev/null)
+    if printf '%s' "$SL_AGG" | grep -q '"aggregations"'; then
+      SL_LINE=$(printf '%s' "$SL_AGG" | jq -r '.hits.total.value as $t | .aggregations as $a |
+        "\($t)|\($a.zero.doc_count)|\($a.deg.doc_count)|\($a.p.values["50.0"] // "-")|\($a.p.values["95.0"] // "-")|\([$a.n.buckets[]? | "\(.key)=\(.doc_count)"] | join(" "))"')
+      SL_TOTAL=${SL_LINE%%|*}; REST=${SL_LINE#*|}
+      SL_ZERO=${REST%%|*}; REST=${REST#*|}
+      SL_DEG=${REST%%|*}; REST=${REST#*|}
+      SL_P50=${REST%%|*}; REST=${REST#*|}
+      SL_P95=${REST%%|*}; SL_NOTE=${REST#*|}
+      kv "检索次数（近 7 天）" "$SL_TOTAL"
+      if [ "${SL_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+        kv "空结果率" "${SL_ZERO}/${SL_TOTAL}（$(( SL_ZERO * 100 / SL_TOTAL ))%）"
+        kv "P50 / P95 耗时" "${SL_P50} / ${SL_P95} ms"
+        kv "降级（仅 BM25）" "${SL_DEG}/${SL_TOTAL}"
+        kv "note 分布" "$SL_NOTE"
+        [ "$(( SL_ZERO * 100 / SL_TOTAL ))" -ge 40 ] 2>/dev/null && warn "空结果率 ≥40%：要么库覆盖不足，要么阈值偏高"
+      fi
+    else
+      warn "检索埋点索引 $SL 不存在或不可读（跑 init-indices.sh + init-user.sh 后生效）"
+    fi
+
     # 审计流水
     AUD=$(es "$ES_URL/memory_audit/_search?size=0" -d "{\"query\":{\"range\":{\"at\":{\"gte\":\"now-7d\"}}},\"aggs\":{\"e\":{\"terms\":{\"field\":\"event\"}}}}" 2>/dev/null)
     kv "审计事件（近 7 天）" "$(printf '%s' "$AUD" | jq -r '[.aggregations.e.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' 2>/dev/null)"
