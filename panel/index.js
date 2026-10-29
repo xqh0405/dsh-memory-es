@@ -1560,6 +1560,19 @@ async function selfTest(ctx) {
       maintInfo = `HTTP ${maintRes.status} 非 JSON`
     }
 
+    // 凭据体检：只打长度不打值。整理任务报「.env 缺少 MEM_USERNAME/MEM_PASSWORD」时，
+    // 先看这一行——passwordLen=0 说明配置没读到凭据，非 0 说明是写盘或 CLI 解析的问题。
+    {
+      const cfgRow = findEntryRow(ctx)
+      if (cfgRow.ok) {
+        const idn = cfgRow.value.identity
+        console.error(
+          `[记忆库面板] 凭据体检 | userId=${idn.userId || '(空)'} username=${idn.username || '(空)'} ` +
+            `passwordLen=${String(idn.password ?? '').length} teamWrite=${Boolean(idn.teamWrite)}`,
+        )
+      }
+    }
+
     const capsRes = await call('/capabilities')
     let capsInfo = `HTTP ${capsRes.status}`
     try {

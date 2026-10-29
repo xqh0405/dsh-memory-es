@@ -84,6 +84,19 @@ export async function runCli(config, args, options = {}) {
       `MEM_EMBEDDING_DIMS=${config.embedding.dims}`,
     ]
     writeFileSync(join(envDir, '.env'), `${envLines.join('\n')}\n`, { mode: 0o600 })
+    // 诊断：单账号模式报「.env 缺少 MEM_USERNAME/MEM_PASSWORD」时，先看这里到底写了什么。
+    // 密码一律打成长度，不落明文。
+    if (process.env.MEMORY_ES_CLI_DEBUG === '1') {
+      console.error(
+        `[记忆库面板] CLI .env 预览（${envLines.length} 行）：\n` +
+          envLines
+            .map((line) => {
+              const key = line.slice(0, line.indexOf('='))
+              return /PASSWORD/.test(key) ? `${key}=<${line.length - key.length - 1} 字符>` : line
+            })
+            .join('\n'),
+      )
+    }
     mkdirSync(stateDir, { recursive: true })
 
     const finalArgs = [
