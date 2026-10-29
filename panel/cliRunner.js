@@ -18,6 +18,15 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 /**
+ * 状态目录默认值：容器里 DSH_HOME=/data/dsh，本机回落到 ~/.dsh。
+ * 硬编码 /data/dsh 会让非容器部署在 mkdir 时直接 EACCES（2026-10-29 本机实测）。
+ */
+export function defaultStateDir() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return process.env.MEMORY_ES_STATE_DIR || join(home, 'memory-es-state')
+}
+
+/**
  * CLI 入口候选目录，按顺序取第一个存在的。
  *
  * 关键约束：**不能在 node_modules 下面跑**。Node 的类型剥离对 node_modules 内的 .ts 直接拒绝
@@ -54,7 +63,7 @@ export async function runCli(config, args, options = {}) {
   if (cliDir === '') throw new Error('找不到 CLI 源码目录（local-plugins 与包内 cli 都不存在）')
   const workDir = cliDir
   const envDir = join('/tmp', `memory-es-cli-${process.pid}-${Date.now()}`)
-  const stateDir = options.stateDir ?? '/data/dsh/memory-es-state'
+  const stateDir = options.stateDir ?? defaultStateDir()
 
   try {
     mkdirSync(join(envDir, 'certs'), { recursive: true, mode: 0o700 })

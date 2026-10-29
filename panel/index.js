@@ -13,6 +13,8 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
 import { createReadClient } from './es.js'
 
@@ -1101,7 +1103,7 @@ async function handleMirrorFile(ctx, res, url) {
     return json(res, 400, { ok: false, error: '文件名不合法（只接受镜像目录下的 .md 文件名）' })
   }
   const { existsSync, readFileSync, statSync } = await import('node:fs')
-  const { join } = await import('node:path')
+
   const full = join(MIRROR_DIR, name)
   if (!existsSync(full)) return json(res, 404, { ok: false, error: `镜像目录里没有 ${name}` })
 
@@ -1124,9 +1126,17 @@ async function handleMirrorFile(ctx, res, url) {
   })
 }
 
-/** 维护页状态：计数、最近整理、镜像目录、快照与定时任务的静态事实 */
-const STATE_DIR = '/data/dsh/memory-es-state'
-const MIRROR_DIR = '/data/dsh/memory-mirror'
+/**
+ * 维护页状态：计数、最近整理、镜像目录、快照与定时任务的静态事实。
+ *
+ * 路径按 DSH_HOME 推导，**不能硬编码 /data/dsh**：那是容器里的 DSH_HOME，
+ * 本机（非容器）没有写权限，跑整理会直接 `EACCES: mkdir '/data/dsh/memory-es-state'`。
+ * 容器内 DSH_HOME=/data/dsh（路径与以前一致），本机回落到 ~/.dsh。
+ * 两个环境变量留作逃生口（把状态放到别的卷上）。
+ */
+const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
+const STATE_DIR = process.env.MEMORY_ES_STATE_DIR || join(DSH_HOME, 'memory-es-state')
+const MIRROR_DIR = process.env.MEMORY_ES_MIRROR_DIR || join(DSH_HOME, 'memory-mirror')
 
 async function handleMaintenanceGet(ctx, res, url) {
   // 维护页整体收拢到管理员：普通成员的维护 tab 也不再显示（前端），接口同样拦住
@@ -1148,7 +1158,6 @@ async function handleMaintenanceGet(ctx, res, url) {
     targetUser === config.identity.userId ? names.docs : `${config.index.docPrefix ?? 'personal_doc_'}${targetUser}`
 
   const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
-  const { join } = await import('node:path')
 
   const counts = await Promise.all([
     client.search(personalIndex, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
@@ -1236,7 +1245,7 @@ async function handleConsolidate(ctx, res, req) {
   const args = apply ? ['--auto', '--apply'] : ['--auto']
   if (targetUser !== config.identity.userId) args.push('--user', targetUser)
 
-  const result = await runCli(config, args, { timeoutMs: 180_000 })
+  const result = await runCli(config, args, { timeoutMs: 180_000, stateDir: STATE_DIR })
   json(res, 200, {
     ok: true,
     value: {
@@ -1266,7 +1275,7 @@ async function handleExport(ctx, res, req) {
   if (!cliAvailable()) {
     return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署，无法导出' })
   }
-  const result = await runCli(config, ['--export', dir], { timeoutMs: 60_000 })
+  const result = await runCli(config, ['--export', dir], { timeoutMs: 60_000, stateDir: STATE_DIR })
   json(res, 200, {
     ok: true,
     value: { dir, exitCode: result.code, lines: summarize(result.stdout), stderr: result.stderr.slice(-2000) },
