@@ -17,6 +17,7 @@ PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=$(grep '^MEM_USER_ID=' "$ENV_FILE" | cut -d= -f2-)
 USER_ID=${USER_ID:-xqh}
 PERSONAL="personal_memory_$USER_ID"
+SEARCH_LOG="search_log_$USER_ID"
 
 es() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
@@ -121,6 +122,49 @@ put_index team_knowledge <<'JSON'
     }
   }
 }
+JSON
+
+# ── 检索埋点（P1）────────────────────────────────────────────────
+# 只存「查了什么、召回几条、多久、是不是空/降级」。
+# 为什么不塞 memory_audit：audit 是知识治理流水（低频、留 90 天），
+# 检索是高频读操作（一天几十次），混进去会把 audit 撑成日志表，
+# 也会让「谁晋升了什么」这种审计问题被噪声淹没。
+echo '== 索引模板 search_log_* =='
+es -X PUT "$ES/_index_template/search_log_template" -d @- >/dev/null <<'JSON'
+{
+  "index_patterns": ["search_log_*"],
+  "priority": 100,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "30s"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "user_id":  { "type": "keyword" },
+        "at":       { "type": "date" },
+        "tool":     { "type": "keyword" },
+        "query":    { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "scope":    { "type": "keyword" },
+        "hits":     { "type": "integer" },
+        "note":     { "type": "keyword" },
+        "zero_hit": { "type": "boolean" },
+        "degraded": { "type": "boolean" },
+        "filtered": { "type": "boolean" },
+        "routes":   { "type": "keyword" },
+        "ms":       { "type": "integer" },
+        "margin":   { "type": "float" }
+      }
+    }
+  }
+}
+JSON
+echo '  ok'
+
+put_index "$SEARCH_LOG" <<'JSON'
+{}
 JSON
 
 echo '--- 索引列表 ---'

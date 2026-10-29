@@ -147,22 +147,25 @@ describe('decideDedupe（§9.4 三道闸）', () => {
     assert.equal(decision.topScore, 0.93)
   })
 
-  test('同 topic_key 且 0.6~0.9 → pending（人工队列，不落库）', () => {
-    assert.equal(decideDedupe({ shaHit: null, neighbors: [neighbor(0.7)], topicKey: 'd:t1' }).verdict, 'pending')
+  test('0.75~0.9 且同 topic_key → pending（人工队列，不落库）', () => {
+    const decision = decideDedupe({ shaHit: null, neighbors: [neighbor(0.8)], topicKey: 'd:t1' })
+    assert.equal(decision.verdict, 'pending')
+    assert.match(decision.reason, /同 topic_key/)
   })
 
-  test('0.6~0.9 但 topic_key 不同 → 不是同主题，按 new 处理', () => {
-    const decision = decideDedupe({ shaHit: null, neighbors: [neighbor(0.7, 'd:other')], topicKey: 'd:t1' })
-    assert.equal(decision.verdict, 'new')
-    // 文案不能说「低于 0.6」（0.7 并不低）——S8 实测打印过这种自相矛盾的报告
+  test('0.75~0.9 但 topic_key 不同 → 仍然 pending（2026-10-27 修正）', () => {
+    // 旧逻辑要求 topic_key 相同才 pending，而 topic_key 只认「正文前 60 字相同」，
+    // 换个说法就失效 → 这道闸实际永不触发。现在按纯相似度判，topic_key 只做文案补充。
+    const decision = decideDedupe({ shaHit: null, neighbors: [neighbor(0.83, 'd:other')], topicKey: 'd:t1' })
+    assert.equal(decision.verdict, 'pending')
     assert.equal(decision.reason.includes('低于'), false)
     assert.match(decision.reason, /topic_key 不同/)
   })
 
-  test('相似度确实低于阈值时，文案才说「低于」', () => {
+  test('低于 0.75 才是 new，且文案说「低于」', () => {
     const decision = decideDedupe({ shaHit: null, neighbors: [neighbor(0.3)], topicKey: 'd:t1' })
     assert.equal(decision.verdict, 'new')
-    assert.match(decision.reason, /低于 0\.6/)
+    assert.match(decision.reason, /低于 0\.75/)
   })
 
   test('阈值可覆盖（便于以后调参而不改逻辑）', () => {

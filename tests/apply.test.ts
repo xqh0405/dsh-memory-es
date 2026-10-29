@@ -98,7 +98,7 @@ describe('apply', () => {
     assert.equal(requests.length, 0, '加载期不应发任何请求')
     assert.deepEqual(
       harness.registered.map((tool) => tool.name).sort(),
-      ['memory_distill', 'memory_promote', 'memory_save', 'memory_search', 'memory_update_status'],
+      ['doc_search', 'memory_distill', 'memory_promote', 'memory_save', 'memory_search', 'memory_update_status'],
     )
     assert.equal(harness.logs.length, 1)
     assert.match(harness.logs[0], /ready: user=xqh index=personal_memory_xqh/)
@@ -108,9 +108,9 @@ describe('apply', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
-    assert.equal(harness.registered.length, 5, '五个工具各一次 effect（含 memory_distill）')
+    assert.equal(harness.registered.length, 6, '六个工具各一次 effect（含 memory_distill / doc_search）')
     assert.equal(harness.sections.length, 1, '提示词段也要走 effect')
-    assert.equal(harness.disposers.length, 6, '应当通过 ctx.effect 注册（而不是裸 register）')
+    assert.equal(harness.disposers.length, 7, '应当通过 ctx.effect 注册（而不是裸 register）')
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
     assert.equal(harness.sections.length, 0)
