@@ -155,7 +155,8 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
     }
 
     // 2. 规则蒸馏
-    const [item] = distillBatch([candidate])
+    // homeUser：把 `/home/<该用户>` 相对化成 `~`（团队库里不该出现别人的家目录）
+    const [item] = distillBatch([candidate], { homeUser: deps.userId })
 
     // 2.5 纯环境配置（「项目 X 克隆在 /home/…」「Maven 已装好于 /opt/…」）不进团队库。
     //     这类内容对别人零价值，灌进去只能事后人工删（2026-10-29 实测 39/244 是这种）。

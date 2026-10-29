@@ -47,12 +47,31 @@ const PERSONAL_PATTERNS: Array<{ pattern: RegExp; replace: string }> = [
   { pattern: /我的环境/g, replace: '该环境' },
 ]
 
+/**
+ * 家目录归一：把 `/home/<当前用户>` 换成 `~`。
+ *
+ * 为什么只换当前用户、不换所有 `/home/*`：`/home/docker-data/lottery` 是**另一台机器的真实路径**，
+ * 抹成 `~` 反而丢信息。只把「你自己的家目录」相对化——同事看到 `~/code/foo` 会理解成
+ * 「我自己的 home 下」，而 `/home/user/code/foo` 会让他误判「这条是别人的、我这没有」。
+ *
+ * 2026-10-29：团队库 236 条里 28 条含 `/home/user`，逐个替换并重算 content_sha256；
+ * 这里补上增量规则，以后整理不会再带进来。
+ */
+export function normalizeHomePath(content: string, homeUser?: string): string {
+  const user = (homeUser ?? '').trim()
+  if (user === '') return content
+  const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return content.replace(new RegExp(`/home/${escaped}(?=/|$|\\s|[)\`'",;])`, 'g'), '~')
+}
+
 /** 去掉个人上下文，保留版本号/路径/错误码等可复现信息（§9.3 第二条） */
-export function stripPersonalContext(content: string): string {
+export function stripPersonalContext(content: string, options?: { homeUser?: string }): string {
   let text = normalizeContent(content)
   for (const { pattern, replace } of PERSONAL_PATTERNS) {
     text = text.replace(pattern, replace)
   }
+  // 家目录相对化要放在英文替换之后：`/home/user` 本身不含第一人称，不会被误伤
+  text = normalizeHomePath(text, options?.homeUser)
   return text.replace(/\s+/g, ' ').trim()
 }
 
@@ -124,9 +143,13 @@ export function topicKey(domain: string, content: string, prefixChars = 60): str
  * 规则版批量蒸馏。**不替人判价值**：verdict 恒为 team_worthy，
  * 真正的取舍交给 dry-run 报告（人看）与 promote_state 的显式标记。
  */
-export function distillBatch(sources: readonly SourceMemory[]): DistilledItem[] {
+export function distillBatch(
+  sources: readonly SourceMemory[],
+  options?: { homeUser?: string },
+): DistilledItem[] {
   return sources.map((source) => {
-    const rewritten = stripPersonalContext(source.content)
+    // homeUser：把 `/home/<该用户>` 相对化成 `~`，避免团队库里出现「别人的家目录」
+    const rewritten = stripPersonalContext(source.content, { homeUser: options?.homeUser })
     const domain = (source.domain || 'general').trim() || 'general'
     // 纯环境配置直接判 personal_only：不进团队库，也不再用它做去重/冲突判定
     const value = classifyValue(source.content)
