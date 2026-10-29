@@ -12,7 +12,7 @@ import { describe, test } from 'node:test'
 
 import { detectContradiction } from '../consolidate/conflict.ts'
 import { decideDedupe } from '../consolidate/dedupe.ts'
-import { distillBatch, stripPersonalContext, topicKey } from '../consolidate/distill.ts'
+import { classifyValue, distillBatch, stripPersonalContext, topicKey } from '../consolidate/distill.ts'
 import { buildCandidateQuery, shouldRun } from '../consolidate/scan.ts'
 import { scanSensitive, summarizeHits } from '../consolidate/sensitive.ts'
 import {
@@ -270,5 +270,44 @@ describe('state（游标与幂等）', () => {
     const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString()
     const value = daysSinceLastRun({ ...emptyState(), lastRunAt: twoDaysAgo })
     assert.ok(value !== null && Math.abs(value - 2) < 0.01)
+  })
+})
+
+describe('classifyValue（环境配置不进团队库，2026-10-29）', () => {
+  test('克隆路径 + 无技术结论 → personal_only', () => {
+    const r = classifyValue('项目 py_crawler(Flask + gunicorn 8561)已克隆在 /home/user/code/py_crawler,origin=ssh://git@x/python/py_crawler.git')
+    assert.equal(r.verdict, 'personal_only')
+    assert.match(r.reason, /环境配置/)
+  })
+
+  test('已装软件 → personal_only', () => {
+    const r = classifyValue('Maven 已装好:Maven 3.9.16 于 /home/user/opt/apache-maven-3.9.16(软链 /home/user/opt/maven)')
+    assert.equal(r.verdict, 'personal_only')
+  })
+
+  test('提到本机路径但有踩坑结论 → 仍是 team_worthy（宁可多留）', () => {
+    const r = classifyValue('lottery-cloud 写操作在 workspace-write 沙箱下会被拒，根因是 git 需要写 .git/index，必须显式放开')
+    assert.equal(r.verdict, 'team_worthy')
+  })
+
+  test('正常的工程结论不受影响', () => {
+    const r = classifyValue('mysqldump 必须用 Oracle 客户端，否则生成列还原报 ERROR 3105')
+    assert.equal(r.verdict, 'team_worthy')
+  })
+
+  test('进度快照也拦（价值随时间衰减，易被误当现状）', () => {
+    const r = classifyValue('member 已扩到 3 实例:jbp-04、jbp-08、jbp-09，每实例 Xmx=10g')
+    assert.equal(r.verdict, 'personal_only')
+    assert.match(r.reason, /进度快照/)
+  })
+
+  test('带技术结论的进度复盘要留（有根因/机制就不拦）', () => {
+    const r = classifyValue('已完成 member 扩到 3 实例，根因是单实例 Xmx=10g 时 GC 风暴拖垮 MyBatis 解析器')
+    assert.equal(r.verdict, 'team_worthy')
+  })
+
+  test('git 工作流规则不因提到私钥路径被误杀（2026-10-29 回归）', () => {
+    const r = classifyValue('模型不自动 push 指未经要求的推送；push/pull 用 ~/.ssh/config 的 ssh.example.com:2233 + 私钥 /home/user/git')
+    assert.equal(r.verdict, 'team_worthy')
   })
 })

@@ -62,7 +62,7 @@ export interface RunOptions {
 
 export interface StepResult {
   memory_id: string
-  verdict: DedupeVerdict | 'blocked'
+  verdict: DedupeVerdict | 'blocked' | 'personal_only'
   reason: string
   /** 写进团队库的 doc_id（仅 verdict=new 且 apply 时） */
   teamDocId?: string
@@ -91,7 +91,7 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
   const newId = deps.newId ?? (() => crypto.randomUUID())
   const log = deps.log ?? (() => {})
   const results: StepResult[] = []
-  const counts = { promoted: 0, duplicate: 0, mergeCandidate: 0, pending: 0, blocked: 0 }
+  const counts = { promoted: 0, duplicate: 0, mergeCandidate: 0, pending: 0, blocked: 0, personalOnly: 0 }
   let state = options.state
   let skippedProcessed = 0
   let degraded = false
@@ -156,6 +156,53 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
 
     // 2. 规则蒸馏
     const [item] = distillBatch([candidate])
+
+    // 2.5 纯环境配置（「项目 X 克隆在 /home/…」「Maven 已装好于 /opt/…」）不进团队库。
+    //     这类内容对别人零价值，灌进去只能事后人工删（2026-10-29 实测 39/244 是这种）。
+    //     判 personal_only 后回写个人库；scan 的 promoteStates 不含它 → 以后不再被扫。
+    if (item.verdict === 'personal_only') {
+      counts.personalOnly += 1
+      results.push({
+        memory_id: candidate.memory_id,
+        verdict: 'personal_only',
+        reason: item.reason,
+        distilledBy: item.distilled_by,
+        confidence: item.confidence,
+      })
+      if (options.apply) {
+        await deps.writer.update(
+          deps.personalIndex,
+          candidate.memory_id,
+          {
+            promote_state: 'personal_only',
+            personal_only_reason: item.reason,
+            updated_at: now.toISOString(),
+          },
+          { refresh: 'wait_for' },
+        )
+        if (deps.audit) {
+          await writeAudit(deps.audit, {
+            event: 'personal_only',
+            actor: `consolidate:${deps.userId}`,
+            at: now,
+            subject_type: 'personal_memory',
+            subject_id: candidate.memory_id,
+            memory_id: candidate.memory_id,
+            from_state: 'none',
+            to_state: 'personal_only',
+            reason: item.reason,
+          })
+        }
+        state = withProcessed(state, candidate.memory_id, {
+          at: now.toISOString(),
+          verdict: 'personal_only',
+          reason: item.reason,
+        })
+      }
+      log({ event: 'personal_only', memory_id: candidate.memory_id, reason: item.reason })
+      continue
+    }
+
     const rewritten = item.rewritten_content
     const teamKey = topicKey(item.domain, rewritten)
 

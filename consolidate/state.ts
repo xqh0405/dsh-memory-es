@@ -16,7 +16,7 @@ import { dirname } from 'node:path'
 
 export interface ProcessedEntry {
   at: string
-  verdict: 'promoted' | 'duplicate' | 'merge_candidate' | 'blocked' | 'pending'
+  verdict: 'promoted' | 'duplicate' | 'merge_candidate' | 'blocked' | 'pending' | 'personal_only'
   teamDocId?: string
   reason: string
 }

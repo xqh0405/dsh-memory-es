@@ -518,7 +518,7 @@ function printReport(report: RunReport, applied: boolean): void {
   const c = report.counts
   console.log('')
   console.log(
-    `小结：${applied ? '已写入' : '预计'} promoted=${c.promoted} duplicate=${c.duplicate} merge_candidate=${c.mergeCandidate} pending=${c.pending} blocked=${c.blocked}`,
+    `小结：${applied ? '已写入' : '预计'} promoted=${c.promoted} duplicate=${c.duplicate} merge_candidate=${c.mergeCandidate} pending=${c.pending} blocked=${c.blocked} personal_only=${c.personalOnly}`,
   )
   if (c.blocked > 0) console.log('注意：blocked 的条目只置状态、不写团队库，且日志不含原文。')
   if (c.pending > 0) {

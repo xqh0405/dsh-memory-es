@@ -57,6 +57,58 @@ export function stripPersonalContext(content: string): string {
 }
 
 /**
+ * 环境配置的强特征：「克隆在 /home/xxx」「Maven 已装好于 /opt/xxx」「软链到 …」这类。
+ * 它们对**别人**毫无用处——团队库不该收「你的工作目录在哪」。
+ */
+const ENV_ONLY_PATTERN =
+  /(克隆在|已克隆|已装好|已经装好|装好了|已安装|已配好|配好了|已配置|软链|工作目录为|仓库在 \/home|缓存克隆在|装在 \/home|origin=(ssh|https):\/\/git@)/
+
+/**
+ * 进度快照的特征（「已落地 / 已扩到 / 已完成 / 进度复查」+ supersedes）。
+ * 这类内容的价值随时间衰减，而且别人看到会当**当前状态**，按过期的状态干活比没有更糟。
+ */
+const PROGRESS_ONLY_PATTERN = /(已(全部)?落地|已扩到|已完成|进度复查|supersedes 20)/
+
+/**
+ * 技术结论的特征：哪怕提到本机路径，只要讲的是机制/根因/口径，就值得给团队看。
+ * 这是 ENV_ONLY 的反向豁免——宁可多留一条带路径的知识，也别把踩坑结论当环境配置删掉。
+ */
+const KNOWLEDGE_PATTERN =
+  /(根因|机制|判据|教训|踩坑|两层|限制|否则|必须|禁止|口径|实测|为什么|不能|别用|才能|症状|触发条件|反了|门槛)/
+// 刻意不含「注意 / 坑 / 区别」这类弱词：环境配置里常写「注意软链」「坑在权限」，
+// 拿它们当知识特征会把该拦的全放过（实测 15 条漏 8 条）。
+
+/**
+ * 判断一条个人记忆值不值得进团队库（规则版，S9 接 LLM 前的兜底）。
+ *
+ * 为什么需要它：2026-10-29 整理 xqh 的 258 条记忆，团队库从 9 条涨到 244 条，
+ * 其中 39 条含 `/home/user`——「项目 X 克隆在 …」「Maven 已装好于 …」这类环境配置
+ * 对别人零价值，只能事后人工清理。与其灌进去再删，不如在这一步就判 personal_only。
+ *
+ * 边界要说清：这**不是价值判断**，只识别「纯环境配置」这一种明确无价值的形态；
+ * 其余仍一律 team_worthy，真正的取舍交给人（dry-run 报告 + 审核台）。
+ */
+export function classifyValue(content: string): { verdict: 'team_worthy' | 'personal_only'; reason: string } {
+  const isKnowledge = KNOWLEDGE_PATTERN.test(content)
+  if (ENV_ONLY_PATTERN.test(content) && !isKnowledge) {
+    return {
+      verdict: 'personal_only',
+      reason: '环境配置（克隆路径/已装软件），不含可复用的技术结论',
+    }
+  }
+  if (PROGRESS_ONLY_PATTERN.test(content) && !isKnowledge) {
+    return {
+      verdict: 'personal_only',
+      reason: '进度快照（已落地/已扩到），价值随时间衰减且易被误当现状',
+    }
+  }
+  return {
+    verdict: 'team_worthy',
+    reason: '规则版蒸馏：去个人上下文后保留可复现信息（未做价值判断）',
+  }
+}
+
+/**
  * topic_key = domain + 归一化主题指纹（§3.3）。
  *
  * 规则版取「清洗后正文的前 60 字」做主题短语——它只能识别**开头相同**的主题，
@@ -76,15 +128,18 @@ export function distillBatch(sources: readonly SourceMemory[]): DistilledItem[] 
   return sources.map((source) => {
     const rewritten = stripPersonalContext(source.content)
     const domain = (source.domain || 'general').trim() || 'general'
+    // 纯环境配置直接判 personal_only：不进团队库，也不再用它做去重/冲突判定
+    const value = classifyValue(source.content)
     return {
       source_memory_ids: [source.memory_id],
-      verdict: 'team_worthy' as const,
-      reason: '规则版蒸馏：去个人上下文后保留可复现信息（未做价值判断）',
+      verdict: value.verdict,
+      reason: value.reason,
       rewritten_content: rewritten,
       domain,
       memory_type: source.memory_type || 'fact',
-      // 规则版置信度固定中等：它只保证「改写没引入个人上下文」，不保证「值得共享」
-      confidence: 0.5,
+      // 规则版置信度固定中等：它只保证「改写没引入个人上下文」，不保证「值得共享」；
+      // 判成 personal_only 时反而更确定（强特征命中），所以置信度更高
+      confidence: value.verdict === 'team_worthy' ? 0.5 : 0.8,
       distilled_by: 'rule' as const,
     }
   })
