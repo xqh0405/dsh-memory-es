@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'del-20261029'
+    const BUILD = 'list-20261029'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -348,6 +348,41 @@ window.__ModuleLoader__.load({
         background: 'transparent',
         color: 'var(--dsw-alias-label-primary)',
         cursor: 'pointer',
+      },
+      // 双行列表（替代 7 列表格）：第一行「库 + 内容 + 状态 + 时间」，第二行「领域 · 类型 + 操作」。
+      // 表格版把中文挤成竖排（个/人、详/情），内容又换行占三四行，一屏只能看 4 条。
+      row: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '10px 12px',
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+      },
+      rowMain: { display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 },
+      // minWidth: 0 是关键：flex 子项默认 min-width:auto，不加它省略号不会生效
+      rowTitle: {
+        flex: 1,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        fontSize: 13,
+        color: 'var(--dsw-alias-label-primary)',
+      },
+      rowTime: {
+        flexShrink: 0,
+        whiteSpace: 'nowrap',
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary)',
+        fontVariantNumeric: 'tabular-nums',
+      },
+      rowMeta: {
+        display: 'flex',
+        gap: 6,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary)',
       },
       table: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 },
       th: {
@@ -1231,55 +1266,41 @@ window.__ModuleLoader__.load({
 
         state.loading || state.error
           ? null
-          : h('div', { style: S.card },
+          : h('div', { style: { ...S.card, padding: 0, overflow: 'hidden' } },
               rows.length === 0
-                ? h('p', { style: S.muted }, t('empty'))
-                : h('table', { style: S.table },
-                    h('thead', null,
-                      h('tr', null,
-                        h('th', { style: S.th }, t('colContent')),
-                        h('th', { style: S.th }, t('colScope')),
-                        h('th', { style: S.th }, t('colDomain')),
-                        h('th', { style: S.th }, t('colType')),
-                        h('th', { style: S.th }, t('colStatus')),
-                        h('th', { style: S.th }, t('colUpdated')),
-                        h('th', { style: S.th }, ''),
+                ? h('p', { style: { ...S.muted, padding: '12px 14px' } }, t('empty'))
+                : rows.map((row) =>
+                    h('div', { key: `${row.scope}:${row.id}`, style: S.row },
+                      h('div', { style: S.rowMain },
+                        h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
+                        // 单行省略：全文放 title，悬停可看；不再靠换行撑高行
+                        h('span', { style: S.rowTitle, title: row.content }, row.content),
+                        h('span', { style: S.pill(row.reviewState === 'pending' ? 'warn' : 'ok') },
+                          row.reviewState
+                            ? `${stateLabel(row.status, t)}/${stateLabel(row.reviewState, t)}`
+                            : stateLabel(row.status, t)),
+                        h('span', { style: S.rowTime }, shortTime(row.updatedAt)),
                       ),
-                    ),
-                    h('tbody', null,
-                      rows.map((row) =>
-                        h('tr', { key: `${row.scope}:${row.id}` },
-                          h('td', { style: { ...S.td, maxWidth: 360 } },
-                            row.content.length > 80 ? `${row.content.slice(0, 80)}…` : row.content),
-                          h('td', { style: S.td }, h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal'))),
-                          h('td', { style: { ...S.td, ...S.mono } }, domainLabel(row.domain, t)),
-                          h('td', { style: { ...S.td, ...S.mono } }, typeLabel(row.memoryType, t)),
-                          h('td', { style: S.td },
-                            h('span', { style: S.pill(row.reviewState === 'pending' ? 'warn' : 'ok') },
-                              row.reviewState
-                                ? `${stateLabel(row.status, t)}/${stateLabel(row.reviewState, t)}`
-                                : stateLabel(row.status, t)),
-                          ),
-                          h('td', { style: { ...S.td, ...S.mono } }, shortTime(row.updatedAt)),
-                          h('td', { style: S.td },
-                            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                              h('button', { type: 'button', style: S.btn, onClick: () => setSelected(row) }, t('detail')),
-                              // 个人记忆的删除按钮一律显示（本人的库本人能删）；
-                              // 团队记忆要真持有 team_knowledge 的 delete 才出现——由后端问 ES 得出
-                              row.scope === 'personal' || caps?.canDeleteTeam === true
-                                ? h('button', {
-                                    type: 'button',
-                                    style: { ...S.btn, color: 'var(--dsw-alias-state-danger-primary, #d33)' },
-                                    onClick: () => {
-                                      setDelResult(null)
-                                      setDelReason('')
-                                      setDeleting(row)
-                                    },
-                                  }, t('delBtn'))
-                                : null,
-                            ),
-                          ),
-                        ),
+                      h('div', { style: S.rowMeta },
+                        h('span', null,
+                          [domainLabel(row.domain, t), typeLabel(row.memoryType, t), row.topicKey]
+                            .filter(Boolean)
+                            .join(' · ')),
+                        h('span', { style: { flex: 1 } }),
+                        h('button', { type: 'button', style: S.btn, onClick: () => setSelected(row) }, t('detail')),
+                        // 个人记忆的删除按钮一律显示（本人的库本人能删）；
+                        // 团队记忆要真持有 team_knowledge 的 delete 才出现——由后端问 ES 得出
+                        row.scope === 'personal' || caps?.canDeleteTeam === true
+                          ? h('button', {
+                              type: 'button',
+                              style: { ...S.btn, color: 'var(--dsw-alias-state-danger-primary, #d33)' },
+                              onClick: () => {
+                                setDelResult(null)
+                                setDelReason('')
+                                setDeleting(row)
+                              },
+                            }, t('delBtn'))
+                          : null,
                       ),
                     ),
                   ),
