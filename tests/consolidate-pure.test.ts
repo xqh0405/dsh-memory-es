@@ -356,3 +356,15 @@ describe('normalizeHomePath（团队库里不放别人的家目录）', () => {
     assert.equal(out.includes('/home/user'), false)
   })
 })
+
+describe('normalizeHomePath · macOS 家目录', () => {
+  test('/Users/<name> 一律相对化（Linux 团队看 mac 绝对路径只会误判）', () => {
+    assert.equal(normalizeHomePath('/Users/xindan/Desktop/code', 'zhongjinqi'), '~/Desktop/code')
+    // 即使 homeUser 不匹配（mac 用户是另一个人）也要换
+    assert.equal(normalizeHomePath('/Users/xindan/code', undefined), '~/code')
+  })
+
+  test('共享目录形态的 /home/<name> 仍保留', () => {
+    assert.equal(normalizeHomePath('/home/docker-data/lottery', 'zhongjinqi'), '/home/docker-data/lottery')
+  })
+})

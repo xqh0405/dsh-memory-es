@@ -58,10 +58,15 @@ const PERSONAL_PATTERNS: Array<{ pattern: RegExp; replace: string }> = [
  * 这里补上增量规则，以后整理不会再带进来。
  */
 export function normalizeHomePath(content: string, homeUser?: string): string {
+  let text = content
   const user = (homeUser ?? '').trim()
-  if (user === '') return content
-  const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return content.replace(new RegExp(`/home/${escaped}(?=/|$|\\s|[)\`'",;])`, 'g'), '~')
+  if (user !== '') {
+    const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    text = text.replace(new RegExp(`/home/${escaped}(?=/|$|\\s|[)\`'",;])`, 'g'), '~')
+  }
+  // macOS 的 /Users/<name> 一定是「某个人的家目录」（不像 /home/docker-data 可能是共享目录），
+  // 一律相对化：Linux 团队看到 mac 绝对路径只会误判「这条是别人的」。
+  return text.replace(/\/Users\/[A-Za-z0-9._-]+(?=\/|$|\s|[)\`'",;])/g, '~')
 }
 
 /** 去掉个人上下文，保留版本号/路径/错误码等可复现信息（§9.3 第二条） */

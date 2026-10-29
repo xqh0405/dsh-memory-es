@@ -53,6 +53,7 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "topic_key":         { "type": "keyword" },
         "privacy":           { "type": "keyword" },
         "blocked_reason":    { "type": "keyword" },
+        "personal_only_reason": { "type": "text" },
 
         "distill_state":        { "type": "keyword" },
         "distilled_at":         { "type": "date" },
