@@ -61,6 +61,24 @@ dsh plugin --profile web add "$PWD"
     embedding:
       model: bge-m3
       dims: 1024
+    # 以下都可省略，默认值即当前生产配置
+    retrieval:
+      topK: 20                     # 每一路（BM25 / kNN）取的候选数
+      rrfK: 60                     # RRF 融合常数
+      limit: 8                     # 返回给模型的最大条数
+    confidence:                    # 分层置信：低置信时「返回 + 标注」，不返回空
+      floorTop1: 0.6               # 低于此值判低置信
+      autoPassTop1: 0.8            # 高于此值直接放行
+      minMargin: 0.025             # 或 top1-top2 差距够大
+      minBm25: 30                  # 或 BM25 足够强
+    ranking:                       # 排序乘子，作用在跨库合并之后
+      importanceWeight: 1          # critical ×1.1 / low ×0.9
+      hitWeight: 0.2               # 命中次数加成
+      recencyWeight: 0.1           # 时间新鲜度权重
+      recencyHalfLifeDays: 30      # 未知 memory_type 的兜底半衰期
+      reinforcementPerHit: 0.1     # 每次命中延长 10% 寿命
+      reinforcementCap: 0.5        # 最多延长 50%
+      agreementBonus: 0            # 两路一致加成（A/B 实测负收益，默认关）
 ```
 
 不填 `userId` 或凭据缺失时插件会 fail-fast 拒绝启动——这是刻意的（不写匿名记忆）。`scripts/init-security.sh` 会把生成的账号密码写进 `deploy/es/.env`，照着填即可。
@@ -76,9 +94,11 @@ dsh plugin --profile web add "$PWD"
 | 插件骨架（S1） | **已完成**：Config + fail-fast、`fragment.ts` 纯函数契约、tsdown 单产物 |
 | ES 层（S2） | **已完成**：`es/http.ts`（TLS CA / Basic Auth / 超时 / 12 类错误映射 / 409·429 重试）、`es/dsl.ts`（BM25 + kNN + 去重 body） |
 | 写入工具（S3） | **已完成**：`memory_save`（身份注入 / 幂等去重 / embedding 降级 / F3）、`embedding.ts`（Ollama `/api/embed`） |
-| 检索工具（S4） | **已完成**：`memory_search`（BM25 + kNN 并发 / 库内 RRF / 跨库加权去重 / cosine margin 判空 / 精简投影） |
+| 检索工具（S4） | **已完成**：`memory_search`（BM25 + kNN 并发 / 库内 RRF / 跨库加权去重 / 分层置信判定 / 精简投影） |
 | 提示与文案（S6） | **已完成**：系统提示片段（order=3200）+ 四条工具描述改成「时机 / 不要用」句式 |
-| 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / mark_private）、`memory_promote`（只标候选） |
+| 治理工具（S5） | **已完成**：`memory_update_status`（supersede 双写 / expire / archive / restore / mark_private）、`memory_promote`（只标候选） |
+| 检索质量（2026-10-29） | **已完成**：标识符精确匹配（`content_exact`，修 IK 把 `lot.bd_write_sync` 切碎导致的召回丢失）、分层置信判定、排序乘子（importance / 命中次数 / 新鲜度）、失效与过期过滤、按 `memory_type` 的半衰期与访问强化 |
+| 遗忘口径 | **只改可见性，不物理删除**：`EsClient` 没有 `delete` 方法。归档 / 过期 / 被取代都只是移出检索，任何一条都能按 id 查回（审计要能回答「当时为什么这么定」） |
 
 | 进度 | S1~S10 完成：4 个工具 + 系统提示段 + 整理任务（默认 dry-run）+ 治理（审核队列/冲突/审计）+ Markdown 镜像 |
 | 部署形态 | **两套**：本机（`deploy/es`）+ DSH 跑在容器里时（`deploy/es-remote`，ES 与该容器同在 docker 网络）。后者已实际装进容器 web profile 并通过冒烟（模型自己调用 `memory_save` 落库、双路检索命中），详见开发文档 §5.7 |
@@ -130,12 +150,22 @@ ES_DIR=/path/to/es-memory/deploy/es-remote bash scripts/init-security.sh
 
 bash scripts/build.sh         # 装 devDeps → 链宿主 @deepseek-ai/* → tsdown 打 lib/
 npm run typecheck             # src + tests 两份 tsconfig
-npm test                      # 全部 221 例（Node ≥22.18：测试直接跑 .ts 依赖 type stripping）（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
+npm test                      # 全部 264 例（Node ≥22.18：测试直接跑 .ts 依赖 type stripping）（集成测试要 ES 在跑；save/search/consolidate 集成还要 Ollama）
 npm test -- es-integration    # 只跑真实 ES 的集成用例
 npm test -- save-integration  # 只跑 memory_save 闭环（真 ES + 真 Ollama）
 npm test -- search-integration # 只跑 memory_search 闭环（真 ES + 真 Ollama）
 npm test -- status-integration # 只跑状态变更闭环（真 ES）
 npm test -- prompt             # 只跑提示词内容与真实组装
+
+# 字段迁移（幂等，跑一次即可；顺序必须是「先迁移、再上新代码」）
+#   加了 content_exact / importance / hit_count / last_hit_at / superseded_at
+bash scripts/migrate-identifier-field.sh <userId>
+bash scripts/migrate-ranking-fields.sh <userId>
+
+# 检索评测：排序口径 / 生产口径 / 阈值扫描（需要 tests/eval/queries.jsonl，见 queries.example.jsonl）
+npm run eval                   # 只测排序质量（关掉置信判空），与基线逐条对比
+npm run eval:prod              # 生产口径（含置信判定）
+npm run eval:thresholds        # 网格扫描置信阈值，出帕累托前沿
 ```
 
 密码在 `deploy/es/.env`（600，已 gitignore）；证书与数据在 `deploy/es/{certs,data}`（不提交）。
@@ -143,6 +173,8 @@ npm test -- prompt             # 只跑提示词内容与真实组装
 ## 文档
 
 - [开发文档](docs/开发文档.md) —— 索引与映射、权限模型、Docker 部署、插件工具契约、混合检索、整理管道、实现方案、施工清单、风险与里程碑。
+- [优化路线](docs/优化路线.md) —— 五个阶段的实施记录、参数标定过程，以及**被实测否决的方案**（单一 margin 判空、自动 supersede、agreementBonus）与原因。
+- [开源记忆项目调研](docs/开源记忆项目调研.md) —— 10 个同类项目的机制对比，附 Neo4j 分图可行性分析。
 
 ## 三个已定的关键决策
 
