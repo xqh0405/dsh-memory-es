@@ -106,7 +106,7 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
 
 // ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
 const panel = await import('../panel/index.js')
-const { handleCapabilities, handleReviewAction } = panel
+const { handleCapabilities, handleDeleteMemory, handleReviewAction } = panel
 
 const fs = await import('node:fs')
 const os = await import('node:os')
@@ -291,4 +291,159 @@ test('applyConfigChanges：boolean 原样写入，不变成字符串', async () 
     distill: z.object({ enabled: z.boolean().default(false), provider: z.string().default(''), model: z.string().default(''), timeoutMs: z.number().default(30000) }),
   })
   assert.doesNotThrow(() => schema(next), '写盘结果必须能通过插件 schema')
+})
+
+// ── 删除接口：权限、必填原因、幂等 ────────────────────────────────────────
+// 用一个进程内假 ES：只实现删除路径会用到的三个端点，并记录收到的请求，
+// 好断言"参数不合格时一次都不该碰 ES"。
+const { createServer } = await import('node:http')
+
+const SINGLE = { userId: 'xqh', username: 'mem-user-xqh', password: 'pw', teamWrite: true }
+
+/** 假 ES：_has_privileges 按索引名分别回答，DELETE / 审计写入按参数给状态码 */
+async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200 } = {}) {
+  const calls = []
+  const server = createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8')
+      calls.push({ method: req.method, url: req.url, body })
+      const send = (status, payload) => {
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(payload === undefined ? '' : JSON.stringify(payload))
+      }
+      if (req.url.startsWith('/_security/user/_has_privileges')) {
+        const parsed = JSON.parse(body || '{}')
+        const names = parsed?.index?.[0]?.names ?? []
+        const allow = names.includes('team_knowledge') ? canDeleteTeam : canDeletePersonal
+        return send(200, { has_all_requested: Boolean(allow), index: {} })
+      }
+      if (req.method === 'DELETE') {
+        return send(deleteStatus, { result: deleteStatus === 404 ? 'not_found' : 'deleted' })
+      }
+      if (req.url.startsWith('/memory_audit/_doc')) return send(201, { result: 'created' })
+      return send(200, {})
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  return { url: `http://127.0.0.1:${port}`, calls, close: () => new Promise((resolve) => server.close(resolve)) }
+}
+
+function ctxWithEs(identity, esUrl) {
+  const row = {
+    entry: { id: 'include:dsh-memory-es' },
+    inherited: {
+      es: { url: esUrl, caCertPath: '' },
+      index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
+      identity,
+    },
+    override: undefined,
+  }
+  return { get: (name) => (name === 'configEditor' ? { configuration: () => [row] } : undefined) }
+}
+
+function postReq(payload) {
+  return Object.assign(Readable.from([Buffer.from(JSON.stringify(payload))]), { method: 'POST' })
+}
+
+test('删除：缺 confirm 直接 400，且一次都不碰 ES', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'personal' }))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /confirm/)
+    assert.equal(es.calls.length, 0, '参数不合格时不该向 ES 发请求')
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：scope 非法 400', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team_knowledge', confirm: true }))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /scope/)
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：团队记忆缺原因 400（先于权限判断）', async () => {
+  const es = await startFakeEs({ canDeleteTeam: true })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: ' ' }))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /原因/)
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：没有团队 delete 权限 → 403，且不执行删除', async () => {
+  const es = await startFakeEs({ canDeleteTeam: false, canDeletePersonal: true })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '删错' }))
+    assert.equal(res.statusCode, 403)
+    assert.match(JSON.parse(res.body).error, /团队删除权限/)
+    assert.equal(es.calls.filter((c) => c.method === 'DELETE').length, 0, '没权限不该真的发 DELETE')
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：团队删除成功 → 200 且写 memory_audit', async () => {
+  const es = await startFakeEs({ canDeleteTeam: true })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '内容过时' }))
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.deleted, true)
+    assert.equal(body.value.auditWritten, true)
+    const del = es.calls.find((c) => c.method === 'DELETE')
+    assert.ok(del, '必须真的发 DELETE')
+    assert.match(del.url, /team_knowledge\/_doc\/doc-1/)
+    const audit = es.calls.find((c) => c.url.startsWith('/memory_audit/_doc'))
+    assert.ok(audit, '团队删除必须写审计')
+    assert.equal(JSON.parse(audit.body).event, 'deleted')
+    assert.equal(JSON.parse(audit.body).reason, '内容过时')
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：删不存在的条目按幂等成功（404 → deleted=false）', async () => {
+  const es = await startFakeEs({ canDeletePersonal: true, deleteStatus: 404 })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'gone', scope: 'personal', confirm: true }))
+    assert.equal(res.statusCode, 200, '重复删除不该报错')
+    assert.equal(JSON.parse(res.body).value.deleted, false)
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：个人库删除成功，但如实报告写不了审计', async () => {
+  const es = await startFakeEs({ canDeletePersonal: true })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-2', scope: 'personal', confirm: true }))
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.deleted, true)
+    assert.equal(body.value.auditWritten, false, '个人账号没有 memory_audit 写权限，不能假装写了')
+    assert.equal(es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc')).length, 0)
+    const del = es.calls.find((c) => c.method === 'DELETE')
+    assert.match(del.url, /personal_memory_xqh\/_doc\/doc-2/)
+  } finally {
+    await es.close()
+  }
 })

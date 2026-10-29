@@ -522,6 +522,99 @@ function readJsonBody(req, limit = 64 * 1024) {
   })
 }
 
+/**
+ * POST /memories/delete：物理删除一条记忆（不可恢复）。
+ *
+ * 两种 scope 的权限模型不同：
+ *  · personal —— 本人的账号就能删自己的库（一人一账号，索引级 ACL）；
+ *  · team     —— 必须真的持有 team_knowledge 的 delete，用 `_has_privileges` 现问，不认配置声明。
+ *
+ * 团队删除要求填原因并写 `memory_audit`；个人删除写不了审计（个人账号没有 memory_audit 的写权限），
+ * 响应里如实返回 auditWritten=false + 原因，不假装留痕。
+ */
+async function handleDeleteMemory(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  const esId = str(input.esId).trim()
+  const scope = str(input.scope).trim()
+  const reason = str(input.reason).trim()
+
+  if (esId === '') return json(res, 400, { ok: false, error: '缺少 esId（要用 ES 主键，不是给人看的 memory_id）' })
+  if (scope !== 'personal' && scope !== 'team') {
+    return json(res, 400, { ok: false, error: 'scope 只能是 personal 或 team' })
+  }
+  // 物理删除不可恢复：必须显式确认，且不做「下次不再提示」
+  if (input.confirm !== true) {
+    return json(res, 400, { ok: false, error: '缺少 confirm:true（删除不可恢复，要显式确认）' })
+  }
+  if (scope === 'team' && reason === '') {
+    return json(res, 400, { ok: false, error: '删除团队记忆必须填写原因（会写进 memory_audit）' })
+  }
+
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const target = scope === 'team' ? names.team : names.personal
+
+  // 权限前置：个人也问一次。理由同上——配置说能不算数，ES 说能才算
+  const rights = await probeDeleteRights(ctx)
+  const allowed = scope === 'team' ? rights.team : rights.personal
+  if (!allowed) {
+    return json(res, 403, {
+      ok: false,
+      error:
+        scope === 'team'
+          ? '没有团队删除权限（team_knowledge 的 delete 不在你的角色里）'
+          : `没有个人库删除权限${rights.note === '' ? '' : `：${rights.note}`}`,
+    })
+  }
+
+  const now = new Date().toISOString()
+  const actor = `panel:${str(config.identity?.userId) || 'unknown'}`
+  let deleted = true
+  try {
+    await client.del(target, esId, { refresh: 'wait_for' })
+  } catch (error) {
+    if (error?.status === 404) {
+      // 本来就不存在 = 目标状态已达成，按幂等成功算（重复点两次不该报错）
+      deleted = false
+    } else {
+      throw error
+    }
+  }
+
+  let auditWritten = false
+  let auditError = ''
+  if (scope === 'team') {
+    try {
+      await client.index(names.audit, {
+        event: 'deleted',
+        actor,
+        at: now,
+        subject_type: 'team_doc',
+        subject_id: esId,
+        team_doc_id: esId,
+        reason,
+      }, { refresh: 'wait_for' })
+      auditWritten = true
+    } catch (error) {
+      auditError = String(error?.message ?? error).slice(0, 200)
+      console.error(`[memory-es-panel] 删除审计写入失败 ${esId}: ${auditError}`)
+    }
+  } else {
+    auditError = '个人库删除无法写 memory_audit（个人账号没有该索引的写权限）'
+  }
+
+  console.error(`[memory-es-panel] 删除 ${scope} esId=${esId} deleted=${deleted} audit=${auditWritten} actor=${actor}`)
+  json(res, 200, {
+    ok: true,
+    value: { esId, scope, deleted, auditWritten, auditError, at: now },
+  })
+}
+
 /** 待裁决列表：读团队库（reader 有 team 读权限），连同冲突对象一起返回 */
 async function handlePending(ctx, res, url) {
   const configRow = findEntryRow(ctx)
@@ -841,17 +934,49 @@ async function handleConfigWrite(ctx, res, req) {
   })
 }
 
+/**
+ * 探测「本人能不能删」：直接问 ES 的 `_has_privileges`，不看配置里的 teamWrite 声明。
+ *
+ * 为什么不信配置：teamWrite 只是"这个账号被设计成团队写"，而实际角色可能没给到（比如
+ * 重跑 init-user 之前建的账号）。免费版 ES 没有安全审计日志，本人权限只有 ES 自己说得准。
+ * 探测失败（旧版 ES、账号无该接口）一律按"不能删"处理，并带回原因让界面能解释。
+ */
+async function probeDeleteRights(ctx) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return { personal: false, team: false, note: configRow.error }
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  try {
+    const [personal, team] = await Promise.all([
+      client.hasIndexPrivileges(names.personal, ['delete']),
+      client.hasIndexPrivileges(names.team, ['delete']),
+    ])
+    return {
+      personal: personal?.has_all_requested === true,
+      team: team?.has_all_requested === true,
+      note: '',
+    }
+  } catch (error) {
+    return { personal: false, team: false, note: `权限探测失败：${String(error?.message ?? error)}`.slice(0, 240) }
+  }
+}
+
 /** GET /capabilities：当前部署能做到什么（前端据此决定显示哪些标签、哪些按钮可点） */
 async function handleCapabilities(ctx, res) {
   const configRow = findEntryRow(ctx)
   const value = configRow.ok ? configRow.value : null
   const canReview = Boolean(value && canReviewTeam(value.identity))
+  const del = await probeDeleteRights(ctx)
   json(res, 200, {
     ok: true,
     value: {
       // 审核 = 写团队库的能力；没有整理身份就是只读部署
       canReview,
       canMaintain: cliAvailable(),
+      // 删除按钮的显示条件：个人库问本人，团队库额外要求 team_knowledge 的 delete
+      canDeletePersonal: del.personal,
+      canDeleteTeam: del.team,
+      deleteProbe: del.note,
       // 让界面能说明"你现在是什么身份"，而不是让人猜按钮为什么灰
       role: canReview ? 'reviewer' : 'reader',
       userId: value?.identity?.userId ?? '',
@@ -1050,6 +1175,8 @@ async function handle(ctx, req, res) {
     if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
     if (path === '/capabilities' && req.method === 'GET') return await handleCapabilities(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
+    // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
+    if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
     }
@@ -1304,7 +1431,10 @@ async function selfTest(ctx) {
     let capsInfo = `HTTP ${capsRes.status}`
     try {
       const body = JSON.parse(capsRes.body)
-      capsInfo = body.ok ? `role=${body.value?.role} canReview=${body.value?.canReview}` : `err ${body.error}`
+      // 删除权限也打出来：部署后看这一行就知道"该看到删除按钮的账号是否真的探测到了"
+      capsInfo = body.ok
+        ? `role=${body.value?.role} canReview=${body.value?.canReview} canDelete个人=${body.value?.canDeletePersonal} canDelete团队=${body.value?.canDeleteTeam}`
+        : `err ${body.error}`
     } catch {
       capsInfo = `HTTP ${capsRes.status} 非 JSON`
     }
@@ -1361,10 +1491,12 @@ export {
   entryLabels,
   findEntryRow,
   handleCapabilities,
+  handleDeleteMemory,
   handleReviewAction,
   indexNames,
   mergeConfig,
   pendingQuery,
+  probeDeleteRights,
   projectHit,
 }
 

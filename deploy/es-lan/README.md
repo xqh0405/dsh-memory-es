@@ -69,6 +69,11 @@ CA `certs/ca.crt`（分发给客户端，配 `NODE_EXTRA_CA_CERTS` / `--cacert`�
 
 `memory_audit` 刻意不给 delete：审计是治理证据；过期清理走 `scripts/prune-audit.sh`（elastic 身份）。
 
+面板「记忆浏览」里的删除是**物理删除**（不可恢复）：个人记忆一律显示删除按钮；团队记忆要真的持有
+`team_knowledge` 的 delete 才显示（后端问 ES 的 `_has_privileges`，不看配置里的 `teamWrite` 声明），
+并且必须填原因、写 `memory_audit`。个人删除写不了审计（个人账号没有该索引写权限），接口会如实返回
+`auditWritten=false`。细节见开发文档 §F.2.1。
+
 初始化顺序（全部幂等）：
 
 ```bash

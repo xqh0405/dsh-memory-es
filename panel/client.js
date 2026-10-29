@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'perm-574db8'
+    const BUILD = 'del-20261029'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -55,6 +55,16 @@ window.__ModuleLoader__.load({
       colStatus: '状态',
       colUpdated: '更新时间',
       detail: '详情',
+      delBtn: '删除',
+      delTitle: '删除这条记忆',
+      delIrreversible: '物理删除，不可恢复',
+      delReasonPlaceholder: '删除原因（团队记忆必填，会写进审计）',
+      delReasonRequired: '团队记忆必须填写删除原因',
+      delConfirm: '确认删除',
+      delCancel: '取消',
+      delBusy: '删除中…',
+      delDone: '已删除（个人库写不了审计）',
+      delDoneAudited: '已删除，并已写入审计',
       copy: '复制',
       copyContent: '复制内容',
       copyId: '复制 ID',
@@ -177,6 +187,16 @@ window.__ModuleLoader__.load({
       colStatus: 'Status',
       colUpdated: 'Updated',
       detail: 'Detail',
+      delBtn: 'Delete',
+      delTitle: 'Delete this memory',
+      delIrreversible: 'Permanent deletion, cannot be undone',
+      delReasonPlaceholder: 'Reason (required for team memory, written to audit)',
+      delReasonRequired: 'A reason is required for team memory',
+      delConfirm: 'Confirm delete',
+      delCancel: 'Cancel',
+      delBusy: 'Deleting…',
+      delDone: 'Deleted (no audit for personal memory)',
+      delDoneAudited: 'Deleted and audited',
       copy: 'Copy',
       copyContent: 'Copy content',
       copyId: 'Copy ID',
@@ -1044,7 +1064,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 记忆浏览 ─────────────────────────────────────────────────────────
-    function Browse({ t }) {
+    function Browse({ t, caps }) {
       const [scope, setScope] = React.useState('both')
       const [query, setQuery] = React.useState('')
       const [status, setStatus] = React.useState('active')
@@ -1054,6 +1074,12 @@ window.__ModuleLoader__.load({
       const [page, setPage] = React.useState(0)
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       const [selected, setSelected] = React.useState(null)
+      // 删除：物理删除不可恢复，所以要点一下按钮 → 在下方展开确认区 → 再确认
+      // （个人删不需要原因；团队删必须填，后端也会写 memory_audit）
+      const [deleting, setDeleting] = React.useState(null)
+      const [delReason, setDelReason] = React.useState('')
+      const [delBusy, setDelBusy] = React.useState(false)
+      const [delResult, setDelResult] = React.useState(null)
       const size = 20
 
       // 过滤器候选值来自 /facets（后端聚合，前端不猜有哪些 domain）
@@ -1103,6 +1129,31 @@ window.__ModuleLoader__.load({
                 }, `${format(item.key)} ${item.count}`),
               ),
             )
+
+      // 删除请求：团队必须带原因（后端也会校验并写 memory_audit）
+      const doDelete = () => {
+        if (!deleting || delBusy) return
+        const target = deleting
+        const reason = delReason.trim()
+        if (target.scope === 'team' && reason === '') {
+          setDelResult({ ok: false, error: t('delReasonRequired') })
+          return
+        }
+        setDelBusy(true)
+        apiPost('/memories/delete', { esId: target.esId, scope: target.scope, confirm: true, reason })
+          .then((value) => {
+            // 团队删除写了审计；个人写不了（账号没该索引写权限），界面据实显示
+            setDelResult({ ok: true, text: value?.auditWritten ? t('delDoneAudited') : t('delDone') })
+            if (selected && selected.esId === target.esId) setSelected(null)
+            load()
+            window.setTimeout(() => {
+              setDeleting(null)
+              setDelResult(null)
+            }, 1200)
+          })
+          .catch((error) => setDelResult({ ok: false, error: String(error.message ?? error) }))
+          .finally(() => setDelBusy(false))
+      }
 
       const data = state.data
       const rows = data?.rows ?? []
@@ -1211,7 +1262,22 @@ window.__ModuleLoader__.load({
                           ),
                           h('td', { style: { ...S.td, ...S.mono } }, shortTime(row.updatedAt)),
                           h('td', { style: S.td },
-                            h('button', { type: 'button', style: S.btn, onClick: () => setSelected(row) }, t('detail')),
+                            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                              h('button', { type: 'button', style: S.btn, onClick: () => setSelected(row) }, t('detail')),
+                              // 个人记忆的删除按钮一律显示（本人的库本人能删）；
+                              // 团队记忆要真持有 team_knowledge 的 delete 才出现——由后端问 ES 得出
+                              row.scope === 'personal' || caps?.canDeleteTeam === true
+                                ? h('button', {
+                                    type: 'button',
+                                    style: { ...S.btn, color: 'var(--dsw-alias-state-danger-primary, #d33)' },
+                                    onClick: () => {
+                                      setDelResult(null)
+                                      setDelReason('')
+                                      setDeleting(row)
+                                    },
+                                  }, t('delBtn'))
+                                : null,
+                            ),
                           ),
                         ),
                       ),
@@ -1240,6 +1306,66 @@ window.__ModuleLoader__.load({
                 }, t('next')),
               ),
             ),
+
+        deleting
+          ? h('div', {
+              style: {
+                ...S.card,
+                marginTop: 12,
+                borderLeft: '3px solid var(--dsw-alias-state-danger-primary, #d33)',
+              },
+            },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+                h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-state-danger-primary, #d33)' } }, t('delTitle')),
+                h('button', {
+                  type: 'button',
+                  style: S.btn,
+                  onClick: () => {
+                    setDeleting(null)
+                    setDelResult(null)
+                  },
+                }, t('close')),
+              ),
+              h('p', { style: { margin: '0 0 8px', fontSize: 12.5, lineHeight: 1.7, color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap' } },
+                deleting.content.length > 120 ? `${deleting.content.slice(0, 120)}…` : deleting.content),
+              h('p', { style: { margin: '0 0 8px', fontSize: 12, color: 'var(--dsw-alias-state-danger-primary, #d33)' } },
+                `${t('delIrreversible')} · ${deleting.scope === 'team' ? t('scopeTeam') : t('scopePersonal')}`),
+              deleting.scope === 'team'
+                ? h('input', {
+                    style: { ...S.input, marginBottom: 8 },
+                    placeholder: t('delReasonPlaceholder'),
+                    value: delReason,
+                    onChange: (event) => setDelReason(event.target.value),
+                  })
+                : null,
+              h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('button', {
+                  type: 'button',
+                  style: { ...S.btn, opacity: delBusy ? 0.6 : 1 },
+                  disabled: delBusy,
+                  onClick: doDelete,
+                }, delBusy ? t('delBusy') : t('delConfirm')),
+                h('button', {
+                  type: 'button',
+                  style: S.btn,
+                  onClick: () => {
+                    setDeleting(null)
+                    setDelResult(null)
+                  },
+                }, t('delCancel')),
+                delResult
+                  ? h('span', {
+                      style: {
+                        fontSize: 12,
+                        color: delResult.ok
+                          ? 'var(--dsw-alias-state-success-primary, #2a7a2a)'
+                          : 'var(--dsw-alias-state-danger-primary, #d33)',
+                      },
+                    }, delResult.ok ? delResult.text : `${t('error')}: ${delResult.error}`)
+                  : null,
+              ),
+            )
+          : null,
 
         selected
           ? h('div', { style: { ...S.card, marginTop: 12 } },
@@ -1291,12 +1417,20 @@ window.__ModuleLoader__.load({
     function MemoryPanel({ t }) {
       const [tab, setTab] = React.useState('overview')
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
-      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader' })
+      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false })
 
       React.useEffect(() => {
         apiGet('/capabilities')
-          .then((value) => setCaps({ loaded: true, canReview: Boolean(value.canReview), canMaintain: Boolean(value.canMaintain), role: value.role ?? '' }))
-          .catch(() => setCaps({ loaded: true, canReview: false, canMaintain: false, role: 'reader' }))
+          .then((value) => setCaps({
+            loaded: true,
+            canReview: Boolean(value.canReview),
+            canMaintain: Boolean(value.canMaintain),
+            role: value.role ?? '',
+            // 删除权限由后端问 ES 的 _has_privileges 得出，不是看配置声明
+            canDeletePersonal: Boolean(value.canDeletePersonal),
+            canDeleteTeam: Boolean(value.canDeleteTeam),
+          }))
+          .catch(() => setCaps({ loaded: true, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false }))
       }, [])
       const [overview, setOverview] = React.useState({ loading: true, error: '', data: null })
 
@@ -1353,7 +1487,7 @@ window.__ModuleLoader__.load({
               onRetry: loadOverview,
               onOpenBrowse: () => setTab('browse'),
             })
-          : h(Browse, { t }),
+          : h(Browse, { t, caps }),
       )
     }
 

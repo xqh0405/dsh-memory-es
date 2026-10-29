@@ -6,8 +6,12 @@
  *
  * 约束（与主插件同源）：
  *  · 永不 `rejectUnauthorized: false`：自签 CA 由 `caCertPath` 读进来校验；
- *  · 读侧只做 `_search` / `_count`；写侧（审核动作、自检种子）只有 `_update` / `_doc`，
- *    且必须用整理身份 —— 面板自己没有集群级权限，不碰 `_cluster/*`、`_cat/*`。
+ *  · 读侧只做 `_search` / `_count`；写侧只有 `_update` / `_doc` / `_delete`：
+ *    审核动作与自检种子用 `_update`/`_doc`，删除按钮用 `_delete`。
+ *    面板自己没有集群级权限，不碰 `_cluster/*`、`_cat/*`。
+ *  · `_security/user/_has_privileges` 是唯一例外：它只问「**我自己**对这个索引有没有这个权限」，
+ *    不需要 manage_security。删除按钮该不该出现必须靠它——配置里的 teamWrite 只是声明，
+ *    可能写 true 而账号实际没被授权（2026-10-29 在 125 上用两种账号实测可查）。
  */
 import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
@@ -83,7 +87,10 @@ export function createReadClient(resolveConfig) {
       })
       if (res.status >= 400) {
         const detail = res.text.slice(0, 300)
-        throw new Error(`ES ${res.status}: ${detail}`)
+        // 状态码必须带出来：删除要区分 404（本来就不存在，按幂等成功算）和 403（没权限）
+        const error = new Error(`ES ${res.status}: ${detail}`)
+        error.status = res.status
+        throw error
       }
       return res.text === '' ? {} : JSON.parse(res.text)
     } finally {
@@ -94,6 +101,20 @@ export function createReadClient(resolveConfig) {
   return {
     search: (index, body) => call(`/${encodeURIComponent(index)}/_search`, { method: 'POST', body }),
     count: (index) => call(`/${encodeURIComponent(index)}/_count`),
+    /**
+     * 问 ES「本人对这个索引有没有这些权限」。返回 `{has_all_requested, index:{...}}`。
+     * 失败会抛错，调用方按「没有权限」处理——宁可少给一个按钮，也不给一个点了 403 的按钮。
+     */
+    hasIndexPrivileges: (index, privileges) =>
+      call('/_security/user/_has_privileges', {
+        method: 'POST',
+        body: { index: [{ names: [index], privileges }] },
+      }),
+    /** 物理删除一条文档。404 表示本来就不存在，由调用方决定算不算成功 */
+    del: (index, id, options = {}) => {
+      const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
+      return call(`/${encodeURIComponent(index)}/_doc/${encodeURIComponent(id)}${query}`, { method: 'DELETE' })
+    },
     /** 部分更新（审核动作用；需要 index 权限，只有整理身份有） */
     update: (index, id, doc, options = {}) => {
       const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
