@@ -62,6 +62,7 @@ services:
     #   ⚠️ 新增成员时在这里补一个网络，否则他只能走宿主 IP、且只在他自己机器上可用。
     networks:
       - default
+      - dsh-test
       - dsh-xqh
       - dsh-chencan
       - dsh-hongzhihui
@@ -75,7 +76,11 @@ services:
 networks:
   default:
     name: dsh-es_default
-  # 下面 9 个都是各 DSH 容器的 compose 项目网络，必须已存在
+  # 下面这些是各 DSH 容器的 compose 项目网络，必须已存在。
+  # 新增成员容器时必须在这里补一条，否则插件报 getaddrinfo EAI_AGAIN dsh-es
+  # （2026-10-29 发现 dsh-test 就是漏了这一条）。改完要 up -d 重建 ES 才生效；
+  # 不想重建时可先跑 scripts/es-attach-networks.sh 做运行时 connect（幂等）。
+  dsh-test:         { name: dsh-test_default,         external: true }
   dsh-xqh:          { name: dsh-xqh_default,          external: true }
   dsh-chencan:      { name: dsh-chencan_default,      external: true }
   dsh-hongzhihui:   { name: dsh-hongzhihui_default,   external: true }

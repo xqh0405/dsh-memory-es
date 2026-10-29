@@ -27,8 +27,17 @@
 于是变成「跨 bridge 转发」，被 docker 的 `DOCKER-ISOLATION` 丢掉（实测超时 133s）。
 而 11434 那种直接监听宿主的端口走 INPUT 链，是通的 —— 两条路径不同，别互相推断。
 
-所以 ES 容器除了自己的 `dsh-es_default`，还加入了每个成员容器所在的网络
-（compose 里的 `networks:` 列表）。**新增成员时必须在这里补一个网络**。
+所以 ES 容器除了自己的 `dsh-es_default`，还以 `external: true` 的方式加入每个成员容器的
+`<容器名>_default`（见 `docker-compose.yml` 的 `networks:`）。**新增成员容器必须在那里补一条**，
+否则插件报 `getaddrinfo EAI_AGAIN dsh-es`——`dsh-test` 2026-10-29 就是漏了这条，看起来像 DNS 坏了。
+
+改完 compose 要 `docker-compose up -d` 重建 ES 才生效（数据在 `data/` 卷里，安全）。
+不想为一条网络连接重启 ES，可以跑一次 `scripts/es-attach-networks.sh` 做运行时 connect；
+它是幂等的，也能当作「声明与现状是否一致」的校验。⚠️ 运行时 connect **不写进 compose**，
+ES 重建后就丢，重建完再跑一次脚本。
+
+另一类「ES 不可达」是缺 CA：容器 home 卷里没有 `/home/node/ca-memory-es.crt` 时插件报 `ENOENT`。
+同一个脚本会把该文件补进所有引用它的容器。
 
 ### 125 的防火墙补丁（改过 `/etc/ufw/after.rules`）
 
