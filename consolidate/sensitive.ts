@@ -45,7 +45,11 @@ const RULES: Array<{ kind: SensitiveKind; pattern: RegExp; note: string }> = [
   {
     kind: 'password_assignment',
     // password=xxx / passwd: xxx / pwd = "xxx"（xxx 至少 4 位、且不是占位符）
-    pattern: /\b(?:pass(?:word|wd)?|pwd)\s*[=:]\s*["']?(?!\*+|x{4,}|<|\$\{|\{\{|change-?me|example)[^\s"',;]{4,}/gi,
+    //
+    // 刻意**不匹配裸 `pass`**：测试脚本里 `PASS=17 项`是"通过数"，
+    // 2026-10-29 就因为这条把 3 条 lottery-cloud 复盘误判成密码泄露（实测内容里只有 PASS=8/14）。
+    // 宁可少拦一种写法，也别让「跑了几项测试」变成敏感命中。
+    pattern: /\b(?:password|passwd|passphrase|pwd)\s*[=:]\s*["']?(?!\*+|x{4,}|<|\$\{|\{\{|change-?me|example)[^\s"',;]{4,}/gi,
     note: '密码赋值',
   },
 ]

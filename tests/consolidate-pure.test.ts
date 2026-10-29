@@ -46,6 +46,25 @@ describe('scanSensitive', () => {
     }
   })
 
+  test('裸 PASS= 是测试通过计数，不判密码赋值（2026-10-29 回归）', () => {
+    // 实测把 3 条 lottery-cloud 复盘误判成敏感命中，正文里只有「PASS=8/14 项」这种测试计数
+    for (const text of ['验证 PASS=17 项', 'Mockito PASS=8/14', '全部 PASS=8；1748 条待兑奖']) {
+      assert.equal(
+        scanSensitive(text).some((hit) => hit.kind === 'password_assignment'),
+        false,
+        `不该命中：${text}`,
+      )
+    }
+    // 真正的 password/passwd/pwd 赋值仍然要命中
+    for (const text of ['passwd=RealPw123', 'pwd: abcdefgh']) {
+      assert.equal(
+        scanSensitive(text).some((hit) => hit.kind === 'password_assignment'),
+        true,
+        `应当命中：${text}`,
+      )
+    }
+  })
+
   test('占位符不误报（change-me / xxx / ${VAR} / 全星号）', () => {
     for (const text of ['password=change-me', 'password=xxxxx', 'password=${DB_PASS}', 'password=******']) {
       assert.deepEqual(scanSensitive(text), [], `不该命中：${text}`)
