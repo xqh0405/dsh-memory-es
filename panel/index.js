@@ -279,6 +279,17 @@ function requireAdmin(ctx, res) {
   return configRow.value
 }
 
+/**
+ * 用户 id 白名单。索引名由 `personal_memory_<uid>` 拼出来，必须挡住 `*` `?` `../`
+ * 这类会改变搜索范围的字符——否则管理员传 `user=*` 就等价于跨所有索引扫一遍。
+ */
+const USER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
+function normalizeUserId(value) {
+  const userId = str(value).trim()
+  if (userId === '') return null
+  return USER_ID_PATTERN.test(userId) ? userId : null
+}
+
 /** 待裁决口径（概览计数与审核台队列共用，防止两处漂移） */
 function pendingQuery() {
   return { bool: { filter: [{ term: { review_state: 'pending' } }, { term: { status: 'active' } }] } }
@@ -453,6 +464,9 @@ async function handleMemories(ctx, res, url) {
   // 普通账号传了 user 也不生效，永远只看自己。
   const canAdmin = canReviewTeam(config.identity)
   const wantUser = (params.get('user') ?? '').trim()
+  if (canAdmin && wantUser !== '' && normalizeUserId(wantUser) === null) {
+    return json(res, 400, { ok: false, error: 'user 参数不合法（只允许字母、数字、_ 和 -）' })
+  }
   const targetUser = canAdmin && wantUser !== '' ? wantUser : config.identity.userId
   const personalIndex =
     targetUser === config.identity.userId ? names.personal : `${config.index.personalPrefix}${targetUser}`
@@ -1114,17 +1128,27 @@ async function handleMirrorFile(ctx, res, url) {
 const STATE_DIR = '/data/dsh/memory-es-state'
 const MIRROR_DIR = '/data/dsh/memory-mirror'
 
-async function handleMaintenanceGet(ctx, res) {
+async function handleMaintenanceGet(ctx, res, url) {
   // 维护页整体收拢到管理员：普通成员的维护 tab 也不再显示（前端），接口同样拦住
   const config = requireAdmin(ctx, res)
   if (!config) return
   const names = indexNames(config)
   const client = createReadClient(() => resolveClientConfig(ctx))
+
+  // 统计跟着"目标用户"走：否则选了别人整理，上面还显示自己的 267 条，很容易误读
+  const wantUser = (url?.searchParams.get('user') ?? '').trim()
+  if (wantUser !== '' && normalizeUserId(wantUser) === null) {
+    return json(res, 400, { ok: false, error: 'user 参数不合法（只允许字母、数字、_ 和 -）' })
+  }
+  const targetUser = wantUser || config.identity.userId
+  const personalIndex =
+    targetUser === config.identity.userId ? names.personal : `${config.index.personalPrefix}${targetUser}`
+
   const { existsSync, readdirSync, readFileSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
 
   const counts = await Promise.all([
-    client.search(names.personal, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
+    client.search(personalIndex, { size: 0, query: { term: { status: 'active' } }, track_total_hits: true })
       .then((r) => num(r.hits?.total?.value)).catch(() => -1),
     client.search(names.team, { size: 0, query: teamReviewFilter(false), track_total_hits: true })
       .then((r) => num(r.hits?.total?.value)).catch(() => -1),
@@ -1161,6 +1185,9 @@ async function handleMaintenanceGet(ctx, res) {
     ok: true,
     value: {
       counts: { personal: counts[0], team: counts[1], pending: counts[2] },
+      // 统计对应的用户（前端用来确认"这些数字是谁的"）
+      userId: targetUser,
+      viewingOther: targetUser !== config.identity.userId,
       lastRunAt,
       pendingCount,
       mirror,
@@ -1194,8 +1221,12 @@ async function handleConsolidate(ctx, res, req) {
   }
 
   // 目标用户：管理员可以整理别人的个人记忆（CLI 的 --user 决定扫哪个 personal 索引）。
-  // 不传或传自己 = 整理自己那份。
-  const targetUser = str(body.value?.userId).trim() || config.identity.userId
+  // 不传或传自己 = 整理自己那份。user 会拼进索引名，必须过白名单。
+  const rawUser = str(body.value?.userId).trim()
+  if (rawUser !== '' && normalizeUserId(rawUser) === null) {
+    return json(res, 400, { ok: false, error: 'userId 不合法（只允许字母、数字、_ 和 -）' })
+  }
+  const targetUser = rawUser || config.identity.userId
   const args = apply ? ['--auto', '--apply'] : ['--auto']
   if (targetUser !== config.identity.userId) args.push('--user', targetUser)
 
@@ -1218,10 +1249,17 @@ async function handleExport(ctx, res, req) {
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const config = requireAdmin(ctx, res)
   if (!config) return
+  // 先校验参数再查环境：参数不合法就不该因为"CLI 没部署"而返回 503
+  // dir 会原样传给 CLI 的 --export，必须限制在镜像目录内：
+  // 否则管理员（或拿到管理员会话的人）能把 Markdown 写到容器里任意可写路径。
+  const requested = typeof body.value?.dir === 'string' ? body.value.dir.trim() : ''
+  const dir = requested === '' ? MIRROR_DIR : requested
+  if (dir !== MIRROR_DIR && !dir.startsWith(`${MIRROR_DIR}/`)) {
+    return json(res, 400, { ok: false, error: `导出目录必须位于 ${MIRROR_DIR} 下` })
+  }
   if (!cliAvailable()) {
     return json(res, 503, { ok: false, error: 'CLI 源码未随面板部署，无法导出' })
   }
-  const dir = typeof body.value?.dir === 'string' && body.value.dir !== '' ? body.value.dir : MIRROR_DIR
   const result = await runCli(config, ['--export', dir], { timeoutMs: 60_000 })
   json(res, 200, {
     ok: true,
@@ -1238,7 +1276,7 @@ async function handle(ctx, req, res) {
     const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw)$/.exec(path)
     if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
     if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
-    if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res)
+    if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res, url)
     if (path === '/maintenance/mirror' && req.method === 'GET') return await handleMirrorFile(ctx, res, url)
     if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
     if (path === '/capabilities' && req.method === 'GET') return await handleCapabilities(ctx, res)
@@ -1481,7 +1519,12 @@ async function selfTest(ctx) {
     let mirrorInfo = `HTTP ${mirrorRes.status}`
     try {
       const body = JSON.parse(mirrorRes.body)
-      mirrorInfo = body.ok ? `ok ${body.value?.size ?? 0}B` : `err ${body.error}`
+      // 非管理员的 403 是**正常**状态：镜像属于维护功能，不该把它记成自检失败
+      mirrorInfo = mirrorRes.status === 403
+        ? 'skip(非管理员)'
+        : body.ok
+          ? `ok ${body.value?.size ?? 0}B`
+          : `err ${body.error}`
     } catch {
       mirrorInfo = `HTTP ${mirrorRes.status} 非 JSON`
     }

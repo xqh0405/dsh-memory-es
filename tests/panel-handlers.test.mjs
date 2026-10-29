@@ -537,3 +537,58 @@ test('记忆浏览：普通成员带 user 也只能看自己', async () => {
     await es.close()
   }
 })
+
+// ── 入参校验：user 白名单 / export 目录白名单（2026-10-29 审计修复）──────
+const { handleExport } = panel
+
+test('记忆浏览：user 传通配符 → 400（不给拼索引名的机会）', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMemories(ctxWithEs(SINGLE, es.url), res, new URL('http://x/memories?user=*'))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /不合法/)
+    assert.equal(es.calls.length, 0, '参数不合格不该碰 ES')
+  } finally {
+    await es.close()
+  }
+})
+
+test('记忆浏览：user 带路径分隔符 → 400', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMemories(ctxWithEs(SINGLE, es.url), res, new URL('http://x/memories?user=../admin'))
+    assert.equal(res.statusCode, 400)
+  } finally {
+    await es.close()
+  }
+})
+
+test('导出：目录越界 → 400（不能写任意路径）', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleExport(ctxWithEs(SINGLE, es.url), res, postReq({ dir: '/etc/cron.d' }))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /镜像目录|必须位于/)
+  } finally {
+    await es.close()
+  }
+})
+
+test('维护概览：带 user 时统计那个人的个人库', async () => {
+  const es = await startFakeEs()
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(SINGLE, es.url), res, new URL('http://x/maintenance?user=laoliu'))
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.userId, 'laoliu')
+    assert.equal(body.value.viewingOther, true)
+    assert.ok(es.calls.some((c) => c.url.startsWith('/personal_memory_laoliu/_search')), '统计要落到目标用户的索引')
+    assert.ok(!es.calls.some((c) => c.url.startsWith('/personal_memory_xqh/_search')))
+  } finally {
+    await es.close()
+  }
+})

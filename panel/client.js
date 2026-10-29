@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'admin-20261029'
+    const BUILD = 'admin2-20261029'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -102,6 +102,7 @@ window.__ModuleLoader__.load({
       viewingOther: '正在查看别人的个人记忆',
       readOnlyOther: '只读，不能删除',
       maintTargetUser: '目标用户',
+      maintStatScope: '统计对象',
       maintOtherWarn: '整理别人的记忆会改写对方的 promote_state（标记已处理），不影响其检索与使用',
       maintExport: 'Markdown 镜像',
       maintExportNow: '立即导出',
@@ -291,6 +292,7 @@ window.__ModuleLoader__.load({
       viewingOther: 'Viewing another user’s personal memory',
       readOnlyOther: 'read-only, delete disabled',
       maintTargetUser: 'Target user',
+      maintStatScope: 'Stats for',
       maintOtherWarn: 'Consolidating another user’s memory rewrites their promote_state (marked as processed); search and usage are unaffected',
       maintExport: 'Markdown mirror',
     }
@@ -644,12 +646,13 @@ window.__ModuleLoader__.load({
           .catch(() => setUsers([]))
       }, [caps?.canAdmin])
 
+      // 统计要跟着"目标用户"走：选了别人整理，上面的个人/团队计数也得是那个人的
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
-        apiGet('/maintenance')
+        apiGet('/maintenance', targetUser === '' ? undefined : { user: targetUser })
           .then((data) => setState({ loading: false, error: '', data }))
           .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
-      }, [])
+      }, [targetUser])
 
       React.useEffect(() => {
         load()
@@ -721,6 +724,7 @@ window.__ModuleLoader__.load({
             caps?.canAdmin && targetUser !== ''
               ? h('p', { style: { margin: '0 0 8px 118px', fontSize: 11.5, lineHeight: 1.6, color: 'var(--dsw-alias-state-warn-primary)' } }, t('maintOtherWarn'))
               : null,
+            line(t('maintStatScope'), data.userId || '-'),
             line(t('maintLastRun'), data.lastRunAt ? shortTime(data.lastRunAt) : t('maintNever')),
             line(t('labelPersonal'), data.counts.personal),
             line(t('labelTeam'), data.counts.team),
