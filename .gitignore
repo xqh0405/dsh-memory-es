@@ -208,3 +208,9 @@ knowledge/
 # 格式见 tests/eval/queries.example.jsonl
 tests/eval/queries.jsonl
 tests/eval/baseline.json
+
+# 125 容器聊天巡检产物（用户 2026-10-30 明确要求：永不入库）：
+# 巡检稿 out/*.md 是各人真实会话记录、cand-*.json 是各人记忆正文，
+# 都「跟人有关」且 github 远端是 public —— 一律只留本地；
+# ingest.ts / extract.py 同目录共存，整目录一起忽略最省心。
+.chat-inspect/
