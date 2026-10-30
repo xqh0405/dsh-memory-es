@@ -217,3 +217,34 @@ describe('runTraitsJob：编排与降级', () => {
     assert.equal(result.written, 0)
   })
 })
+
+describe('偏好类证据：一条即可支撑（阶段 7.2 修正）', () => {
+  test('preference 类型单条证据能通过', () => {
+    const types = new Map([['p1', 'preference'], ['f1', 'fact']])
+    const out = parseTraitsOutput(
+      '[{"content":"你希望提交合并成一次","evidence_ids":["p1"]}]',
+      new Set(['p1', 'f1']),
+      types,
+    )
+    assert.equal(out.length, 1)
+    assert.deepEqual(out[0]?.evidence_ids, ['p1'])
+  })
+
+  test('fact 类型单条证据仍然被拒（必须两条互相印证）', () => {
+    const types = new Map([['f1', 'fact']])
+    const out = parseTraitsOutput(
+      '[{"content":"你倾向于先验证","evidence_ids":["f1"]}]',
+      new Set(['f1']),
+      types,
+    )
+    assert.equal(out.length, 0)
+  })
+
+  test('不传 sourceTypes 时退回严格模式（向后兼容）', () => {
+    const out = parseTraitsOutput(
+      '[{"content":"x","evidence_ids":["a"]}]',
+      new Set(['a']),
+    )
+    assert.equal(out.length, 0)
+  })
+})

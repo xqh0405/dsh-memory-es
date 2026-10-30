@@ -46,7 +46,7 @@ export const TRAITS_SYSTEM = [
   '',
   '硬性要求：',
   '1. 每条必须能独立成立，读者不知道上下文也能看懂；不要写「上面提到的」「这些记忆里」。',
-  '2. 每条必须由至少 2 条记忆支撑，并给出支撑条目的 id。',
+  '2. 每条必须由至少 2 条记忆支撑，并给出支撑条目的 id。**例外**：素材里标注 (preference) 的条目是用户明确表达的偏好与规矩，它本身就是直接证据，1 条即可支撑；其它类型（fact/decision/context）仍需至少 2 条互相印证——那才叫归纳，否则只是复述。',
   '3. 用第二人称写（"你倾向于……"）或中性陈述，不要写"用户"。',
   `4. 每条不超过 ${TRAIT_MAX_CHARS} 字，一次最多 ${TRAITS_MAX_OUTPUT} 条。`,
   '5. 如果看不出任何稳定的模式，输出空数组 []。**宁可空，不要凑**。',
@@ -94,7 +94,11 @@ export function buildTraitsPrompt(sources: readonly TraitSource[], days: number)
  * 校验比 distill 严：`content` 必须非空且不超长、`evidence_ids` 至少两条且必须
  * **真的出现在源集合里**（防止模型编造 id）。
  */
-export function parseTraitsOutput(text: string, sourceIds?: ReadonlySet<string>): TraitCandidate[] {
+export function parseTraitsOutput(
+  text: string,
+  sourceIds?: ReadonlySet<string>,
+  sourceTypes?: ReadonlyMap<string, string>,
+): TraitCandidate[] {
   const start = text.indexOf('[')
   const end = text.lastIndexOf(']')
   if (start === -1 || end <= start) return []
@@ -119,7 +123,11 @@ export function parseTraitsOutput(text: string, sourceIds?: ReadonlySet<string>)
       .map((v) => v.trim())
     // 去重：同一条证据重复三次不算三条支撑
     const unique = [...new Set(ids)]
-    if (unique.length < TRAIT_MIN_EVIDENCE) continue
+    // 偏好类记忆是"用户说过一次的规矩"，本来就只存一份：要求两条会把它们全筛掉
+    // （2026-10-30 实测：三条真实偏好各自只有一个证据，模型据规则输出空数组）。
+    const hasPreferenceEvidence = unique.some((id) => sourceTypes?.get(id) === 'preference')
+    const minEvidence = hasPreferenceEvidence ? 1 : TRAIT_MIN_EVIDENCE
+    if (unique.length < minEvidence) continue
     if (sourceIds !== undefined && unique.some((id) => !sourceIds.has(id))) continue
     out.push({ content, evidence_ids: unique })
     if (out.length >= TRAITS_MAX_OUTPUT) break
@@ -235,7 +243,8 @@ export async function runTraitsJob(
 
   const raw = await input.summarize(buildTraitsPrompt(sources, input.days))
   const sourceIds = new Set(sources.map((s) => s.memory_id))
-  const candidates = parseTraitsOutput(raw, sourceIds)
+  const sourceTypes = new Map(sources.map((s) => [s.memory_id, s.memory_type]))
+  const candidates = parseTraitsOutput(raw, sourceIds, sourceTypes)
   log({ tool: 'traits', event: 'parsed', sources: sources.length, candidates: candidates.length, chars: raw.length })
 
   if (input.dryRun === true) {
