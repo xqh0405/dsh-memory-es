@@ -776,7 +776,9 @@ async function handleIdentityReview(ctx, res, req) {
   const action = str(body.value.action)
   const note = str(body.value.note)
   if (memoryId === '') return json(res, 400, { ok: false, error: '缺少 memory_id' })
-  if (action !== 'approve' && action !== 'reject') return json(res, 400, { ok: false, error: 'action 只能是 approve / reject' })
+  if (action !== 'approve' && action !== 'reject' && action !== 'anchor') {
+    return json(res, 400, { ok: false, error: 'action 只能是 approve / reject / anchor' })
+  }
 
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -795,6 +797,16 @@ async function handleIdentityReview(ctx, res, req) {
   if (!src) return json(res, 404, { ok: false, error: `找不到条目 ${memoryId}` })
   if (str(src.memory_type) !== 'identity') return json(res, 409, { ok: false, error: '这条不是 identity，不能走采纳闸门' })
   if (str(src.status) !== 'pending') return json(res, 409, { ok: false, error: `这条当前状态是 ${str(src.status)}（只有 pending 能被采纳）` })
+
+  // 锚点：不改 status，只改 anchor 标志（规则与 src/memory/review.ts 的 setAnchor 一致）
+  if (action === 'anchor') {
+    if (String(src.status) !== 'active') {
+      return json(res, 409, { ok: false, error: `只有生效中的自述能设锚点（当前 ${String(src.status)}）` })
+    }
+    const anchor = body.value.anchor !== false
+    await writer.update(names.personal, memoryId, { anchor, updated_at: new Date().toISOString() }, { refresh: 'wait_for' })
+    return json(res, 200, { ok: true, value: { memoryId, status: 'active', anchor } })
+  }
 
   const target = action === 'approve' ? 'active' : 'archived'
   const at = new Date().toISOString()
@@ -833,6 +845,88 @@ async function handleIdentityReview(ctx, res, req) {
   }
 
   return json(res, 200, { ok: true, value: { memoryId, status: target, audit } })
+}
+
+/** 生效中的自述（status=active 的 identity）+ 锚点状态（阶段 7.5） */
+async function handleIdentityActive(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '50', 10) || 50))
+  const result = await client.search(names.personal, {
+    size,
+    _source: ['memory_id', 'content', 'anchor', 'updated_at', 'supersedes'],
+    sort: [{ updated_at: 'desc' }],
+    query: { bool: { filter: [{ term: { status: 'active' } }, { term: { memory_type: 'identity' } }] } },
+  })
+  const rows = (result.hits?.hits ?? []).map((hit) => ({
+    memoryId: str(hit._source?.memory_id),
+    content: str(hit._source?.content),
+    anchor: hit._source?.anchor === true,
+    updatedAt: str(hit._source?.updated_at),
+    hasHistory: str(hit._source?.supersedes) !== '',
+  }))
+  return json(res, 200, { ok: true, value: { rows } })
+}
+
+/** 版本链（阶段 7.4）：沿 supersedes 向旧、superseded_by 向新，最多 10 跳 */
+async function handleIdentityVersions(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const memoryId = str(url.searchParams.get('memory_id'))
+  if (memoryId === '') return json(res, 400, { ok: false, error: '缺少 memory_id' })
+
+  const readOne = async (id) => {
+    const found = await client.search(names.personal, {
+      size: 1,
+      query: { bool: { filter: [{ term: { memory_id: id } }] } },
+      _source: ['memory_id', 'content', 'status', 'supersedes', 'superseded_by', 'created_at'],
+    })
+    return found.hits?.hits?.[0]?._source ?? null
+  }
+
+  const start = await readOne(memoryId)
+  if (start === null) return json(res, 200, { ok: true, value: { rows: [] } })
+
+  const versions = [{ ...start, offset: 0 }]
+  const seen = new Set([memoryId])
+
+  let cursor = start
+  for (let hop = 0; hop < 10; hop += 1) {
+    const prev = str(cursor.supersedes)
+    if (prev === '' || seen.has(prev)) break
+    const doc = await readOne(prev)
+    if (doc === null) break
+    seen.add(prev)
+    versions.unshift({ ...doc, offset: -(hop + 1) })
+    cursor = doc
+  }
+  cursor = start
+  for (let hop = 0; hop < 10; hop += 1) {
+    const next = str(cursor.superseded_by)
+    if (next === '' || seen.has(next)) break
+    const doc = await readOne(next)
+    if (doc === null) break
+    seen.add(next)
+    versions.push({ ...doc, offset: hop + 1 })
+    cursor = doc
+  }
+
+  return json(res, 200, {
+    ok: true,
+    value: {
+      rows: versions.map((v) => ({
+        memoryId: str(v.memory_id),
+        content: str(v.content),
+        status: str(v.status),
+        createdAt: str(v.created_at),
+        offset: v.offset,
+      })),
+    },
+  })
 }
 
 /** 个人审核流水（阶段 7.3 补强） */
@@ -1487,6 +1581,8 @@ async function handle(ctx, req, res) {
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
+    if (path === '/identity/active' && req.method === 'GET') return await handleIdentityActive(ctx, res, url)
+    if (path === '/identity/versions' && req.method === 'GET') return await handleIdentityVersions(ctx, res, url)
     if (path === '/config') return await handleConfigGet(ctx, res)
     return json(res, 404, { ok: false, error: `未知接口 ${path}` })
   } catch (error) {

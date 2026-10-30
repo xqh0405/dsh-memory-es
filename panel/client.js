@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'identity-ui-20261030'
+    const BUILD = 'identity-ui2-20261030'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -38,6 +38,15 @@ window.__ModuleLoader__.load({
       idAuditEmpty: '还没有审核记录。',
       idBusy: '处理中…',
       idHint: '采纳是唯一让候选生效的动作：pending 不进检索，active 才会。',
+      idActiveTitle: '生效中的自述',
+      idActiveEmpty: '还没有生效的自述。',
+      idAnchorOn: '锚点：开',
+      idAnchorOff: '设为锚点',
+      idAnchorHint: '锚点 = 提炼任务不再把它当素材，避免又归纳出一条差不多的。',
+      idHistory: '历史',
+      idHistoryTitle: '版本历史',
+      idHistoryEmpty: '没有更早的版本。',
+      idClose: '收起',
       tabConfig: '配置',
       tabMaint: '维护',
       cardPersonal: '个人记忆',
@@ -200,6 +209,15 @@ window.__ModuleLoader__.load({
       idAuditEmpty: 'No review records yet.',
       idBusy: 'Working…',
       idHint: 'Approving is the only action that makes a draft live: pending is never retrieved, active is.',
+      idActiveTitle: 'Live traits',
+      idActiveEmpty: 'No live traits yet.',
+      idAnchorOn: 'Anchor: on',
+      idAnchorOff: 'Set anchor',
+      idAnchorHint: 'Anchored traits are excluded from distillation so they are not re-derived.',
+      idHistory: 'History',
+      idHistoryTitle: 'Version history',
+      idHistoryEmpty: 'No earlier versions.',
+      idClose: 'Hide',
       tabConfig: 'Config',
       tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
@@ -1078,6 +1096,8 @@ window.__ModuleLoader__.load({
     // ── 自述：候选采纳 + 个人审核记录（阶段 7.2/7.3）────────────────────
     function Identity({ t }) {
       const [pending, setPending] = React.useState({ loading: true, rows: [], error: '' })
+      const [active, setActive] = React.useState([])
+      const [versions, setVersions] = React.useState({ id: '', rows: [] })
       const [audit, setAudit] = React.useState([])
       const [busy, setBusy] = React.useState('')
       const [note, setNote] = React.useState('')
@@ -1091,6 +1111,9 @@ window.__ModuleLoader__.load({
         apiGet('/identity/audit', { size: '10' })
           .then((value) => setAudit(Array.isArray(value.rows) ? value.rows : []))
           .catch(() => setAudit([]))
+        apiGet('/identity/active', { size: '50' })
+          .then((value) => setActive(Array.isArray(value.rows) ? value.rows : []))
+          .catch(() => setActive([]))
       }, [])
 
       React.useEffect(() => { load() }, [load])
@@ -1106,6 +1129,22 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => setDone(`${t('error')}: ${String(error.message ?? error)}`))
           .finally(() => setBusy(''))
+      }
+
+      const toggleAnchor = (row) => {
+        setBusy(row.memoryId)
+        setDone('')
+        apiPost('/identity/review', { memory_id: row.memoryId, action: 'anchor', anchor: !row.anchor })
+          .then(() => load())
+          .catch((error) => setDone(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setBusy(''))
+      }
+
+      const showVersions = (memoryId) => {
+        if (versions.id === memoryId) { setVersions({ id: '', rows: [] }); return }
+        apiGet('/identity/versions', { memory_id: memoryId })
+          .then((value) => setVersions({ id: memoryId, rows: Array.isArray(value.rows) ? value.rows : [] }))
+          .catch((error) => setDone(`${t('error')}: ${String(error.message ?? error)}`))
       }
 
       return h('div', null,
@@ -1154,6 +1193,46 @@ window.__ModuleLoader__.load({
                       ),
                     ),
                   ),
+        ),
+        h('div', { style: { ...S.card, marginTop: 12 } },
+          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } }, t('idActiveTitle')),
+          h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, t('idAnchorHint')),
+          active.length === 0
+            ? h('p', { style: { ...S.muted, marginTop: 6 } }, t('idActiveEmpty'))
+            : h('div', { style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 } },
+                active.map((row) =>
+                  h('div', {
+                    key: row.memoryId,
+                    style: { border: '1px solid var(--dsw-alias-border-1, rgba(127,127,127,.22))', borderRadius: 10, padding: 10 },
+                  },
+                    h('div', { style: { fontSize: 13, lineHeight: 1.7 } }, row.content),
+                    h('div', { style: { ...S.muted, fontSize: 12, marginTop: 4 } },
+                      `${String(row.updatedAt ?? '').replace('T', ' ').slice(0, 16)}${row.anchor ? ' · 锚点' : ''}`),
+                    h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+                      h('button', {
+                        type: 'button',
+                        style: S.btn,
+                        disabled: busy === row.memoryId,
+                        onClick: () => toggleAnchor(row),
+                      }, row.anchor ? t('idAnchorOn') : t('idAnchorOff')),
+                      row.hasHistory
+                        ? h('button', { type: 'button', style: S.btn, onClick: () => showVersions(row.memoryId) },
+                            versions.id === row.memoryId ? t('idClose') : t('idHistory'))
+                        : null,
+                    ),
+                    versions.id === row.memoryId
+                      ? h('div', { style: { marginTop: 8 } },
+                          versions.rows.length === 0
+                            ? h('p', { style: { ...S.muted, fontSize: 12 } }, t('idHistoryEmpty'))
+                            : versions.rows.map((v) =>
+                                h('div', { key: v.memoryId, style: { fontSize: 12, lineHeight: 1.8, color: 'var(--dsw-alias-label-secondary)' } },
+                                  `· [${v.status}] ${v.offset === 0 ? '← 当前' : ''} ${String(v.createdAt ?? '').slice(0, 10)} ${String(v.content ?? '').slice(0, 60)}`),
+                              ),
+                        )
+                      : null,
+                  ),
+                ),
+              ),
         ),
         h('div', { style: { ...S.card, marginTop: 12 } },
           h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } }, t('idAudit')),
