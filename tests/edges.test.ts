@@ -85,6 +85,17 @@ describe('pickNeighbors', () => {
     const picked = pickNeighbors([{ id: 'a', score: 0.123456789 }], { ...opts, minScore: 0 })
     assert.equal(picked[0]?.weight, 0.1235)
   })
+
+  test('舍入后不越过判重带：0.84996 舍成 0.85 就该被排除', () => {
+    const picked = pickNeighbors(
+      [
+        { id: 'just-under', score: 0.84996 },
+        { id: 'safe', score: 0.84994 },
+      ],
+      opts,
+    )
+    assert.deepEqual(picked, [{ id: 'safe', weight: 0.8499 }], '存的权重必须与判定一致')
+  })
 })
 
 describe('mergeEdges', () => {

@@ -59,15 +59,18 @@ export function pickNeighbors(
     const id = typeof hit.id === 'string' ? hit.id.trim() : ''
     if (id === '' || id === excludeId) continue
     if (typeof hit.score !== 'number' || !Number.isFinite(hit.score)) continue
-    if (hit.score < minScore || hit.score >= maxScore) continue
+    // 先舍入再判区间：存进去的值才代表「这条边属于哪个带」。
+    // 用原始分数判、再用舍入值存，会让 0.84996 被存成 0.85 而冒充判重带边界（实测踩过）。
+    const weight = round4(hit.score)
+    if (weight < minScore || weight >= maxScore) continue
     const seen = best.get(id)
-    if (seen === undefined || hit.score > seen) best.set(id, hit.score)
+    if (seen === undefined || weight > seen) best.set(id, weight)
   }
 
   return [...best.entries()]
     .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
     .slice(0, topK)
-    .map(([id, weight]) => ({ id, weight: round4(weight) }))
+    .map(([id, weight]) => ({ id, weight }))
 }
 
 /**
