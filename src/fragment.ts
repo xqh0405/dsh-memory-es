@@ -7,6 +7,8 @@
 
 import { createHash } from 'node:crypto'
 
+import { readEdges } from './edges.ts'
+
 /** 检索命中的最小结构（BM25 与 kNN 两路共用） */
 export interface Hit {
   /** 文档 id（ES 的 _id） */
@@ -198,6 +200,11 @@ export interface RankingConfig {
   reinforcementCap: number
   /** 两路名次一致的加成（乘性；0 = 关闭）。评测驱动，默认 0 */
   agreementBonus: number
+  /**
+   * 扩散激活强度（阶段 5.3）：`score += activationAlpha × Σ(邻居分 × 边权)`。
+   * 0 = 关闭。邻居只算**同一次检索结果集里**的，不做二次召回。
+   */
+  activationAlpha: number
 }
 
 export const DEFAULT_RANKING: RankingConfig = {
@@ -208,6 +215,7 @@ export const DEFAULT_RANKING: RankingConfig = {
   reinforcementPerHit: 0.1,
   reinforcementCap: 0.5,
   agreementBonus: 0,
+  activationAlpha: 0,
 }
 
 /**
@@ -219,6 +227,46 @@ export const IMPORTANCE_FACTORS: Readonly<Record<string, number>> = {
   critical: 1.1,
   normal: 1,
   low: 0.9,
+}
+
+/**
+ * 阶段 5.3：扩散激活。
+ *
+ * 语义：一条记忆的邻居如果**也在本次结果集里**，就把它的一部分分借给这条记忆。
+ * 只做一次传播、不迭代——迭代会放大偏差，而且排出来的名次没法解释。
+ *
+ * 为什么不做二次召回：那会让「一条相关」变成「一条相关拖出一串」，候选池失控，
+ * 而且评测集是固定的，扩池会同时抬高 hit 和噪声，掩盖真实收益。
+ *
+ * `alpha = 0` 时逐条返回原对象（评测里要求「与基线逐条一致」）。
+ */
+export function spreadActivation(hits: readonly ScopedHit[], alpha: number): ScopedHit[] {
+  if (!Number.isFinite(alpha) || alpha === 0 || hits.length < 2) return [...hits]
+
+  // 只认本次结果集里的邻居：没有出场的不算，避免「扩池」带来的假提升
+  const scores = new Map<string, number>()
+  for (const hit of hits) scores.set(hit.id, hit.fusedScore)
+
+  const boosted = hits.map((hit) => {
+    const edges = readEdges(hit.source.related)
+    if (edges.length === 0) return hit
+    let spread = 0
+    let used = 0
+    for (const edge of edges) {
+      const neighbor = scores.get(edge.id)
+      if (neighbor === undefined) continue
+      spread += neighbor * edge.weight
+      used += 1
+    }
+    if (used === 0) return hit
+    return { ...hit, fusedScore: hit.fusedScore + alpha * spread }
+  })
+
+  return boosted.sort((a, b) => {
+    if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
+    if (a.origin !== b.origin) return a.origin === 'personal' ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
 }
 
 /**

@@ -19,7 +19,7 @@ import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFil
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
-import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, type RankingConfig } from '../fragment.ts'
+import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type RankingConfig } from '../fragment.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
@@ -317,9 +317,13 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   }
 
   const mergedRaw = mergeScopes(groups, { weights: { personal: PERSONAL_WEIGHT } })
+  // 阶段 5.3：扩散激活（默认 alpha=0，原样返回）。放在乘子之前——
+  // 它属于「相关性」，乘子是后验信号。
+  const rankingCfg = deps.ranking ?? DEFAULT_RANKING
+  const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha)
   // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
   // 系数默认温和（±10% 量级），归零即完全关闭。
-  const merged = applyRanking(mergedRaw, deps.ranking ?? DEFAULT_RANKING, now)
+  const merged = applyRanking(spread, rankingCfg, now)
   const basis = `${scope === 'both' ? 'personal+team' : scope}:${degraded ? 'bm25' : 'bm25+knn'}`
 
   /**

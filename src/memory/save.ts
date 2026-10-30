@@ -25,7 +25,7 @@ import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { assertDocOwner, personalIndexFor } from './common.ts'
-import { mergeEdges, pickNeighbors, readEdges, type Edge } from './edges.ts'
+import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 
 // F3 的断言搬到 common.ts（三个写侧工具共用），这里转出保持老调用点与测试不受影响
 export { assertDocOwner } from './common.ts'

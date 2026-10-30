@@ -8,6 +8,7 @@ import { describe, test } from 'node:test'
 
 import {
   applyRanking,
+  spreadActivation,
   DEFAULT_RANKING,
   mergeScopes,
   normalizeContent,
@@ -190,7 +191,7 @@ describe('applyRanking（阶段 2 排序乘子）', () => {
     const hits = [scoped('a', 0.03), scoped('b', 0.02)]
     const out = applyRanking(
       hits,
-      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0 },
+      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0 },
       NOW,
     )
     assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
@@ -288,5 +289,61 @@ describe('rrfFuse agreementBonus（两路一致加成）', () => {
     const far = rrfFuse([[h('a')], [h('b'), h('c'), h('d'), h('a')]], 60, { agreementBonus: 0.2, span: 2 })
     const a = far.find((r) => r.id === 'a')!
     assert.ok(Math.abs(a.fusedScore - (1 / 61 + 1 / 64)) < 1e-12, 'gap=3 > span=2 → 无加成')
+  })
+})
+
+describe('spreadActivation（阶段 5.3 扩散激活）', () => {
+  function scoped(id: string, fusedScore: number, related?: Array<{ id: string; weight: number }>): ScopedHit {
+    return {
+      id,
+      score: fusedScore,
+      source: { memory_id: id, ...(related === undefined ? {} : { related }) },
+      routeRanks: [1],
+      fusedScore,
+      origin: 'personal',
+      contentHash: id,
+    }
+  }
+
+  test('alpha=0 完全不动（与关闭等价）', () => {
+    const hits = [scoped('a', 0.02, [{ id: 'b', weight: 0.8 }]), scoped('b', 0.03)]
+    const out = spreadActivation(hits, 0)
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.02, 0.03])
+    assert.deepEqual(out, hits, 'alpha=0 逐条原样返回')
+  })
+
+  test('邻居在结果集里才加分：a 借 b 的分反超', () => {
+    // a 0.02、b 0.03；a 指向 b(0.8) → a 得 0.02 + 0.5*0.03*0.8 = 0.032，反超 b
+    const hits = [scoped('a', 0.02, [{ id: 'b', weight: 0.8 }]), scoped('b', 0.03)]
+    const out = spreadActivation(hits, 0.5)
+    const a = out.find((h) => h.id === 'a')!
+    assert.ok(Math.abs(a.fusedScore - 0.032) < 1e-12)
+    assert.equal(out[0]?.id, 'a', '0.032 > 0.03：借分后 a 排到前面')
+  })
+
+  test('邻居不在结果集里 → 不变（不做二次召回）', () => {
+    const hits = [scoped('a', 0.02, [{ id: 'ghost', weight: 0.9 }]), scoped('b', 0.03)]
+    const out = spreadActivation(hits, 0.5)
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02], 'a 不该涨，排序仍按原分')
+  })
+
+  test('没有 related 字段 → 不变', () => {
+    const hits = [scoped('a', 0.02), scoped('b', 0.03)]
+    const out = spreadActivation(hits, 0.5)
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
+  })
+
+  test('多条邻居累加', () => {
+    const hits = [
+      scoped('a', 0.01, [
+        { id: 'b', weight: 0.9 },
+        { id: 'c', weight: 0.8 },
+      ]),
+      scoped('b', 0.02),
+      scoped('c', 0.02),
+    ]
+    const out = spreadActivation(hits, 1)
+    const a = out.find((h) => h.id === 'a')!
+    assert.ok(Math.abs(a.fusedScore - (0.01 + (0.02 * 0.9 + 0.02 * 0.8))) < 1e-12)
   })
 })

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { createEsClient } from '../src/es/http.ts'
-import { mergeEdges, pickNeighbors, readEdges } from '../src/memory/edges.ts'
+import { mergeEdges, pickNeighbors, readEdges } from '../src/edges.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { sendEsError, sendJson, startFakeEs, type FakeEs } from './helpers/fake-es.ts'
 
