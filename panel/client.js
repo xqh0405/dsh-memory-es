@@ -590,8 +590,9 @@ window.__ModuleLoader__.load({
       const valence = exists ? Number(mood.valence) || 0 : 0
       const events = exists && Array.isArray(mood.events) ? mood.events : []
       if (!exists) {
+        const why = mood && mood.note ? ` · ${String(mood.note).slice(0, 160)}` : ''
         return h('div', { style: { ...S.card, marginBottom: 12 } },
-          h('div', { style: S.muted }, `${t('moodTitle')} · ${t('moodNeutral')}`),
+          h('div', { style: S.muted }, `${t('moodTitle')} · ${t('moodNeutral')}${why}`),
           h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, t('moodNote')),
         )
       }

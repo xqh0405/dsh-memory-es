@@ -738,6 +738,8 @@ async function handleMood(ctx, res) {
       },
     })
   } catch (err) {
+    // 打一行日志：面板"看起来没数据"时，光看界面分不清是没记录还是查询挂了
+    console.error(`[记忆库面板] /mood 查询失败：${String(err?.message ?? err).slice(0, 200)}`)
     return json(res, 200, { ok: true, value: { exists: false, valence: 0, arousal: 0, events: [], note: String(err).slice(0, 160) } })
   }
 }
@@ -1474,13 +1476,14 @@ async function handle(ctx, req, res) {
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
     }
+    // ⚠️ POST 路由必须全部排在下面这条之前，否则会被 405 吞掉（identity/review 就踩过）
+    if (path === '/identity/review' && req.method === 'POST') return await handleIdentityReview(ctx, res, req)
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: '该接口只支持 GET' })
     if (path === '/overview') return await handleOverview(ctx, res)
     if (path === '/memories') return await handleMemories(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
-    if (path === '/identity/review' && req.method === 'POST') return await handleIdentityReview(ctx, res, req)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
     if (path === '/config') return await handleConfigGet(ctx, res)
     return json(res, 404, { ok: false, error: `未知接口 ${path}` })
