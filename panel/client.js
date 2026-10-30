@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'mood-ui-20261030'
+    const BUILD = 'identity-ui-20261030'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -25,6 +25,19 @@ window.__ModuleLoader__.load({
       tabOverview: '概览',
       tabBrowse: '记忆浏览',
       tabReview: '审核台',
+      tabIdentity: '自述',
+      idTitle: '待采纳的自述候选',
+      idEmpty: '还没有候选。用 memory_traits 提炼一次（dry_run 先看）再回来。',
+      idEvidence: '依据',
+      idApprove: '采纳',
+      idReject: '拒绝',
+      idNote: '备注（可选）',
+      idApproved: '已采纳，这条自述现在会参与检索。',
+      idRejected: '已拒绝，条目置 archived（内容保留）。',
+      idAudit: '我的审核记录',
+      idAuditEmpty: '还没有审核记录。',
+      idBusy: '处理中…',
+      idHint: '采纳是唯一让候选生效的动作：pending 不进检索，active 才会。',
       tabConfig: '配置',
       tabMaint: '维护',
       cardPersonal: '个人记忆',
@@ -174,6 +187,19 @@ window.__ModuleLoader__.load({
       tabOverview: 'Overview',
       tabBrowse: 'Browse',
       tabReview: 'Review',
+      tabIdentity: 'Identity',
+      idTitle: 'Draft identity traits',
+      idEmpty: 'No drafts yet. Run memory_traits first (dry_run to preview).',
+      idEvidence: 'evidence',
+      idApprove: 'Approve',
+      idReject: 'Reject',
+      idNote: 'Note (optional)',
+      idApproved: 'Approved — this trait is now live.',
+      idRejected: 'Rejected — archived, content kept.',
+      idAudit: 'My review log',
+      idAuditEmpty: 'No review records yet.',
+      idBusy: 'Working…',
+      idHint: 'Approving is the only action that makes a draft live: pending is never retrieved, active is.',
       tabConfig: 'Config',
       tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
@@ -1049,6 +1075,100 @@ window.__ModuleLoader__.load({
     }
 
     // ── 审核台 ───────────────────────────────────────────────────────────
+    // ── 自述：候选采纳 + 个人审核记录（阶段 7.2/7.3）────────────────────
+    function Identity({ t }) {
+      const [pending, setPending] = React.useState({ loading: true, rows: [], error: '' })
+      const [audit, setAudit] = React.useState([])
+      const [busy, setBusy] = React.useState('')
+      const [note, setNote] = React.useState('')
+      const [done, setDone] = React.useState('')
+
+      const load = React.useCallback(() => {
+        setPending((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/identity/pending', { size: '50' })
+          .then((value) => setPending({ loading: false, rows: Array.isArray(value.rows) ? value.rows : [], error: '' }))
+          .catch((error) => setPending({ loading: false, rows: [], error: String(error.message ?? error) }))
+        apiGet('/identity/audit', { size: '10' })
+          .then((value) => setAudit(Array.isArray(value.rows) ? value.rows : []))
+          .catch(() => setAudit([]))
+      }, [])
+
+      React.useEffect(() => { load() }, [load])
+
+      const act = (memoryId, action) => {
+        setBusy(memoryId)
+        setDone('')
+        apiPost('/identity/review', { memory_id: memoryId, action, note })
+          .then((value) => {
+            setDone(`${action === 'approve' ? t('idApproved') : t('idRejected')}${value.audit === 'failed' ? ' ⚠' : ''}`)
+            setNote('')
+            load()
+          })
+          .catch((error) => setDone(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setBusy(''))
+      }
+
+      return h('div', null,
+        h('div', { style: S.card },
+          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } }, t('idTitle')),
+          h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, t('idHint')),
+          done === '' ? null : h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, done),
+          pending.loading
+            ? h('p', { style: S.muted }, t('loading'))
+            : pending.error !== ''
+              ? h('p', { style: S.err }, `${t('error')}: ${pending.error}`)
+              : pending.rows.length === 0
+                ? h('p', { style: S.muted }, t('idEmpty'))
+                : h('div', { style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 } },
+                    pending.rows.map((row) =>
+                      h('div', {
+                        key: row.memoryId,
+                        style: { border: '1px solid var(--dsw-alias-border-1, rgba(127,127,127,.22))', borderRadius: 10, padding: 10 },
+                      },
+                        h('div', { style: { fontSize: 13, lineHeight: 1.7 } }, row.content),
+                        h('div', { style: { ...S.muted, fontSize: 12, marginTop: 4 } },
+                          `${t('idEvidence')} ${row.evidenceCount ?? 0} 条 · ${String(row.createdAt ?? '').replace('T', ' ').slice(0, 16)}`),
+                        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' } },
+                          h('input', {
+                            type: 'text',
+                            placeholder: t('idNote'),
+                            value: note,
+                            onChange: (event) => setNote(event.target.value),
+                            style: { flex: '1 1 160px', minWidth: 120, padding: '4px 8px', borderRadius: 6,
+                              border: '1px solid var(--dsw-alias-border-1, rgba(127,127,127,.3))',
+                              background: 'transparent', color: 'inherit', fontSize: 12 },
+                          }),
+                          h('button', {
+                            type: 'button',
+                            style: S.btn,
+                            disabled: busy === row.memoryId,
+                            onClick: () => act(row.memoryId, 'approve'),
+                          }, busy === row.memoryId ? t('idBusy') : t('idApprove')),
+                          h('button', {
+                            type: 'button',
+                            style: S.btn,
+                            disabled: busy === row.memoryId,
+                            onClick: () => act(row.memoryId, 'reject'),
+                          }, t('idReject')),
+                        ),
+                      ),
+                    ),
+                  ),
+        ),
+        h('div', { style: { ...S.card, marginTop: 12 } },
+          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } }, t('idAudit')),
+          audit.length === 0
+            ? h('p', { style: { ...S.muted, marginTop: 6 } }, t('idAuditEmpty'))
+            : h('div', { style: { marginTop: 8 } },
+                audit.map((row, index) =>
+                  h('div', { key: `${index}:${row.at ?? ''}`, style: { fontSize: 12, lineHeight: 1.9, color: 'var(--dsw-alias-label-secondary)' } },
+                    `· ${String(row.at ?? '').replace('T', ' ').slice(0, 16)} ${row.event === 'identity_approved' ? '✓' : '✗'} ${String(row.memoryId ?? '')}${row.note ? `（${row.note}）` : ''}`),
+                ),
+              ),
+        ),
+      )
+    }
+
     function Review({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       const [pending, setPending] = React.useState(null) // { docId, action }
@@ -1655,6 +1775,8 @@ window.__ModuleLoader__.load({
           [
             ['overview', t('tabOverview')],
             ['browse', t('tabBrowse')],
+            // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
+            ['identity', t('tabIdentity')],
             // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
             ...(caps.canReview ? [['review', t('tabReview')]] : []),
             // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
@@ -1675,6 +1797,8 @@ window.__ModuleLoader__.load({
           ? h(Config, { t })
           : tab === 'review'
           ? h(Review, { t })
+          : tab === 'identity'
+          ? h(Identity, { t })
           : tab === 'overview'
           ? h(Overview, {
               data: overview.data,
