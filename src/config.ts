@@ -77,6 +77,13 @@ export interface ConfigType {
   defaults: {
     domain: string
   }
+  /** 写入时建边（阶段 5.2） */
+  edges: {
+    enabled: boolean
+    topK: number
+    minScore: number
+    maxScore: number
+  }
   distill: {
     /** 保存后是否后台蒸馏（不阻塞入库） */
     enabled: boolean
@@ -184,6 +191,20 @@ export const Config: z<ConfigType> = z.object({
   defaults: z.object({
     domain: z.string().default('general')
       .description('memory_save 未显式给 domain 时的缺省值；建议按项目填（如 lottery-cloud）。'),
+  }),
+  /**
+   * 阶段 5.2：写入时给记忆建边。
+   * 只写 `related` 字段、不改检索，所以默认开；`edges_failed` 只记日志，不影响保存。
+   */
+  edges: z.object({
+    enabled: z.boolean().default(true)
+      .description('写入时建边（只写 related，不改检索；失败不影响保存）。'),
+    topK: z.number().default(5)
+      .description('每条记忆最多保留几条边（邻接表上界）。'),
+    minScore: z.number().default(0.55)
+      .description('低于该相似度不建边（kNN 永远会返回 topK，低频段基本是噪声）。'),
+    maxScore: z.number().default(0.85)
+      .description('大于等于该相似度视为重复（判重带），不建边。'),
   }),
   distill: z.object({
     // 默认关闭：蒸馏要花 token，等用户在看板上明确打开（2026-10-26 用户定的）

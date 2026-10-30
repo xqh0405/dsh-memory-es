@@ -118,6 +118,14 @@ export function apply(ctx: Context, config: ConfigType): void {
           reader,
           writer,
           embed,
+          // 阶段 5.2：写入时建边（只写 related，不改检索；失败只记日志）
+          edges: {
+            enabled: config.edges.enabled,
+            topK: config.edges.topK,
+            minScore: config.edges.minScore,
+            maxScore: config.edges.maxScore,
+            dims: config.embedding.dims,
+          },
           log: (event) => logger.info('save %o', event),
           // 入库后立刻返回，蒸馏在后台跑；失败只记日志，条目留在 distill_state=pending
           onSaved: ({ memoryId, content, domain, route }) => {

@@ -20,11 +20,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { Embedder } from '../embedding.ts'
 import { EmbeddingError } from '../embedding.ts'
-import { dedupeBody } from '../es/dsl.ts'
+import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { assertDocOwner, personalIndexFor } from './common.ts'
+import { mergeEdges, pickNeighbors, readEdges, type Edge } from './edges.ts'
 
 // F3 的断言搬到 common.ts（三个写侧工具共用），这里转出保持老调用点与测试不受影响
 export { assertDocOwner } from './common.ts'
@@ -65,6 +66,19 @@ export interface SaveResult {
   text: string
 }
 
+/** 建边配置（阶段 5.2）。缺省 = 不建边。 */
+export interface EdgeWriteConfig {
+  enabled: boolean
+  /** 每条记忆最多保留几条边（邻接表上界，防止 O(n²) 膨胀） */
+  topK: number
+  /** 低于该相似度不建边（噪声） */
+  minScore: number
+  /** 大于等于该相似度视为重复（判重带），不建边 */
+  maxScore: number
+  /** 索引的向量维度，与 `knnBody` 一致 */
+  dims: number
+}
+
 export interface SaveDeps {
   /**
    * 写入成功后触发（**不要 await**）：插件层用它排队后台蒸馏。
@@ -84,10 +98,15 @@ export interface SaveDeps {
   /** 个人索引前缀；索引名在这里拼（`personalIndex` 由前缀 + userId 派生，不给调用点拼错的机会） */
   personalPrefix: string
   defaultDomain: string
-  /** 去重检索用只读身份 */
-  reader: Pick<EsClient, 'search'>
-  /** 写入用 writer 身份 */
-  writer: Pick<EsClient, 'index'>
+  /** 去重检索用只读身份；`get` 缺失时不建边（老调用点与测试不受影响） */
+  reader: Pick<EsClient, 'search'> & Partial<Pick<EsClient, 'get'>>
+  /** 写入用 writer 身份；`update` 缺失时不建边（老调用点与测试不受影响） */
+  writer: Pick<EsClient, 'index'> & Partial<Pick<EsClient, 'update'>>
+  /**
+   * 阶段 5.2 建边配置。缺省 = 不建边。
+   * 建边是 best-effort：失败只记日志，绝不影响「已保存」的结论。
+   */
+  edges?: EdgeWriteConfig
   /** 可缺省：不给就一律 degraded（测试与「故意关掉向量」的场景） */
   embed?: Pick<Embedder, 'embed'> | null
   /** 注入时钟，便于测试 */
@@ -172,6 +191,10 @@ export function buildMemoryDoc(
     // 由插件自己写，不依赖 LLM —— 入库不能被模型可用性卡住。
     distill_state: 'pending',
     status: 'active',
+    // 阶段 5：联结与激活。写入时给初值，让字段语义明确（老文档缺失按同值处理）：
+    // related 由建边步骤补，activation 由命中回写（5.4）提升。
+    related: [],
+    activation: 0,
     content_sha256: sha256Hex(normalized),
     created_at: timestamp,
     updated_at: timestamp,
@@ -186,6 +209,59 @@ export function buildMemoryDoc(
   // F2 的同一性：索引名与 user_id 必须同源（前缀 + 同一 userId）
   const index = personalIndexFor(deps.personalPrefix, userId)
   return { doc, index, contentSha256: doc.content_sha256 as string }
+}
+
+/**
+ * 阶段 5.2：给刚写入的条目建边（best-effort）。
+ *
+ * 三件事：kNN 取候选 → 区间过滤（去噪声、避开判重带）→ 合并进 `related`。
+ * 任何一步失败都只记日志：建边是检索的增强，**不能把「已保存」变成失败**。
+ * 同步执行是为了让单测能直接断言；代价是多一到两次 ES RTT。
+ */
+async function linkNeighbors(
+  deps: SaveDeps,
+  index: string,
+  memoryId: string,
+  embedding: readonly number[],
+  log: (event: Record<string, unknown>) => void,
+): Promise<void> {
+  const cfg = deps.edges
+  if (cfg === undefined || !cfg.enabled) return
+  const update = deps.writer.update
+  const get = deps.reader.get
+  if (update === undefined || get === undefined) return
+
+  try {
+    // 多取 3 倍候选：topK 条边要过区间过滤，噪声占比高时名额会被吃掉
+    const candidates = Math.max(cfg.topK * 3, cfg.topK)
+    const found = await deps.reader.search(
+      index,
+      knnBody(embedding, cfg.dims, { status: 'active' }, candidates),
+      { signal: deps.signal },
+    )
+    const picked = pickNeighbors(
+      found.hits.map((hit) => ({
+        id: typeof hit.source.memory_id === 'string' ? hit.source.memory_id : hit.id,
+        score: hit.score,
+      })),
+      { excludeId: memoryId, minScore: cfg.minScore, maxScore: cfg.maxScore, topK: cfg.topK },
+    )
+    if (picked.length === 0) return
+
+    // 读回再合并：幂等，将来重跑建边不会把已有边冲掉
+    const current = await get(index, memoryId, { signal: deps.signal })
+    const next = mergeEdges(readEdges(current.source.related), picked, cfg.topK)
+    await update(index, memoryId, { related: next }, { refresh: 'wait_for', signal: deps.signal })
+    log({
+      tool: 'save',
+      user: deps.userId,
+      event: 'edges_linked',
+      count: next.length,
+      added: picked.length,
+    })
+  } catch (err) {
+    log({ tool: 'save', user: deps.userId, event: 'edges_failed', error: String(err).slice(0, 200) })
+  }
 }
 
 /**
@@ -242,6 +318,11 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   } catch (err) {
     log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
     throw err
+  }
+
+  // 阶段 5.2：建边（best-effort，异常已在内部吞掉并记日志）
+  if (embedding !== null && embedding.length > 0) {
+    await linkNeighbors(deps, index, String(built.doc.memory_id), embedding, log)
   }
 
   log({
