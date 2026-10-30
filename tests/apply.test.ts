@@ -12,7 +12,7 @@ import { describe, test } from 'node:test'
 
 import { Config, type ConfigType } from '../src/config.ts'
 import { apply, inject, name } from '../src/index.ts'
-import { sendJson, startFakeEs } from './helpers/fake-es.ts'
+import { sendJson, startFakeEs, sendEsError } from './helpers/fake-es.ts'
 
 /** 最小可用的 Config（默认值走 schema） */
 // identity 允许只覆盖部分字段：schema 有默认值，测试只想改动其中一两项
@@ -50,6 +50,8 @@ interface FakeCtx {
   disposers: Array<() => void>
   /** 注册过的提示词段 */
   sections: Array<{ name: string; order: number; text: string | (() => string) }>
+  /** 注册过的事件监听（阶段 6.4 起用到 ctx.on） */
+  listeners: Array<{ event: string; handler: (...args: never[]) => unknown }>
 }
 
 function fakeCtx(): FakeCtx {
@@ -57,6 +59,7 @@ function fakeCtx(): FakeCtx {
   const logs: string[] = []
   const disposers: Array<() => void> = []
   const sections: Array<{ name: string; order: number; text: string | (() => string) }> = []
+  const listeners: Array<{ event: string; handler: (...args: never[]) => unknown }> = []
   const ctx = {
     logger: () => ({
       info: (format: string, ...args: unknown[]) => logs.push(renderLog(format, args)),
@@ -80,13 +83,21 @@ function fakeCtx(): FakeCtx {
         }
       },
     },
+    // 模拟 cordis 的事件总线：记录监听器，返回能解绑的 disposer
+    on: (event: string, handler: (...args: never[]) => unknown) => {
+      const entry = { event, handler }
+      listeners.push(entry)
+      return () => {
+        listeners.splice(listeners.indexOf(entry), 1)
+      }
+    },
     // 模拟 cordis 的 ctx.effect：立即执行 body 拿到 disposer，卸载时调用
     effect: (body: () => () => void) => {
       disposers.push(body())
       return () => {}
     },
   }
-  return { ctx, registered, logs, disposers, sections }
+  return { ctx, registered, logs, disposers, sections, listeners }
 }
 
 describe('apply', () => {
@@ -113,7 +124,7 @@ describe('apply', () => {
     apply(harness.ctx as never, config)
     assert.equal(harness.registered.length, 6, '六个工具各一次 effect（含 memory_distill / doc_search）')
     assert.equal(harness.sections.length, 2, '记忆段 + 心情段各一次 effect')
-    assert.equal(harness.disposers.length, 8, '应当通过 ctx.effect 注册（而不是裸 register）')
+    assert.equal(harness.disposers.length, 10, '六个工具 + 两个提示段 + 两个事件监听，都走 ctx.effect')
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
     assert.equal(harness.sections.length, 0)
@@ -178,5 +189,108 @@ describe('Config schema 默认值', () => {
     assert.equal(config.embedding.dims, 1024)
     assert.equal(config.defaults.domain, 'general')
     assert.equal(config.retrieval.limit, 8)
+  })
+})
+
+describe('apply · 情绪事件', () => {
+  /** 只伺候心情文档的假 ES：GET 404 → PUT 存下 → 之后 GET 回读到 */
+  async function startMoodFake() {
+    let stored: Record<string, unknown> | null = null
+    const fake = await startFakeEs((req, res) => {
+      if (req.path.includes('/_doc/__mood__')) {
+        if (req.method === 'GET') {
+          if (stored === null) {
+            sendEsError(res, 404, 'not_found', 'no mood yet')
+            return
+          }
+          sendJson(res, 200, { _id: '__mood__', _index: 'personal_memory_xqh', _source: stored })
+          return
+        }
+        if (req.method === 'PUT' || req.method === 'POST') {
+          stored = JSON.parse(req.body) as Record<string, unknown>
+          sendJson(res, 201, { _id: '__mood__', result: 'created' })
+          return
+        }
+      }
+      sendJson(res, 200, {})
+    })
+    return { fake, get stored() { return stored } }
+  }
+
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+  function moodText(harness: FakeCtx): string {
+    const section = harness.sections.find((s) => s.name === 'dsh-memory-es-mood')!
+    return (section.text as () => string)()
+  }
+
+  test('中性起步不注入；收到夸奖后心情段出现一行', async () => {
+    const { fake } = await startMoodFake()
+    try {
+      const harness = fakeCtx()
+      apply(harness.ctx as never, baseConfig({ es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 } }))
+      await tick()
+      assert.equal(moodText(harness), '', '初始（读不到文档）应为中性')
+
+      const listener = harness.listeners.find((l) => l.event === 'agent/inbox/inserted')!
+      listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '太棒了！' }] } } as never)
+      await tick()
+
+      const line = moodText(harness)
+      assert.match(line, /心情/, '夸奖后应注入一行心情')
+      assert.match(line, /不错|愉快/)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('中性消息不改变心情；节流挡住连发', async () => {
+    const { fake } = await startMoodFake()
+    try {
+      const harness = fakeCtx()
+      apply(harness.ctx as never, baseConfig({ es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 } }))
+      await tick()
+      const listener = harness.listeners.find((l) => l.event === 'agent/inbox/inserted')!
+
+      listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '把 README 更新一下' }] } } as never)
+      await tick()
+      assert.equal(moodText(harness), '', '中性消息不产生事件')
+
+      listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '谢谢' }] } } as never)
+      await tick()
+      const afterFirst = moodText(harness)
+      assert.match(afterFirst, /心情/)
+
+      listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '太棒了' }] } } as never)
+      await tick()
+      assert.equal(moodText(harness), afterFirst, '30 秒内第二条不该放大情绪')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('工具失败降温；自家记忆工具被忽略', async () => {
+    const { fake } = await startMoodFake()
+    try {
+      const harness = fakeCtx()
+      apply(harness.ctx as never, baseConfig({ es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 } }))
+      await tick()
+      const onTool = harness.listeners.find((l) => l.event === 'tools/result')!
+
+      onTool.handler({ name: 'memory_search', agent: { id: 'a1' } } as never, { isError: true } as never)
+      await tick()
+      assert.equal(moodText(harness), '', '自家工具失败不推动情绪')
+
+      onTool.handler({ name: 'bash', agent: { id: 'a1' } } as never, { isError: true } as never)
+      await tick()
+      assert.equal(moodText(harness), '', '单次失败 -0.1 还没到 0.15 的注入阈值')
+
+      // 换个 agent（节流 key 不同）再来一次 → 累积到 -0.2，越过阈值
+      onTool.handler({ name: 'bash', agent: { id: 'a2' } } as never, { isError: true } as never)
+      await tick()
+      assert.match(moodText(harness), /闷|低落/, '累积后心情应下行')
+    } finally {
+      await fake.close()
+    }
   })
 })

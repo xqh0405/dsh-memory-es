@@ -19,8 +19,9 @@ import { createEmbedder } from './embedding.ts'
 import { createEsClient } from './es/http.ts'
 import { defineSaveTool } from './memory/save.ts'
 import { MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER } from './prompt.ts'
-import { NEUTRAL_MOOD, renderMoodLine, type MoodState } from './mood.ts'
-import { readMood } from './memory/mood.ts'
+import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
+import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
+import { readMood, writeMood } from './memory/mood.ts'
 import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
@@ -274,6 +275,60 @@ export function apply(ctx: Context, config: ConfigType): void {
         text: () => renderMoodLine(mood.state, new Date()),
       }),
     'dsh-memory-es.mood',
+  )
+
+  /**
+   * 阶段 6.4：事件驱动。
+   *
+   * 「只由事件改」的落点——模型说「我很高兴」不产生任何副作用，
+   * 只有用户明确夸奖/批评、工具成功/失败才会推状态。
+   * 写回串行化：并发事件读改写会丢更新，用一条 Promise 链排队。
+   */
+  const moodThrottle = new MoodEventThrottle()
+  let moodChain: Promise<void> = Promise.resolve()
+  // 自己这几个工具的结果不推动情绪：它们说的是「记忆库通不通」，不是「世界对我好不好」
+  const IGNORED_TOOLS = new Set(['memory_save', 'memory_search', 'memory_update_status', 'memory_promote', 'memory_distill', 'doc_search'])
+
+  const pushMoodEvent = (kind: MoodEventKind, note: string, key: string): void => {
+    if (!moodThrottle.allow(key, Date.now())) return
+    moodChain = moodChain
+      .then(async () => {
+        const next = applyMoodEvent(mood.state, kind, new Date(), note)
+        mood.state = next
+        try {
+          await writeMood(moodStore, next)
+        } catch (err) {
+          logger.warn('mood: 写回失败 %s', String(err).slice(0, 160))
+        }
+      })
+      .catch(() => {})
+  }
+
+  ctx.effect(
+    () =>
+      ctx.on('agent/inbox/inserted', ({ agent, message }: { agent: { id: string }; message: unknown }) => {
+        const signal = classifyUserMessage(extractUserText(message))
+        if (signal === null) return
+        pushMoodEvent(signal.kind, signal.note, `agent:${String(agent?.id ?? 'default')}`)
+      }),
+    'dsh-memory-es.mood-user',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.on(
+        'tools/result',
+        (exec: { name: string; agent?: { id: string } }, result: { isError?: boolean }) => {
+          if (IGNORED_TOOLS.has(exec.name)) return
+          const key = `tool:${String(exec.agent?.id ?? 'root')}`
+          pushMoodEvent(
+            result.isError === true ? 'tool_error' : 'tool_ok',
+            result.isError === true ? '工具失败' : '工具成功',
+            key,
+          )
+        },
+      ),
+    'dsh-memory-es.mood-tool',
   )
 
   logger.info(
