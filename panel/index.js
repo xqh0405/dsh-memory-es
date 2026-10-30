@@ -106,6 +106,25 @@ function resolveClientConfig(ctx, role = 'reader') {
   // 单账号模式：一个人一个 ES 账号，个人库读写 + 团队库按 teamWrite 授权
   const single = value.identity.username && value.identity.password ? value.identity : null
 
+  // 个人库写身份：采纳/拒绝自己的 identity 候选只需要写自己的索引，不需要 teamWrite。
+  if (role === 'personal-writer') {
+    if (single) {
+      return {
+        ok: true,
+        value: {
+          url: value.es.url,
+          caCertPath: value.es.caCertPath,
+          timeoutMs: value.es.requestTimeoutMs,
+          auth: { username: single.username, password: single.password },
+        },
+      }
+    }
+    return {
+      ok: false,
+      error: '个人审核需要单账号身份（identity.username / password）；当前是读写分离部署，面板不能替你采纳。',
+    }
+  }
+
   if (role === 'consolidator') {
     // 有单账号且声明了 teamWrite，就用它自己（它自带 mem_team_write 角色）
     if (single && value.identity.teamWrite) {
@@ -181,6 +200,7 @@ function indexNames(config) {
     docs: `${config.index.docPrefix ?? 'personal_doc_'}${config.identity.userId}`,
     team: config.index.team,
     audit: AUDIT_INDEX,
+    personalAudit: `${config.index.auditPrefix ?? 'personal_audit_'}${config.identity.userId}`,
   }
 }
 
@@ -688,6 +708,155 @@ async function handleDeleteMemory(ctx, res, req) {
 }
 
 /** 待裁决列表：读团队库（reader 有 team 读权限），连同冲突对象一起返回 */
+/**
+ * 当前心情（阶段 6.2）。读固定文档 `__mood__`；不存在就是中性，不报错。
+ *
+ * 面板只**展示**，不提供改状态的入口：情绪只由事件驱动，让人手动改等于允许伪造情绪。
+ */
+async function handleMood(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  try {
+    const doc = await client.search(names.personal, {
+      size: 1,
+      query: { term: { memory_id: '__mood__' } },
+      _source: { excludes: ['embedding', 'content'] },
+    })
+    const hit = doc.hits?.hits?.[0]
+    if (!hit) return json(res, 200, { ok: true, exists: false })
+    const src = hit._source ?? {}
+    return json(res, 200, {
+      ok: true,
+      exists: true,
+      valence: typeof src.mood_valence === 'number' ? src.mood_valence : 0,
+      arousal: typeof src.mood_arousal === 'number' ? src.mood_arousal : 0,
+      updatedAt: str(src.mood_updated_at),
+      events: Array.isArray(src.mood_events) ? src.mood_events.slice(0, 8) : [],
+    })
+  } catch (err) {
+    return json(res, 200, { ok: true, exists: false, note: String(err).slice(0, 160) })
+  }
+}
+
+/** 待采纳的 identity 候选（阶段 7.2 产出，status=pending） */
+async function handleIdentityPending(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '20', 10) || 20))
+  const result = await client.search(names.personal, {
+    size,
+    _source: ['memory_id', 'content', 'evidence_ids', 'created_at'],
+    sort: [{ created_at: 'desc' }],
+    query: { bool: { filter: [{ term: { status: 'pending' } }, { term: { memory_type: 'identity' } }] } },
+  })
+  const rows = (result.hits?.hits ?? []).map((hit) => ({
+    memoryId: str(hit._source?.memory_id),
+    content: str(hit._source?.content),
+    evidenceCount: Array.isArray(hit._source?.evidence_ids) ? hit._source.evidence_ids.length : 0,
+    createdAt: str(hit._source?.created_at),
+  }))
+  return json(res, 200, { ok: true, rows })
+}
+
+/** 采纳 / 拒绝一条候选。规则与 src/memory/review.ts 必须一致（两份实现，改一处要改两处）。 */
+async function handleIdentityReview(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const memoryId = str(body.value.memory_id)
+  const action = str(body.value.action)
+  const note = str(body.value.note)
+  if (memoryId === '') return json(res, 400, { ok: false, error: '缺少 memory_id' })
+  if (action !== 'approve' && action !== 'reject') return json(res, 400, { ok: false, error: 'action 只能是 approve / reject' })
+
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const writer = createReadClient(() => resolveClientConfig(ctx, 'personal-writer'))
+  const reader = createReadClient(() => resolveClientConfig(ctx))
+
+  // 先读校验：只有 pending + identity 能动
+  const found = await reader.search(names.personal, {
+    size: 1,
+    query: { bool: { filter: [{ term: { memory_id: memoryId } }] } },
+    _source: ['memory_id', 'status', 'memory_type'],
+  })
+  const src = found.hits?.hits?.[0]?._source
+  if (!src) return json(res, 404, { ok: false, error: `找不到条目 ${memoryId}` })
+  if (str(src.memory_type) !== 'identity') return json(res, 409, { ok: false, error: '这条不是 identity，不能走采纳闸门' })
+  if (str(src.status) !== 'pending') return json(res, 409, { ok: false, error: `这条当前状态是 ${str(src.status)}（只有 pending 能被采纳）` })
+
+  const target = action === 'approve' ? 'active' : 'archived'
+  const at = new Date().toISOString()
+  await writer.update(
+    names.personal,
+    memoryId,
+    { status: target, updated_at: at, reviewed_at: at, reviewed_by: config.identity.userId, ...(note === '' ? {} : { review_note: note }) },
+    { refresh: 'wait_for' },
+  )
+
+  // 审计：个人那份必写，共享那份尽力（与工具侧同口径）
+  const auditDoc = {
+    event: action === 'approve' ? 'identity_approved' : 'identity_rejected',
+    actor: config.identity.userId,
+    at,
+    subject_type: 'personal_memory',
+    subject_id: memoryId,
+    memory_id: memoryId,
+    from_state: 'pending',
+    to_state: target,
+    reason: action === 'approve' ? 'identity_approved' : 'identity_rejected',
+    ...(note === '' ? {} : { note }),
+  }
+  let audit = 'personal_only'
+  try {
+    await writer.index(names.personalAudit, auditDoc, { refresh: 'wait_for' })
+    audit = 'ok'
+    try {
+      const consolidator = createReadClient(() => resolveClientConfig(ctx, 'consolidator'))
+      await consolidator.index(names.audit, auditDoc, { refresh: 'wait_for' })
+    } catch {
+      audit = 'personal_only'
+    }
+  } catch (err) {
+    audit = 'failed'
+  }
+
+  return json(res, 200, { ok: true, memoryId, status: target, audit })
+}
+
+/** 个人审核流水（阶段 7.3 补强） */
+async function handlePersonalAudit(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '20', 10) || 20))
+  try {
+    const result = await client.search(names.personalAudit, {
+      size,
+      sort: [{ at: 'desc' }],
+      query: { match_all: {} },
+    })
+    const rows = (result.hits?.hits ?? []).map((hit) => ({
+      event: str(hit._source?.event),
+      at: str(hit._source?.at),
+      memoryId: str(hit._source?.memory_id),
+      from: str(hit._source?.from_state),
+      to: str(hit._source?.to_state),
+      note: str(hit._source?.note),
+    }))
+    return json(res, 200, { ok: true, rows })
+  } catch (err) {
+    // 索引还没建时是 404：当作"还没有记录"，不当错误
+    return json(res, 200, { ok: true, rows: [], note: String(err).slice(0, 160) })
+  }
+}
+
 async function handlePending(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -1307,6 +1476,10 @@ async function handle(ctx, req, res) {
     if (path === '/overview') return await handleOverview(ctx, res)
     if (path === '/memories') return await handleMemories(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
+    if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
+    if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
+    if (path === '/identity/review' && req.method === 'POST') return await handleIdentityReview(ctx, res, req)
+    if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
     if (path === '/config') return await handleConfigGet(ctx, res)
     return json(res, 404, { ok: false, error: `未知接口 ${path}` })
   } catch (error) {
