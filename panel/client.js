@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory-es-panel'
     // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'admin2-20261029'
+    const BUILD = 'mood-ui-20261030'
     const API = '/memory-es/api'
 
     const ZH = {
@@ -1678,6 +1678,7 @@ window.__ModuleLoader__.load({
           : tab === 'overview'
           ? h(Overview, {
               data: overview.data,
+              mood,
               loading: overview.loading,
               error: overview.error,
               t,

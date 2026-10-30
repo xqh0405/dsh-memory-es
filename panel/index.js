@@ -725,6 +725,8 @@ async function handleMood(ctx, res) {
       _source: { excludes: ['embedding', 'content'] },
     })
     const hit = doc.hits?.hits?.[0]
+    // 一行调试：面板显示"没记录"时，要能分清是查空了还是没查
+    console.error(`[记忆库面板] /mood index=${names.personal} hits=${doc.hits?.hits?.length ?? -1}`)
     if (!hit) return json(res, 200, { ok: true, value: { exists: false, valence: 0, arousal: 0, events: [] } })
     const src = hit._source ?? {}
     return json(res, 200, {
