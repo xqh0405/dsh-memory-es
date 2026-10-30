@@ -41,7 +41,9 @@ es -X PUT "$ES/$PERSONAL/_mapping" -d @- >/dev/null <<'JSON'
     "mood_updated_at": { "type": "date" },
     "mood_events":     { "type": "object", "enabled": false },
     "valence":         { "type": "float" },
-    "arousal":         { "type": "float" }
+    "arousal":         { "type": "float" },
+    "evidence_ids":    { "type": "object", "enabled": false },
+    "traits_window_days": { "type": "integer" }
   }
 }
 JSON
@@ -50,7 +52,7 @@ echo '  ok'
 echo '== 校验 =='
 body=$(es -X GET "$ES/$PERSONAL/_mapping")
 ok=1
-for f in mood_valence mood_arousal mood_updated_at mood_events valence arousal; do
+for f in mood_valence mood_arousal mood_updated_at mood_events valence arousal evidence_ids traits_window_days; do
   echo "$body" | grep -q "\"$f\"" || { echo "  $f 缺失" >&2; ok=0; }
 done
-[ "$ok" = "1" ] && echo "  $PERSONAL: 情绪状态字段 + 记忆情感字段已就绪" || exit 1
+[ "$ok" = "1" ] && echo "  $PERSONAL: 情绪状态 + 记忆情感 + 提炼字段已就绪" || exit 1

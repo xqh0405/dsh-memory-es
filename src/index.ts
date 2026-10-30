@@ -22,6 +22,8 @@ import { MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER } from './
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { readMood, writeMood } from './memory/mood.ts'
+import { defineTraitsTool, TRAITS_SYSTEM } from './memory/traits.ts'
+import { collectStream, pickRoute } from './memory/distillRunner.ts'
 import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
@@ -237,6 +239,56 @@ export function apply(ctx: Context, config: ConfigType): void {
         }),
       ),
     'dsh-memory-es.distill',
+  )
+
+  /**
+   * 阶段 7.2：夜间提炼（手动触发）。
+   *
+   * 模型调用在这里组装而不是放进 traits.ts：那边不 import 宿主 llm 类型，便于单测；
+   * 拿不到模型时 summarize 返回空串，提炼自然产出零候选（不报错、不写垃圾）。
+   */
+  const summarizeTraits = async (prompt: string): Promise<string> => {
+    const llm = getLlm() as {
+      prepareCall?: (opts: unknown, signal: AbortSignal) => Promise<{ config: unknown; stream: (opts: unknown) => AsyncIterable<unknown> }>
+      listModels?: (provider?: string) => unknown[]
+    } | null
+    if (llm === null || llm === undefined || typeof llm.prepareCall !== 'function') return ''
+    const route = pickRoute(llm as never, config.distill.provider, config.distill.model, undefined)
+    if (route === null) return ''
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 90_000)
+    try {
+      const call = await llm.prepareCall({ ...route, maxTokens: 1500 }, controller.signal)
+      const stream = call.stream({
+        ...(call.config as Record<string, unknown>),
+        system: TRAITS_SYSTEM,
+        messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+        purpose: 'memory-traits',
+        signal: controller.signal,
+      })
+      return await collectStream(stream)
+    } catch (err) {
+      logger.warn('traits: 模型调用失败 %s', String(err).slice(0, 160))
+      return ''
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineTraitsTool({
+          userId,
+          personalPrefix,
+          reader,
+          writer,
+          now: () => new Date(),
+          summarize: summarizeTraits,
+          log: (event) => logger.info('traits %o', event),
+        }),
+      ),
+    'dsh-memory-es.traits',
   )
 
   ctx.effect(() => ctx.systemPrompt.section(MEMORY_PROMPT_SECTION), 'dsh-memory-es.prompt')

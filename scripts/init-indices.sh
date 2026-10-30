@@ -72,6 +72,8 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "mood_updated_at":   { "type": "date" },
         "mood_events":       { "type": "object", "enabled": false },
         "valence":           { "type": "float" },
+        "evidence_ids":      { "type": "object", "enabled": false },
+        "traits_window_days": { "type": "integer" },
         "arousal":           { "type": "float" },
         "superseded_at":     { "type": "date" },
         "blocked_reason":    { "type": "keyword" },
