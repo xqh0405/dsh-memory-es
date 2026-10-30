@@ -725,18 +725,20 @@ async function handleMood(ctx, res) {
       _source: { excludes: ['embedding', 'content'] },
     })
     const hit = doc.hits?.hits?.[0]
-    if (!hit) return json(res, 200, { ok: true, exists: false })
+    if (!hit) return json(res, 200, { ok: true, value: { exists: false, valence: 0, arousal: 0, events: [] } })
     const src = hit._source ?? {}
     return json(res, 200, {
       ok: true,
-      exists: true,
-      valence: typeof src.mood_valence === 'number' ? src.mood_valence : 0,
-      arousal: typeof src.mood_arousal === 'number' ? src.mood_arousal : 0,
-      updatedAt: str(src.mood_updated_at),
-      events: Array.isArray(src.mood_events) ? src.mood_events.slice(0, 8) : [],
+      value: {
+        exists: true,
+        valence: typeof src.mood_valence === 'number' ? src.mood_valence : 0,
+        arousal: typeof src.mood_arousal === 'number' ? src.mood_arousal : 0,
+        updatedAt: str(src.mood_updated_at),
+        events: Array.isArray(src.mood_events) ? src.mood_events.slice(0, 8) : [],
+      },
     })
   } catch (err) {
-    return json(res, 200, { ok: true, exists: false, note: String(err).slice(0, 160) })
+    return json(res, 200, { ok: true, value: { exists: false, valence: 0, arousal: 0, events: [], note: String(err).slice(0, 160) } })
   }
 }
 
@@ -759,7 +761,7 @@ async function handleIdentityPending(ctx, res, url) {
     evidenceCount: Array.isArray(hit._source?.evidence_ids) ? hit._source.evidence_ids.length : 0,
     createdAt: str(hit._source?.created_at),
   }))
-  return json(res, 200, { ok: true, rows })
+  return json(res, 200, { ok: true, value: { rows } })
 }
 
 /** 采纳 / 拒绝一条候选。规则与 src/memory/review.ts 必须一致（两份实现，改一处要改两处）。 */
@@ -826,7 +828,7 @@ async function handleIdentityReview(ctx, res, req) {
     audit = 'failed'
   }
 
-  return json(res, 200, { ok: true, memoryId, status: target, audit })
+  return json(res, 200, { ok: true, value: { memoryId, status: target, audit } })
 }
 
 /** 个人审核流水（阶段 7.3 补强） */
@@ -850,10 +852,10 @@ async function handlePersonalAudit(ctx, res, url) {
       to: str(hit._source?.to_state),
       note: str(hit._source?.note),
     }))
-    return json(res, 200, { ok: true, rows })
+    return json(res, 200, { ok: true, value: { rows } })
   } catch (err) {
     // 索引还没建时是 404：当作"还没有记录"，不当错误
-    return json(res, 200, { ok: true, rows: [], note: String(err).slice(0, 160) })
+    return json(res, 200, { ok: true, value: { rows: [], note: String(err).slice(0, 160) } })
   }
 }
 
@@ -1640,6 +1642,17 @@ async function selfTest(ctx) {
     )
   })
 
+  // 阶段 6/7 的新接口也过一遍：重启后在日志里就能看到"心情/候选/个人审计"通不通
+  const probe = async (label, routePath, pick) => {
+    const res = await call(routePath)
+    if (res.status !== 200) return `${label}=err(${res.status})`
+    try {
+      return `${label}=${pick(JSON.parse(res.body))}`
+    } catch {
+      return `${label}=bad-json`
+    }
+  }
+
   const result = await call('/overview')
 
   if (result.status !== 200) {
@@ -1650,6 +1663,12 @@ async function selfTest(ctx) {
     const payload = JSON.parse(result.body)
     const counts = payload.value?.counts ?? {}
     const es = payload.value?.es ?? {}
+    const moodView = await probe('心情', '/mood', (p) =>
+      p.value?.exists ? `${Number(p.value.valence).toFixed(2)}/${Array.isArray(p.value.events) ? p.value.events.length : 0}事件` : '中性',
+    )
+    const pendingView = await probe('候选', '/identity/pending', (p) => `${Array.isArray(p.value?.rows) ? p.value.rows.length : 0}条`)
+    const auditView = await probe('个人审计', '/identity/audit', (p) => `${Array.isArray(p.value?.rows) ? p.value.rows.length : 0}条`)
+
     // 用 stderr 输出：实测 ctx.logger.info 不落 dsh 的启动日志，console.error 会（一行/次启动，不算噪音）
     // 第二个接口也跑一遍：/memories 覆盖查询构造与分页投影
     const list = await call('/memories?size=2&includePending=1')
@@ -1765,7 +1784,8 @@ async function selfTest(ctx) {
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
         `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
         `审核: ${pendingInfo} | 过滤候选: ${facetsInfo} | 镜像预览: ${mirrorInfo} | ` +
-        `权限: ${capsInfo} | 配置: ${configInfo} | 维护: ${maintInfo}`,
+        `权限: ${capsInfo} | 配置: ${configInfo} | 维护: ${maintInfo} | ` +
+        `${moodView} | ${pendingView} | ${auditView}`,
     )
   } catch {
     console.error(`[memory-es-panel] 自检返回无法解析 ${result.body.slice(0, 240)}`)

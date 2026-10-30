@@ -32,6 +32,16 @@ window.__ModuleLoader__.load({
       cardDocs: '文档',
       cardDocChunks: '分块',
       cardPending: '待裁决',
+      moodTitle: '此刻心情',
+      moodCalm: '平静',
+      moodGreat: '愉快',
+      moodGood: '不错',
+      moodMeh: '有点闷',
+      moodLow: '低落',
+      moodNeutral: '还没有情绪记录',
+      moodUpdated: '更新于',
+      moodEvents: '最近事件',
+      moodNote: '心情只由事件推动（用户夸奖/批评、工具成败），面板不提供手动修改。',
       cardAudit: '审计事件',
       cardAuditNA: '需配置整理身份（identity.consolidatorPassword）后可见',
       cardAudit7d: '近 7 天',
@@ -171,6 +181,16 @@ window.__ModuleLoader__.load({
       cardDocs: 'Docs',
       cardDocChunks: 'chunks',
       cardPending: 'Pending review',
+      moodTitle: 'Current mood',
+      moodCalm: 'Calm',
+      moodGreat: 'Cheerful',
+      moodGood: 'Good',
+      moodMeh: 'A bit low',
+      moodLow: 'Down',
+      moodNeutral: 'No mood recorded yet',
+      moodUpdated: 'Updated',
+      moodEvents: 'Recent events',
+      moodNote: 'Mood is driven by events only (praise/criticism, tool success/failure); there is no manual override.',
       cardAudit: 'Audit events',
       cardAuditNA: 'visible once identity.consolidatorPassword is configured',
       cardAudit7d: 'last 7 days',
@@ -551,8 +571,60 @@ window.__ModuleLoader__.load({
       }, done ? t('copied') : (label ?? t('copy')))
     }
 
+    // ── 心情卡（阶段 6.2）───────────────────────────────────────────────
+    const MOOD_LABELS = [
+      [0.5, 'moodGreat'],
+      [0.12, 'moodGood'],
+      [-0.12, 'moodCalm'],
+      [-0.5, 'moodMeh'],
+    ]
+    function moodLabelOf(valence, t) {
+      for (const [threshold, key] of MOOD_LABELS) {
+        if (valence >= threshold) return t(key)
+      }
+      return t('moodLow')
+    }
+
+    function MoodCard({ mood, t }) {
+      const exists = mood && mood.exists
+      const valence = exists ? Number(mood.valence) || 0 : 0
+      const events = exists && Array.isArray(mood.events) ? mood.events : []
+      if (!exists) {
+        return h('div', { style: { ...S.card, marginBottom: 12 } },
+          h('div', { style: S.muted }, `${t('moodTitle')} · ${t('moodNeutral')}`),
+          h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, t('moodNote')),
+        )
+      }
+      // -1..1 映射成 0..100% 的填充：左负右正，视觉上"往哪边偏"一眼能看出
+      const pct = Math.round(((valence + 1) / 2) * 100)
+      const strong = Math.abs(valence) >= 0.12
+      return h('div', { style: { ...S.card, marginBottom: 12 } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
+          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } },
+            `${t('moodTitle')} · ${strong ? moodLabelOf(valence, t) : t('moodCalm')}`),
+          h('span', { style: S.muted },
+            `${valence >= 0 ? '+' : ''}${valence.toFixed(2)} · ${t('moodUpdated')} ${String(mood.updatedAt || '').replace('T', ' ').slice(0, 16)}`),
+        ),
+        h('div', {
+          style: { marginTop: 8, height: 6, borderRadius: 999, background: 'var(--dsw-alias-fill-2, rgba(127,127,127,.18))', overflow: 'hidden' },
+        }, h('div', {
+          style: { width: `${pct}%`, height: '100%', borderRadius: 999, background: valence >= 0 ? '#4c9a6a' : '#b8623f' },
+        })),
+        events.length === 0
+          ? null
+          : h('div', { style: { marginTop: 10 } },
+              h('div', { style: { ...S.muted, fontSize: 12, marginBottom: 4 } }, `${t('moodEvents')}（${events.length}）`),
+              events.slice(0, 5).map((event, index) =>
+                h('div', { key: `${index}:${event.at ?? ''}`, style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.7 } },
+                  `· ${String(event.kind ?? '?')}${event.note ? `（${event.note}）` : ''} · ${String(event.at ?? '').replace('T', ' ').slice(5, 16)}`),
+              ),
+            ),
+        h('p', { style: { ...S.muted, marginTop: 8, fontSize: 12 } }, t('moodNote')),
+      )
+    }
+
     // ── 概览 ─────────────────────────────────────────────────────────────
-    function Overview({ data, loading, error, t, onRetry, onOpenBrowse }) {
+    function Overview({ data, mood, loading, error, t, onRetry, onOpenBrowse }) {
       if (loading) return h('p', { style: S.muted }, t('loading'))
       if (error) {
         return h('div', null,
@@ -588,6 +660,8 @@ window.__ModuleLoader__.load({
                 : `${t('cardAudit7d')} ${counts.auditLast7d}`,
           }),
         ),
+
+        MoodCard({ mood, t }),
 
         h('div', { style: { ...S.card, marginBottom: 12 } },
           h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
@@ -1549,11 +1623,17 @@ window.__ModuleLoader__.load({
       }, [])
       const [overview, setOverview] = React.useState({ loading: true, error: '', data: null })
 
+      const [mood, setMood] = React.useState(null)
+
       const loadOverview = React.useCallback(() => {
         setOverview((prev) => ({ ...prev, loading: true, error: '' }))
         apiGet('/overview')
           .then((data) => setOverview({ loading: false, error: '', data }))
           .catch((error) => setOverview({ loading: false, error: String(error.message ?? error), data: null }))
+        // 心情单独拉：它失败不该让整页报错（老库没有这个文档是正常的）
+        apiGet('/mood')
+          .then((value) => setMood(value))
+          .catch(() => setMood(null))
       }, [])
 
       React.useEffect(() => {
