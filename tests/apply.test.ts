@@ -49,14 +49,14 @@ interface FakeCtx {
   /** 存放 effect 注册的 disposer，用来验证卸载时能回收 */
   disposers: Array<() => void>
   /** 注册过的提示词段 */
-  sections: Array<{ name: string; order: number; text: string }>
+  sections: Array<{ name: string; order: number; text: string | (() => string) }>
 }
 
 function fakeCtx(): FakeCtx {
   const registered: Array<{ name: string }> = []
   const logs: string[] = []
   const disposers: Array<() => void> = []
-  const sections: Array<{ name: string; order: number; text: string }> = []
+  const sections: Array<{ name: string; order: number; text: string | (() => string) }> = []
   const ctx = {
     logger: () => ({
       info: (format: string, ...args: unknown[]) => logs.push(renderLog(format, args)),
@@ -112,8 +112,8 @@ describe('apply', () => {
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
     assert.equal(harness.registered.length, 6, '六个工具各一次 effect（含 memory_distill / doc_search）')
-    assert.equal(harness.sections.length, 1, '提示词段也要走 effect')
-    assert.equal(harness.disposers.length, 7, '应当通过 ctx.effect 注册（而不是裸 register）')
+    assert.equal(harness.sections.length, 2, '记忆段 + 心情段各一次 effect')
+    assert.equal(harness.disposers.length, 8, '应当通过 ctx.effect 注册（而不是裸 register）')
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
     assert.equal(harness.sections.length, 0)
@@ -141,12 +141,20 @@ describe('apply', () => {
   test('提示词段：名字/顺序正确，正文非空且不含会触发插值的花括号', () => {
     const harness = fakeCtx()
     apply(harness.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
-    assert.equal(harness.sections.length, 1)
-    const [section] = harness.sections
-    assert.equal(section.name, 'dsh-memory-es')
+    assert.equal(harness.sections.length, 2)
+    const section = harness.sections.find((s) => s.name === 'dsh-memory-es')!
     assert.equal(section.order, 3200)
-    assert.ok(section.text.includes('memory_search'))
-    assert.equal(section.text.includes('{{'), false)
+    assert.equal(typeof section.text, 'string')
+    assert.ok((section.text as string).includes('memory_search'))
+    assert.equal((section.text as string).includes('{{'), false)
+
+    // 阶段 6.2：心情段紧随其后，text 是函数（平静时返回空串 → 宿主丢掉该段）
+    const moodSection = harness.sections.find((s) => s.name === 'dsh-memory-es-mood')!
+    assert.equal(moodSection.order, 3201)
+    assert.equal(typeof moodSection.text, 'function')
+    const moodText = moodSection.text as () => string
+    assert.equal(moodText(), '', '平静时不注入')
+    assert.equal(moodText().includes('{{'), false)
   })
 
   test('exports：name 与 inject 是插件契约的一部分', () => {

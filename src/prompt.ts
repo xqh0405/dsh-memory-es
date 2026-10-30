@@ -39,6 +39,15 @@ export const MEMORY_PROMPT = [
   '`memory_search` 只返回「一句事实」。要查「某个项目的方案细节 / 踩坑记录」时先用 `doc_search`。',
 ].join('\n')
 
+/**
+ * 心情段：紧跟记忆段之后（3201）。
+ *
+ * `text` 是**函数**而不是常量——心情随时间衰减，每次组装提示词都要求值。
+ * 平静时返回空串，宿主会把空段丢掉，等于不注入。
+ */
+export const MOOD_SECTION_NAME = 'dsh-memory-es-mood'
+export const MOOD_SECTION_ORDER = 3201
+
 /** 注册用的段对象（形状对齐宿主的 `PromptSection`） */
 export const MEMORY_PROMPT_SECTION = {
   name: PROMPT_SECTION_NAME,

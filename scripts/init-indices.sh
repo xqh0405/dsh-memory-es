@@ -5,6 +5,9 @@
 # 所以个人库改成「一人一索引」：personal_memory_<user_id>，用索引级 ACL 隔离。
 # 索引模板负责让新用户的索引自动继承同一套 mapping。
 #
+# 阶段 6.2 新增四个情绪状态字段（同一个索引里的固定文档 id __mood__，
+# status=mood 不进检索；见 src/memory/mood.ts 的说明）。
+#
 # 阶段 5.1 新增两个字段：
 #  · related    —— 记忆之间的邻接表 [{id, weight}]。用 `enabled: false`：扩散激活
 #                 在检索后读 _source 计算，不需要检索它；不索引 = 零倒排开销。
@@ -64,6 +67,10 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "last_hit_at":       { "type": "date" },
         "related":           { "type": "object", "enabled": false },
         "activation":        { "type": "float" },
+        "mood_valence":      { "type": "float" },
+        "mood_arousal":      { "type": "float" },
+        "mood_updated_at":   { "type": "date" },
+        "mood_events":       { "type": "object", "enabled": false },
         "superseded_at":     { "type": "date" },
         "blocked_reason":    { "type": "keyword" },
         "personal_only_reason": { "type": "text" },
