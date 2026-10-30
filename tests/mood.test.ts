@@ -116,6 +116,19 @@ describe('moodLabel / renderMoodLine', () => {
     assert.doesNotMatch(line, /\d/, '不要暴露数值')
   })
 
+  test('单次夸奖必须注入（阈值不能被 delta 顶着）', () => {
+    const once = applyMoodEvent(NEUTRAL_MOOD, 'praise', T0)
+    // 哪怕已经过了几秒（衰减一点点），也仍然要注入——这是 0.15 阈值时代的 bug
+    assert.notEqual(renderMoodLine(once, new Date(T0.getTime() + 5_000)), '', '一次「谢谢」就该有反应')
+    const scolded = applyMoodEvent(NEUTRAL_MOOD, 'criticism', T0)
+    assert.notEqual(renderMoodLine(scolded, new Date(T0.getTime() + 5_000)), '', '一次明确批评也该有反应')
+  })
+
+  test('单次工具失败不外露（阈值高于 0.10）', () => {
+    const failed = applyMoodEvent(NEUTRAL_MOOD, 'tool_error', T0)
+    assert.equal(renderMoodLine(failed, T0), '', '偶发报错不该改变口吻')
+  })
+
   test('情绪会随时间淡出：很久之后又变回不注入', () => {
     const happy = applyMoodEvent(NEUTRAL_MOOD, 'praise', T0)
     assert.notEqual(renderMoodLine(happy, T0), '')

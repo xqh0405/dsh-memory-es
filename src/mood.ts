@@ -30,8 +30,14 @@ export const MOOD_HALF_LIFE_HOURS = 3
 /** 保留的事件条数上界（可回放，但不无限增长） */
 export const MOOD_MAX_EVENTS = 20
 
-/** 低于这个偏离量就不注入提示词（平静时不打扰模型） */
-export const MOOD_SILENT_THRESHOLD = 0.15
+/**
+ * 低于这个偏离量就不注入提示词（平静时不打扰模型）。
+ *
+ * 取值必须**明显小于**单次 `praise`（0.15）：曾经设成 0.15，结果一次夸奖刚好等于阈值、
+ * 衰减几秒后就差一点点，永远不注入（2026-10-30 实测踩到）。0.12 保证：
+ * 单次夸奖/批评会外露，单次工具失败（0.10）不外露。
+ */
+export const MOOD_SILENT_THRESHOLD = 0.12
 
 export interface MoodEvent {
   kind: MoodEventKind
