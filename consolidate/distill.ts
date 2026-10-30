@@ -52,9 +52,9 @@ const PERSONAL_PATTERNS: Array<{ pattern: RegExp; replace: string }> = [
  *
  * 为什么只换当前用户、不换所有 `/home/*`：`/home/docker-data/lottery` 是**另一台机器的真实路径**，
  * 抹成 `~` 反而丢信息。只把「你自己的家目录」相对化——同事看到 `~/code/foo` 会理解成
- * 「我自己的 home 下」，而 `/home/user/code/foo` 会让他误判「这条是别人的、我这没有」。
+ * 「我自己的 home 下」，而 `/home/someone/code/foo` 会让他误判「这条是别人的、我这没有」。
  *
- * 2026-10-29：团队库 236 条里 28 条含 `/home/user`，逐个替换并重算 content_sha256；
+ * 2026-10-29：团队库 236 条里 28 条含本机家目录绝对路径，逐个替换并重算 content_sha256；
  * 这里补上增量规则，以后整理不会再带进来。
  */
 export function normalizeHomePath(content: string, homeUser?: string): string {
@@ -75,7 +75,7 @@ export function stripPersonalContext(content: string, options?: { homeUser?: str
   for (const { pattern, replace } of PERSONAL_PATTERNS) {
     text = text.replace(pattern, replace)
   }
-  // 家目录相对化要放在英文替换之后：`/home/user` 本身不含第一人称，不会被误伤
+  // 家目录相对化要放在英文替换之后：家目录路径本身不含第一人称，不会被误伤
   text = normalizeHomePath(text, options?.homeUser)
   return text.replace(/\s+/g, ' ').trim()
 }
@@ -105,8 +105,8 @@ const KNOWLEDGE_PATTERN =
 /**
  * 判断一条个人记忆值不值得进团队库（规则版，S9 接 LLM 前的兜底）。
  *
- * 为什么需要它：2026-10-29 整理 xqh 的 258 条记忆，团队库从 9 条涨到 244 条，
- * 其中 39 条含 `/home/user`——「项目 X 克隆在 …」「Maven 已装好于 …」这类环境配置
+ * 为什么需要它：2026-10-29 整理某个用户的 258 条记忆，团队库从 9 条涨到 244 条，
+ * 其中 39 条含本机家目录绝对路径——「项目 X 克隆在 …」「Maven 已装好于 …」这类环境配置
  * 对别人零价值，只能事后人工清理。与其灌进去再删，不如在这一步就判 personal_only。
  *
  * 边界要说清：这**不是价值判断**，只识别「纯环境配置」这一种明确无价值的形态；

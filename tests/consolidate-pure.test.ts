@@ -326,16 +326,16 @@ describe('classifyValue（环境配置不进团队库，2026-10-29）', () => {
   })
 
   test('git 工作流规则不因提到私钥路径被误杀（2026-10-29 回归）', () => {
-    const r = classifyValue('模型不自动 push 指未经要求的推送；push/pull 用 ~/.ssh/config 的 ssh.example.com:2233 + 私钥 /home/user/git')
+    const r = classifyValue('模型不自动 push 指未经要求的推送；push/pull 用 ~/.ssh/config 的 ssh.example.com:2222 + 私钥 /home/user/git')
     assert.equal(r.verdict, 'team_worthy')
   })
 })
 
 describe('normalizeHomePath（团队库里不放别人的家目录）', () => {
   test('当前用户的家目录相对化成 ~', () => {
-    assert.equal(normalizeHomePath('/home/user/code/foo 是仓库', 'xqh'), '~/code/foo 是仓库')
-    assert.equal(normalizeHomePath('Maven 在 /home/user/opt/maven', 'xqh'), 'Maven 在 ~/opt/maven')
-    assert.equal(normalizeHomePath('/home/user', 'xqh'), '~')
+    assert.equal(normalizeHomePath('/home/user/code/foo 是仓库', 'user'), '~/code/foo 是仓库')
+    assert.equal(normalizeHomePath('Maven 在 /home/user/opt/maven', 'user'), 'Maven 在 ~/opt/maven')
+    assert.equal(normalizeHomePath('/home/user', 'user'), '~')
   })
 
   test('其他机器的真实路径不动（抹成 ~ 反而丢信息）', () => {
@@ -343,7 +343,7 @@ describe('normalizeHomePath（团队库里不放别人的家目录）', () => {
   })
 
   test('只换整段匹配：/home/user2 不能被误换', () => {
-    assert.equal(normalizeHomePath('/home/user2/code', 'xqh'), '/home/user2/code')
+    assert.equal(normalizeHomePath('/home/user2/code', 'user'), '/home/user2/code')
   })
 
   test('不给 homeUser 就原样返回（纯函数不猜环境）', () => {
@@ -351,7 +351,7 @@ describe('normalizeHomePath（团队库里不放别人的家目录）', () => {
   })
 
   test('stripPersonalContext 透传 homeUser', () => {
-    const out = stripPersonalContext('/home/user/code/foo 的构建脚本', { homeUser: 'xqh' })
+    const out = stripPersonalContext('/home/user/code/foo 的构建脚本', { homeUser: 'user' })
     assert.match(out, /^~\/code\/foo/)
     assert.equal(out.includes('/home/user'), false)
   })
