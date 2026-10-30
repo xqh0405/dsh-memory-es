@@ -154,6 +154,44 @@ put_index team_knowledge <<'JSON'
 }
 JSON
 
+# ── 个人审计流水（阶段 7.3 补强）──────────────────────────────────
+# 为什么单独一份而不是只写 memory_audit：
+#   · memory_audit 是**共享**索引，只有 teamWrite 身份能写；普通用户采纳/拒绝自己的候选时
+#     写不进去（实测 mem-user-* 403），只能降级把痕迹记在条目上——那样查不到"我做过哪些审核"。
+#   · 个人操作写进共享审计还意味着任何人能写别人的审计记录，无法防伪造。
+# 字段刻意与 memory_audit 对齐：以后要汇总时可以直接并起来看。
+echo '== 索引模板 personal_audit_* =='
+es -X PUT "$ES/_index_template/personal_audit_template" -d @- >/dev/null <<'JSON'
+{
+  "index_patterns": ["personal_audit_*"],
+  "priority": 100,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "event":        { "type": "keyword" },
+        "actor":        { "type": "keyword" },
+        "at":           { "type": "date" },
+        "subject_type": { "type": "keyword" },
+        "subject_id":   { "type": "keyword" },
+        "memory_id":    { "type": "keyword" },
+        "team_doc_id":  { "type": "keyword" },
+        "from_state":   { "type": "keyword" },
+        "to_state":     { "type": "keyword" },
+        "reason":       { "type": "keyword" },
+        "note":         { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" }
+      }
+    }
+  }
+}
+JSON
+echo '  personal_audit_* → 每用户一份操作审计（采纳/拒绝/晋升）'
+
 # ── 检索埋点（P1）────────────────────────────────────────────────
 # 只存「查了什么、召回几条、多久、是不是空/降级」。
 # 为什么不塞 memory_audit：audit 是知识治理流水（低频、留 90 天），

@@ -284,6 +284,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           userId,
           personalPrefix,
           auditIndex: config.index.audit,
+          auditPrefix: config.index.auditPrefix,
           reader,
           writer,
           now: () => new Date(),

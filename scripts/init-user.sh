@@ -108,17 +108,17 @@ echo "== 2/3 本用户角色（个人读写，只限自己的索引）=="
 admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<JSON
 {
   "indices": [
-    { "names": ["$PERSONAL", "personal_doc_${UID_ARG}", "search_log_${UID_ARG}"],
+    { "names": ["$PERSONAL", "personal_doc_${UID_ARG}", "search_log_${UID_ARG}", "personal_audit_${UID_ARG}"],
       "privileges": ["read", "index", "delete", "view_index_metadata"] }
   ]
 }
 JSON
-echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_${UID_ARG} + search_log_${UID_ARG} 读/写/删（不是通配）"
+echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删（不是通配）"
 
 echo "== 2.5/3 个人索引（幂等，空 body 继承索引模板）=="
 # 只建账号不建索引的话，新账号第一次打开面板会是 "ES 不可达 / index_not_found"，
 # 一直要等到第一次写入才自动创建——看起来像坏了（2026-10-29 dsh-test 就踩过）。
-for idx in "$PERSONAL" "personal_doc_${UID_ARG}" "search_log_${UID_ARG}"; do
+for idx in "$PERSONAL" "personal_doc_${UID_ARG}" "search_log_${UID_ARG}" "personal_audit_${UID_ARG}"; do
   code=$(admin -o /dev/null -w '%{http_code}' -I "$ES/$idx" || true)
   if [ "$code" = "200" ]; then
     echo "  [skip]   $idx 已存在"

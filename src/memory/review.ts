@@ -35,13 +35,17 @@ export interface ReviewCandidate {
 export interface ReviewDeps {
   userId: string
   personalPrefix: string
-  /** 审计索引名（默认 memory_audit） */
+  /** 共享审计索引名（默认 memory_audit；只有 teamWrite 能写） */
   auditIndex: string
+  /** 个人审计索引前缀（实际索引 = 前缀 + userId；每个用户都有写权限） */
+  auditPrefix: string
   reader: Pick<EsClient, 'search' | 'get'>
   writer: Pick<EsClient, 'index' | 'update'>
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
+
+export type AuditResult = 'ok' | 'personal_only' | 'failed' | 'skipped'
 
 export interface ReviewOutcome {
   memory_id: string
@@ -49,8 +53,11 @@ export interface ReviewOutcome {
   changed: boolean
   /** 操作后的状态；找不到条目时为空串 */
   status: string
-  /** 审计是否写入成功 */
-  audit: 'ok' | 'failed' | 'skipped'
+  /**
+   * 审计落点：ok = 个人 + 共享都写了；personal_only = 只写进个人审计（没有 teamWrite）；
+   * failed = 个人审计也写失败；skipped = 没走到审计（状态未变/找不到条目）
+   */
+  audit: AuditResult
   note: string
 }
 
@@ -169,9 +176,11 @@ async function transition(
 
   log({ tool: 'review', event, memory_id: memoryId, audit, note: note ?? '' })
   const suffix =
-    audit === 'failed'
-      ? '（全局审计索引写不进——该账号没有 memory_audit 写权限；审核痕迹已记在条目上）'
-      : ''
+    audit === 'personal_only'
+      ? '（共享审计索引写不进——该账号没有 teamWrite；已记在个人审计与条目上）'
+      : audit === 'failed'
+        ? '（审计写入失败；审核痕迹已记在条目上）'
+        : ''
   return { memory_id: memoryId, changed: true, status: target, audit, note: `${successText}${suffix}` }
 }
 
@@ -184,30 +193,54 @@ export interface AuditEntry {
   at: Date
 }
 
-/** 写审计。失败只记录、不抛——主操作已经生效，不能因为审计把它回滚。 */
-export async function writeAudit(deps: ReviewDeps, entry: AuditEntry): Promise<'ok' | 'failed'> {
-  try {
-    await deps.writer.index(
-      deps.auditIndex,
-      {
-        event: entry.event,
-        actor: deps.userId,
-        at: entry.at.toISOString(),
-        subject_type: 'personal_memory',
-        subject_id: entry.memoryId,
-        memory_id: entry.memoryId,
-        from_state: entry.fromState,
-        to_state: entry.toState,
-        reason: entry.event,
-        ...(entry.note === undefined || entry.note === '' ? {} : { note: entry.note }),
-      },
-      { refresh: 'wait_for' },
-    )
-    return 'ok'
-  } catch (err) {
-    deps.log?.({ tool: 'review', event: 'audit_failed', error: formatEsError(err) })
-    return 'failed'
+/**
+ * 写审计。两层：**个人审计必写**（每个用户对自己的索引有权限），共享审计尽力写。
+ *
+ * 顺序不能反：先写个人那份，即使共享那份 403，用户自己的流水也已经留下。
+ * 任何一层失败都不抛——主操作已经生效，不能因为审计把它回滚。
+ */
+export async function writeAudit(deps: ReviewDeps, entry: AuditEntry): Promise<AuditResult> {
+  const doc = {
+    event: entry.event,
+    actor: deps.userId,
+    at: entry.at.toISOString(),
+    subject_type: 'personal_memory',
+    subject_id: entry.memoryId,
+    memory_id: entry.memoryId,
+    from_state: entry.fromState,
+    to_state: entry.toState,
+    reason: entry.event,
+    ...(entry.note === undefined || entry.note === '' ? {} : { note: entry.note }),
   }
+
+  let personal = false
+  try {
+    await deps.writer.index(`${deps.auditPrefix}${deps.userId}`, doc, { refresh: 'wait_for' })
+    personal = true
+  } catch (err) {
+    deps.log?.({ tool: 'review', event: 'personal_audit_failed', error: formatEsError(err) })
+  }
+
+  let shared = false
+  try {
+    await deps.writer.index(deps.auditIndex, doc, { refresh: 'wait_for' })
+    shared = true
+  } catch (err) {
+    deps.log?.({ tool: 'review', event: 'shared_audit_failed', error: formatEsError(err) })
+  }
+
+  if (!personal) return 'failed'
+  return shared ? 'ok' : 'personal_only'
+}
+
+/** 读个人审计流水（新→旧）。共享审计不在个人账号权限范围，这里只查自己的。 */
+export async function listAudit(deps: ReviewDeps, limit = 20): Promise<Array<Record<string, unknown>>> {
+  const index = `${deps.auditPrefix}${deps.userId}`
+  const res = await deps.reader.search(index, {
+    size: Math.max(1, Math.min(100, limit)),
+    sort: [{ at: 'desc' }],
+  })
+  return res.hits.map((hit) => hit.source as Record<string, unknown>)
 }
 
 function isNotFound(err: unknown): boolean {
@@ -220,7 +253,7 @@ const REVIEW_DESCRIPTION = [
   '只有 status=pending 的 identity 条目能被采纳；重复采纳会如实告诉你当前状态而不是假装成功。',
 ].join('')
 
-export const REVIEW_ACTION_VALUES = ['list', 'approve', 'reject'] as const
+export const REVIEW_ACTION_VALUES = ['list', 'approve', 'reject', 'history'] as const
 export type ReviewAction = (typeof REVIEW_ACTION_VALUES)[number]
 
 export function defineReviewTool(deps: ReviewDeps) {
@@ -232,7 +265,7 @@ export function defineReviewTool(deps: ReviewDeps) {
         type: 'string',
         enum: [...REVIEW_ACTION_VALUES],
         required: true,
-        description: 'list = 列出待采纳候选；approve = 采纳；reject = 拒绝。',
+        description: 'list = 列出待采纳候选；approve = 采纳；reject = 拒绝；history = 查自己的审核流水。',
       },
       memory_id: { type: 'string', description: 'approve / reject 时必填：候选的 memory_id。' },
       limit: { type: 'number', description: 'list 时最多返回几条（默认 20，上限 100）。' },
@@ -268,6 +301,12 @@ export function defineReviewTool(deps: ReviewDeps) {
         }
       }
 
+      if (action === 'history') {
+        const limit = typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.trunc(input.limit) : 20
+        const rows = await listAudit(deps, limit)
+        return { action, count: rows.length, changed: false, status: '', audit: 'skipped', text: renderAudit(rows) }
+      }
+
       const memoryId = String(input.memory_id ?? '').trim()
       if (memoryId === '') throw new Error('memory_review: approve / reject 需要 memory_id')
 
@@ -280,6 +319,19 @@ export function defineReviewTool(deps: ReviewDeps) {
       }
     },
   })
+}
+
+function renderAudit(rows: readonly Record<string, unknown>[]): string {
+  if (rows.length === 0) return '还没有审核记录。'
+  const lines = [`最近 ${rows.length} 条审核记录（新→旧）：`, '']
+  for (const row of rows) {
+    const at = typeof row.at === 'string' ? row.at.replace('T', ' ').slice(0, 19) : '?'
+    const event = typeof row.event === 'string' ? row.event : '?'
+    const id = typeof row.memory_id === 'string' ? row.memory_id : '?'
+    const note = typeof row.note === 'string' && row.note !== '' ? `｜${row.note}` : ''
+    lines.push(`- ${at} ${event} ${id}${note}`)
+  }
+  return lines.join('\n')
 }
 
 function renderCandidates(items: readonly ReviewCandidate[]): string {

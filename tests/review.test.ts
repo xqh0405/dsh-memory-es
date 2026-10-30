@@ -28,15 +28,19 @@ interface FakeDoc {
   created_at?: string
 }
 
-function makeDeps(docs: Record<string, FakeDoc>, options: { auditFails?: boolean } = {}) {
+function makeDeps(
+  docs: Record<string, FakeDoc>,
+  options: { sharedAuditFails?: boolean; personalAuditFails?: boolean } = {},
+) {
   const updates: Array<{ id: string; doc: Record<string, unknown> }> = []
-  const audits: Array<Record<string, unknown>> = []
+  const audits: Array<{ index: string; doc: Record<string, unknown> }> = []
   let searchBody: Record<string, unknown> | null = null
 
   const deps = {
     userId: 'u1',
     personalPrefix: 'personal_memory_',
     auditIndex: 'memory_audit',
+    auditPrefix: 'personal_audit_',
     now: () => NOW,
     reader: {
       get: async (_i: string, id: string) => {
@@ -57,10 +61,12 @@ function makeDeps(docs: Record<string, FakeDoc>, options: { auditFails?: boolean
         updates.push({ id, doc })
         return { id, result: 'updated', status: 200 }
       },
-      index: async (_i: string, doc: Record<string, unknown>) => {
-        if (options.auditFails === true) throw { status: 403, kind: 'security' }
-        audits.push(doc)
-        return { id: 'audit-1', result: 'created', status: 200 }
+      index: async (indexName: string, doc: Record<string, unknown>) => {
+        const isPersonal = indexName.startsWith('personal_audit_')
+        if (isPersonal && options.personalAuditFails === true) throw { status: 403, kind: 'security' }
+        if (!isPersonal && options.sharedAuditFails === true) throw { status: 403, kind: 'security' }
+        audits.push({ index: indexName, doc })
+        return { id: `audit-${audits.length}`, result: 'created', status: 200 }
       },
     },
   } as unknown as ReviewDeps
@@ -94,10 +100,12 @@ describe('approveCandidate', () => {
     assert.equal(out.status, APPROVED_STATUS)
     assert.equal(out.audit, 'ok')
     assert.equal(updates[0]?.doc.status, 'active')
-    assert.equal(audits[0]?.event, 'identity_approved')
-    assert.equal(audits[0]?.from_state, 'pending')
-    assert.equal(audits[0]?.to_state, 'active')
-    assert.equal(audits[0]?.note, '看着像')
+    assert.equal(audits.length, 2, '个人审计 + 共享审计各一条')
+    assert.equal(audits[0]?.index, 'personal_audit_u1', '先写个人那份')
+    assert.equal(audits[0]?.doc.event, 'identity_approved')
+    assert.equal(audits[0]?.doc.from_state, 'pending')
+    assert.equal(audits[0]?.doc.to_state, 'active')
+    assert.equal(audits[0]?.doc.note, '看着像')
   })
 
   test('已经 active 的再采纳：changed=false，如实说明状态', async () => {
@@ -128,19 +136,32 @@ describe('approveCandidate', () => {
     assert.match(out.note, /找不到/)
   })
 
-  test('审计写失败不回滚主操作，且如实标记', async () => {
+  test('没有 teamWrite：共享审计失败，但个人审计仍写入（personal_only）', async () => {
+    const { deps, updates, audits } = makeDeps(
+      { t1: { memory_id: 't1', content: 'x', memory_type: 'identity', status: 'pending' } },
+      { sharedAuditFails: true },
+    )
+    const out = await approveCandidate(deps, 't1')
+    assert.equal(out.changed, true, '状态已改')
+    assert.equal(out.audit, 'personal_only')
+    assert.match(out.note, /共享审计索引写不进/)
+    assert.equal(updates.length, 1)
+    assert.equal(audits.length, 1, '只有个人那份写成功')
+    assert.equal(audits[0]?.index, 'personal_audit_u1')
+    // 审核痕迹必须同时落在条目上
+    assert.equal(typeof updates[0]?.doc.reviewed_at, 'string')
+    assert.equal(updates[0]?.doc.reviewed_by, 'u1')
+  })
+
+  test('个人审计也失败时才报 failed，且不回滚主操作', async () => {
     const { deps, updates } = makeDeps(
       { t1: { memory_id: 't1', content: 'x', memory_type: 'identity', status: 'pending' } },
-      { auditFails: true },
+      { personalAuditFails: true, sharedAuditFails: true },
     )
     const out = await approveCandidate(deps, 't1')
     assert.equal(out.changed, true, '状态已改')
     assert.equal(out.audit, 'failed')
-    assert.match(out.note, /审计索引写不进/)
     assert.equal(updates.length, 1)
-    // 审核痕迹必须同时落在条目上（审计索引写不进去时的降级保障）
-    assert.equal(typeof updates[0]?.doc.reviewed_at, 'string')
-    assert.equal(updates[0]?.doc.reviewed_by, 'u1')
   })
 })
 
@@ -153,8 +174,8 @@ describe('rejectCandidate', () => {
     assert.equal(out.changed, true)
     assert.equal(out.status, REJECTED_STATUS)
     assert.equal(updates[0]?.doc.status, 'archived')
-    assert.equal(audits[0]?.event, 'identity_rejected')
-    assert.equal(audits[0]?.note, '太笼统')
+    assert.equal(audits[0]?.doc.event, 'identity_rejected')
+    assert.equal(audits[0]?.doc.note, '太笼统')
   })
 
   test('拒绝已归档的再次拒绝：不重复改状态', async () => {
