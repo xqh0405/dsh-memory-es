@@ -130,6 +130,32 @@ describe('buildMemoryDoc（纯函数）', () => {
     assert.deepEqual(built.doc.embedding, VECTOR)
   })
 
+  test('阶段 6.1：valence/arousal 可选，给了才写字段', () => {
+    const withMood = buildMemoryDoc(
+      { content: '那天他很高兴', valence: 0.6, arousal: 0.4 },
+      { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'general' },
+      { now: NOW, memoryId: FIXED_ID, embedding: null },
+    )
+    assert.equal(withMood.doc.valence, 0.6)
+    assert.equal(withMood.doc.arousal, 0.4)
+
+    const plain = buildMemoryDoc(
+      { content: '一条普通事实' },
+      { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'general' },
+      { now: NOW, memoryId: FIXED_ID, embedding: null },
+    )
+    assert.equal('valence' in plain.doc, false, '不标就不写字段（缺失 ≠ 中性）')
+    assert.equal('arousal' in plain.doc, false)
+  })
+
+  test('阶段 6.1：越界值直接拒绝，不静默截断', () => {
+    const deps = { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'general' }
+    const opts = { now: NOW, memoryId: FIXED_ID, embedding: null }
+    assert.throws(() => buildMemoryDoc({ content: 'x', valence: 1.5 }, deps, opts), /valence 必须是 -1~1/)
+    assert.throws(() => buildMemoryDoc({ content: 'x', arousal: -0.1 }, deps, opts), /arousal 必须是 0~1/)
+    assert.throws(() => buildMemoryDoc({ content: 'x', valence: Number.NaN }, deps, opts), /valence 必须是 -1~1/)
+  })
+
   test('归一化口径：全角空格/半角多空格折叠后哈希相同（幂等的依据）', () => {
     const a = buildMemoryDoc(
       { content: '　记录　一条　事实　' },
@@ -347,12 +373,14 @@ describe('defineSaveTool', () => {
     const def = defineSaveTool(makeDeps({ url: 'http://127.0.0.1:1', requests: [], close: async () => {} } as unknown as FakeEs))
     const parameters = def.parameters as { properties: Record<string, unknown> }
     assert.deepEqual(Object.keys(parameters.properties).sort(), [
+      'arousal',
       'content',
       'domain',
       'importance',
       'memory_type',
       'privacy',
       'ttl_days',
+      'valence',
     ])
     assert.equal(JSON.stringify(def.parameters).includes('user_id'), false)
     assert.match(def.description, /memory_save|记忆/)

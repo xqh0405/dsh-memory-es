@@ -67,6 +67,7 @@ export interface ConfigType {
     reinforcementCap: number
     agreementBonus: number
     activationAlpha: number
+    moodWeight: number
   }
   /** 置信判定：分层阈值，见 schema 处注释 */
   confidence: {
@@ -190,6 +191,8 @@ export const Config: z<ConfigType> = z.object({
       .description('两路名次一致时的乘性加成（0.1 = 最多 +10%；0 = 关闭）。KK 融合只看名次，这个 bonus 补上「两路一致」这个信号。'),
     activationAlpha: z.number().default(DEFAULT_RANKING.activationAlpha)
       .description('阶段 5.3 扩散激活强度：score += alpha × Σ(邻居分 × 边权)。0 = 关闭；邻居只算本次结果集内的。'),
+    moodWeight: z.number().default(DEFAULT_RANKING.moodWeight)
+      .description('阶段 6.3 情绪一致召回：score × (1 + moodWeight × 相似度)。0 = 关闭；只提权不降权，未标 valence 的条目不参与。'),
   }),
   defaults: z.object({
     domain: z.string().default('general')

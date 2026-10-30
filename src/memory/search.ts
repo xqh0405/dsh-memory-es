@@ -135,6 +135,11 @@ export interface SearchDeps {
   teamIndex: string
   /** 读身份：检索一律走只读凭证 */
   reader: Pick<EsClient, 'search'>
+  /**
+   * 阶段 6.3：当前心情（同步读缓存，不额外打 ES）。缺省 = 当没有情绪。
+   * 传函数而不是值，是为了每次检索都拿到最新状态。
+   */
+  mood?: () => { valence: number } | null
   embed?: Pick<Embedder, 'embed'> | null
   /** 索引 mapping 的向量维度（来自配置）；与 embedder 实际输出不一致时 knnBody 会抛 */
   dims: number
@@ -323,7 +328,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha)
   // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
   // 系数默认温和（±10% 量级），归零即完全关闭。
-  const merged = applyRanking(spread, rankingCfg, now)
+  const merged = applyRanking(spread, rankingCfg, now, deps.mood?.() ?? null)
   const basis = `${scope === 'both' ? 'personal+team' : scope}:${degraded ? 'bm25' : 'bm25+knn'}`
 
   /**

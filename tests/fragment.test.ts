@@ -8,6 +8,7 @@ import { describe, test } from 'node:test'
 
 import {
   applyRanking,
+  moodAffinity,
   spreadActivation,
   DEFAULT_RANKING,
   mergeScopes,
@@ -191,7 +192,7 @@ describe('applyRanking（阶段 2 排序乘子）', () => {
     const hits = [scoped('a', 0.03), scoped('b', 0.02)]
     const out = applyRanking(
       hits,
-      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0 },
+      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0, moodWeight: 0 },
       NOW,
     )
     assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
@@ -289,6 +290,56 @@ describe('rrfFuse agreementBonus（两路一致加成）', () => {
     const far = rrfFuse([[h('a')], [h('b'), h('c'), h('d'), h('a')]], 60, { agreementBonus: 0.2, span: 2 })
     const a = far.find((r) => r.id === 'a')!
     assert.ok(Math.abs(a.fusedScore - (1 / 61 + 1 / 64)) < 1e-12, 'gap=3 > span=2 → 无加成')
+  })
+})
+
+describe('moodAffinity / 情绪一致召回（阶段 6.3）', () => {
+  const NOW = new Date('2026-10-30T12:00:00.000Z')
+
+  function scoped(id: string, fusedScore: number, src: Record<string, unknown> = {}): ScopedHit {
+    return {
+      id,
+      score: fusedScore,
+      source: { memory_id: id, ...src },
+      routeRanks: [1],
+      fusedScore,
+      origin: 'personal',
+      contentHash: id,
+    }
+  }
+
+  test('相似度：同向为 1，反向为 0，中点 0.5', () => {
+    assert.equal(moodAffinity(0.6, 0.6), 1)
+    assert.equal(moodAffinity(1, -1), 0)
+    assert.equal(moodAffinity(0, 0), 1)
+    assert.equal(moodAffinity(-1, 0), 0.5)
+  })
+
+  test('非有限值返回 null（不参与）', () => {
+    assert.equal(moodAffinity(Number.NaN, 0.5), null)
+    assert.equal(moodAffinity(0.5, Number.NaN), null)
+  })
+
+  test('moodWeight=0 时逐条不变（关闭 = 没有这个特性）', () => {
+    const hits = [scoped('a', 0.02, { valence: 0.9 }), scoped('b', 0.03, { valence: -0.9 })]
+    const out = applyRanking(hits, { ...DEFAULT_RANKING, moodWeight: 0 }, NOW, { valence: 0.9 })
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
+  })
+
+  test('只提权不降权：同向记忆上浮，反向记忆不受罚', () => {
+    const hits = [scoped('happy', 0.02, { valence: 0.9 }), scoped('sad', 0.021)]
+    const out = applyRanking(hits, { ...DEFAULT_RANKING, moodWeight: 0.2 }, NOW, { valence: 0.9 })
+    const happy = out.find((h) => h.id === 'happy')!
+    const sad = out.find((h) => h.id === 'sad')!
+    assert.ok(happy.fusedScore > 0.02, '同向被提权')
+    assert.equal(sad.fusedScore, 0.021, '未标 valence 的条目原样不动')
+    assert.equal(out[0]?.id, 'happy', '提权后反超')
+  })
+
+  test('没标 valence 的条目一律不参与（缺失 ≠ 中性）', () => {
+    const hits = [scoped('a', 0.02), scoped('b', 0.03)]
+    const out = applyRanking(hits, { ...DEFAULT_RANKING, moodWeight: 0.5 }, NOW, { valence: 1 })
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
   })
 })
 

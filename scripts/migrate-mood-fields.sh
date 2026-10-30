@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# 增加情绪状态字段：mood_valence / mood_arousal / mood_updated_at / mood_events（阶段 6.2）。
+# 增加情绪相关字段（阶段 6.1 + 6.2）：
+#   · mood_valence / mood_arousal / mood_updated_at / mood_events —— 固定文档 __mood__ 用的状态
+#   · valence / arousal —— 单条记忆自带的情感色彩（可选，缺省不标）
 #
 # 为什么复用 personal_memory 而不是新开索引：新索引要改 init-user.sh 的精确授权列表
 # 并重跑用户初始化；而状态文档用 status=mood，检索只认 status=active，天然不进结果。
@@ -37,7 +39,9 @@ es -X PUT "$ES/$PERSONAL/_mapping" -d @- >/dev/null <<'JSON'
     "mood_valence":    { "type": "float" },
     "mood_arousal":    { "type": "float" },
     "mood_updated_at": { "type": "date" },
-    "mood_events":     { "type": "object", "enabled": false }
+    "mood_events":     { "type": "object", "enabled": false },
+    "valence":         { "type": "float" },
+    "arousal":         { "type": "float" }
   }
 }
 JSON
@@ -46,7 +50,7 @@ echo '  ok'
 echo '== 校验 =='
 body=$(es -X GET "$ES/$PERSONAL/_mapping")
 ok=1
-for f in mood_valence mood_arousal mood_updated_at mood_events; do
+for f in mood_valence mood_arousal mood_updated_at mood_events valence arousal; do
   echo "$body" | grep -q "\"$f\"" || { echo "  $f 缺失" >&2; ok=0; }
 done
-[ "$ok" = "1" ] && echo "  $PERSONAL: 4 个情绪状态字段已就绪" || exit 1
+[ "$ok" = "1" ] && echo "  $PERSONAL: 情绪状态字段 + 记忆情感字段已就绪" || exit 1

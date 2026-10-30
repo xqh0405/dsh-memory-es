@@ -167,6 +167,8 @@ export function apply(ctx: Context, config: ConfigType): void {
           retrieval: config.retrieval,
           confidence: config.confidence,
           ranking: config.ranking,
+          // 阶段 6.3：情绪一致召回读当前心情（同步读缓存，不额外打 ES）
+          mood: () => mood.state,
           hitRecorder: writer,
           // 检索埋点（P1）：写 search_log_<uid>。权限没开时 index 会 403，
           // search.ts 内部降级为只打日志，检索结果不受影响。

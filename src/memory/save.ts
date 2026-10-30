@@ -53,6 +53,10 @@ export interface SaveInput {
   domain?: string
   privacy?: Privacy
   ttl_days?: number
+  /** 这条记忆自带的情感色彩（-1..1）；不给就不写字段 */
+  valence?: number
+  /** 情绪强度（0..1）；不给就不写字段 */
+  arousal?: number
 }
 
 export interface SaveResult {
@@ -174,6 +178,21 @@ export function buildMemoryDoc(
     expiresAt = isIsoDate(new Date(options.now.getTime() + days * 86_400_000))
   }
 
+  let valence: number | undefined
+  if (input.valence !== undefined) {
+    if (typeof input.valence !== 'number' || !Number.isFinite(input.valence) || input.valence < -1 || input.valence > 1) {
+      throw new Error(`memory_save: valence 必须是 -1~1 的数字（收到 ${String(input.valence)}）`)
+    }
+    valence = Math.round(input.valence * 10_000) / 10_000
+  }
+  let arousal: number | undefined
+  if (input.arousal !== undefined) {
+    if (typeof input.arousal !== 'number' || !Number.isFinite(input.arousal) || input.arousal < 0 || input.arousal > 1) {
+      throw new Error(`memory_save: arousal 必须是 0~1 的数字（收到 ${String(input.arousal)}）`)
+    }
+    arousal = Math.round(input.arousal * 10_000) / 10_000
+  }
+
   const timestamp = isIsoDate(options.now)
   const doc: Record<string, unknown> = {
     memory_id: options.memoryId,
@@ -200,6 +219,9 @@ export function buildMemoryDoc(
     updated_at: timestamp,
   }
   if (expiresAt !== undefined) doc.expires_at = expiresAt
+  // 阶段 6.1：只给不给就缺省——缺失表示「这条没标情绪」，不是中性
+  if (valence !== undefined) doc.valence = valence
+  if (arousal !== undefined) doc.arousal = arousal
   // semantic_keywords 是 §7.2 的 LLM 增强字段，S3 还没接（不写空串，省一次 mapping 校验）；
   // 只给字段等于让检索以为“有值但为空”，不如缺失。
   if (options.embedding !== null && options.embedding.length > 0) {
@@ -388,6 +410,15 @@ export function defineSaveTool(deps: SaveDeps) {
       domain: {
         type: 'string',
         description: `业务域短标签（如 lottery-cloud、backup-server），缺省取配置 defaults.domain。`,
+      },
+      valence: {
+        type: 'number',
+        description:
+          '-1（负面）~1（正面）的情感色彩，缺省不标。只在「这件事当时的情绪」本身有意义时才给，不要给每条都标。',
+      },
+      arousal: {
+        type: 'number',
+        description: '情绪强度 0~1，缺省不标；配合 valence 用。',
       },
       privacy: {
         type: 'string',

@@ -205,6 +205,11 @@ export interface RankingConfig {
    * 0 = 关闭。邻居只算**同一次检索结果集里**的，不做二次召回。
    */
   activationAlpha: number
+  /**
+   * 阶段 6.3：情绪一致召回强度。`score × (1 + moodWeight × 相似度)`。
+   * 0 = 关闭。**只提权、不降权**——心情差时想不起开心的事会形成自我强化回路。
+   */
+  moodWeight: number
 }
 
 export const DEFAULT_RANKING: RankingConfig = {
@@ -216,6 +221,7 @@ export const DEFAULT_RANKING: RankingConfig = {
   reinforcementCap: 0.5,
   agreementBonus: 0,
   activationAlpha: 0,
+  moodWeight: 0,
 }
 
 /**
@@ -270,6 +276,20 @@ export function spreadActivation(hits: readonly ScopedHit[], alpha: number): Sco
 }
 
 /**
+ * 阶段 6.3：一条记忆的情绪色彩与当前心情有多接近。
+ *
+ * 两个标量都在 [-1, 1] 上，用 `1 - |v - m| / 2`（距离越近越接近 1）。
+ * 记忆没标 valence 时返回 `null`——**不加成也不惩罚**，避免"没标 = 中性 = 不加分"
+ * 变成对未标注条的隐性打压。
+ */
+export function moodAffinity(memoryValence: number, moodValence: number): number | null {
+  if (!Number.isFinite(memoryValence) || !Number.isFinite(moodValence)) return null
+  const v = Math.max(-1, Math.min(1, memoryValence))
+  const m = Math.max(-1, Math.min(1, moodValence))
+  return 1 - Math.abs(v - m) / 2
+}
+
+/**
  * 在 `mergeScopes` 之后应用排序乘子。
  *
  * 三项信号的语义：
@@ -280,8 +300,15 @@ export function spreadActivation(hits: readonly ScopedHit[], alpha: number): Sco
  * 缺字段一律按中性处理（importance=normal、hit_count=0、时间未知不加不减），
  * 这样老文档不需要回填也能参与排序。
  */
-export function applyRanking(hits: readonly ScopedHit[], cfg: RankingConfig, now: Date): ScopedHit[] {
-  if (cfg.importanceWeight === 0 && cfg.hitWeight === 0 && cfg.recencyWeight === 0) return [...hits]
+export function applyRanking(
+  hits: readonly ScopedHit[],
+  cfg: RankingConfig,
+  now: Date,
+  mood?: { valence: number } | null,
+): ScopedHit[] {
+  if (cfg.importanceWeight === 0 && cfg.hitWeight === 0 && cfg.recencyWeight === 0 && cfg.moodWeight === 0) {
+    return [...hits]
+  }
   const ranked = hits.map((hit) => {
     const src = hit.source
     const imp = typeof src.importance === 'string' ? (IMPORTANCE_FACTORS[src.importance] ?? 1) : 1
@@ -297,6 +324,12 @@ export function applyRanking(hits: readonly ScopedHit[], cfg: RankingConfig, now
 
     let factor = 1
     factor += cfg.importanceWeight * (imp - 1)
+    // 阶段 6.3：只提权不降权；没标 valence 的条目不参与
+    if (cfg.moodWeight !== 0 && mood !== undefined && mood !== null) {
+      const memoryValence = typeof src.valence === 'number' ? src.valence : Number.NaN
+      const affinity = moodAffinity(memoryValence, mood.valence)
+      if (affinity !== null) factor += cfg.moodWeight * affinity
+    }
     factor += cfg.hitWeight * (Math.log1p(hitCount) / 10)
     if (ageDays !== null) {
       // 半衰期按类型取；被反复命中的条目寿命更长（封顶），
