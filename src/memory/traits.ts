@@ -149,6 +149,9 @@ export async function collectTraitSources(
           { term: { memory_type: IDENTITY_MEMORY_TYPE } },
           // 情绪状态文档不是记忆素材
           { term: { status: 'mood' } },
+          // 阶段 7.5：锚点自述不参与重新归纳——否则提炼会拿"你已经被确认的样子"再归纳一遍，
+          // 只是把同一句话换个说法写回来，还多占一个候选位。
+          { term: { anchor: true } },
         ],
       },
     },

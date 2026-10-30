@@ -204,7 +204,7 @@ npm run eval:thresholds        # 网格扫描置信阈值，出帕累托前沿
 - [x] **7.2 夜间提炼**：`memory_traits` 读近 N 天 active 记忆（排除 identity）→ 模型归纳 → 写 `memory_type=identity` + `status=pending` 候选（带 `evidence_ids`）。**默认 dry_run**；模型不可用就跳过。→ 2026-10-30
 - [x] **7.3 采纳闸门**：`memory_review`（list/approve/reject/history）——只有 `pending`+`identity` 能被采纳；采纳 → `active`、拒绝 → `archived`（不删）。**个人审计** `personal_audit_<uid>` 每个用户都能写，共享 `memory_audit` 尽力写；痕迹同时落在条目上。→ 2026-10-30
 - [x] **7.4 版本与回滚**：`memory_history`（versions/rollback）——沿 `supersedes` / `superseded_by` 双向走完整条链（上限 10 跳防环）；回滚**不删内容**：新版置 `archived`、旧版恢复 `active` 并清 `superseded_by`。→ 2026-10-30
-- [ ] **7.5 锚点保护**：标记为锚点的 identity 条目不允许被提炼任务覆盖。
+- [x] **7.5 锚点保护**：`anchor` 字段 + `memory_review action=anchor`（设/取消，只有生效中的 identity 能设）。锚点条目**退出提炼素材池**（`collectTraitSources` 用 `must_not term anchor:true` 排除），所以不会被重新归纳成一条差不多的候选。→ 2026-10-30
 
 ### 边界
 

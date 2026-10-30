@@ -184,6 +184,66 @@ async function transition(
   return { memory_id: memoryId, changed: true, status: target, audit, note: `${successText}${suffix}` }
 }
 
+/**
+ * 阶段 7.5：设 / 取消锚点。
+ *
+ * 锚点的含义只有一条：**提炼任务不再把它当素材**（`collectTraitSources` 排除 anchor=true）。
+ * 为什么不在这里做"采纳时禁止覆盖"：提炼只会新增候选，不会改写既有条目；
+ * 真正的冲突是"又归纳出一条差不多的"，排除素材正好解决它，不需要拒绝采纳。
+ */
+export async function setAnchor(
+  deps: ReviewDeps,
+  memoryId: string,
+  anchor: boolean,
+): Promise<ReviewOutcome> {
+  const index = personalIndexFor(deps.personalPrefix, deps.userId)
+  const now = deps.now?.() ?? new Date()
+
+  let source: Record<string, unknown>
+  try {
+    const doc = await deps.reader.get(index, memoryId)
+    source = doc.source ?? {}
+  } catch (err) {
+    if (isNotFound(err)) {
+      return { memory_id: memoryId, changed: false, status: '', audit: 'skipped', note: `找不到条目 ${memoryId}。` }
+    }
+    throw err
+  }
+
+  const type = typeof source.memory_type === 'string' ? source.memory_type : ''
+  const status = typeof source.status === 'string' ? source.status : ''
+  if (type !== IDENTITY_MEMORY_TYPE) {
+    return { memory_id: memoryId, changed: false, status, audit: 'skipped', note: `这条的类型是 ${type || '未知'}，不是 identity，不能设锚点。` }
+  }
+  if (status !== APPROVED_STATUS) {
+    return { memory_id: memoryId, changed: false, status, audit: 'skipped', note: `只有生效中的自述能设锚点（当前 ${status}）。` }
+  }
+
+  await deps.writer.update(
+    index,
+    memoryId,
+    { anchor, updated_at: now.toISOString() },
+    { refresh: 'wait_for' },
+  )
+  const audit = await writeAudit(deps, {
+    event: anchor ? 'identity_anchor_set' : 'identity_anchor_cleared',
+    memoryId,
+    fromState: status,
+    toState: status,
+    note: anchor ? '设为锚点：提炼不再归纳它' : '取消锚点',
+    at: now,
+  })
+  return {
+    memory_id: memoryId,
+    changed: true,
+    status,
+    audit,
+    note: anchor
+      ? '已设为锚点：之后的提炼不会再把这条当素材。'
+      : '已取消锚点：这条会重新进入提炼素材池。',
+  }
+}
+
 export interface AuditEntry {
   event: string
   memoryId: string
@@ -253,7 +313,7 @@ const REVIEW_DESCRIPTION = [
   '只有 status=pending 的 identity 条目能被采纳；重复采纳会如实告诉你当前状态而不是假装成功。',
 ].join('')
 
-export const REVIEW_ACTION_VALUES = ['list', 'approve', 'reject', 'history'] as const
+export const REVIEW_ACTION_VALUES = ['list', 'approve', 'reject', 'history', 'anchor'] as const
 export type ReviewAction = (typeof REVIEW_ACTION_VALUES)[number]
 
 export function defineReviewTool(deps: ReviewDeps) {
@@ -265,11 +325,15 @@ export function defineReviewTool(deps: ReviewDeps) {
         type: 'string',
         enum: [...REVIEW_ACTION_VALUES],
         required: true,
-        description: 'list = 列出待采纳候选；approve = 采纳；reject = 拒绝；history = 查自己的审核流水。',
+        description: 'list = 列出待采纳候选；approve = 采纳；reject = 拒绝；history = 查自己的审核流水；anchor = 设/取消锚点（7.5）。',
       },
       memory_id: { type: 'string', description: 'approve / reject 时必填：候选的 memory_id。' },
       limit: { type: 'number', description: 'list 时最多返回几条（默认 20，上限 100）。' },
       note: { type: 'string', description: '备注（写进审计流水，可选）。' },
+      anchor: {
+        type: 'boolean',
+        description: 'anchor 动作时用：true = 设为锚点（提炼不再归纳它），false = 取消。',
+      },
     },
     output: {
       schema: {
@@ -305,6 +369,16 @@ export function defineReviewTool(deps: ReviewDeps) {
         const limit = typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.trunc(input.limit) : 20
         const rows = await listAudit(deps, limit)
         return { action, count: rows.length, changed: false, status: '', audit: 'skipped', text: renderAudit(rows) }
+      }
+
+      if (action === 'anchor') {
+        const targetId = String(input.memory_id ?? '').trim()
+        if (targetId === '') throw new Error('memory_review: anchor 需要 memory_id')
+        const out = await setAnchor(deps, targetId, input.anchor !== false)
+        return {
+          action, count: 0, changed: out.changed, status: out.status, audit: out.audit,
+          text: out.note,
+        }
       }
 
       const memoryId = String(input.memory_id ?? '').trim()

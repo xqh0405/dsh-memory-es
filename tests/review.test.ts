@@ -14,6 +14,7 @@ import {
   listCandidates,
   REJECTED_STATUS,
   rejectCandidate,
+  setAnchor,
   type ReviewDeps,
 } from '../src/memory/review.ts'
 
@@ -185,5 +186,53 @@ describe('rejectCandidate', () => {
     const out = await rejectCandidate(deps, 't1')
     assert.equal(out.changed, false)
     assert.equal(updates.length, 0)
+  })
+})
+
+describe('setAnchor（阶段 7.5）', () => {
+  test('生效中的 identity 可以设锚点，并写审计', async () => {
+    const { deps, updates, audits } = makeDeps({
+      i1: { memory_id: 'i1', content: '你倾向于先给结论', memory_type: 'identity', status: 'active' },
+    })
+    const out = await setAnchor(deps, 'i1', true)
+    assert.equal(out.changed, true)
+    assert.equal(updates[0]?.doc.anchor, true)
+    assert.equal(audits[0]?.doc.event, 'identity_anchor_set')
+  })
+
+  test('取消锚点', async () => {
+    const { deps, updates, audits } = makeDeps({
+      i1: { memory_id: 'i1', content: 'x', memory_type: 'identity', status: 'active' },
+    })
+    const out = await setAnchor(deps, 'i1', false)
+    assert.equal(out.changed, true)
+    assert.equal(updates[0]?.doc.anchor, false)
+    assert.equal(audits[0]?.doc.event, 'identity_anchor_cleared')
+  })
+
+  test('未生效的自述不能设锚点（pending / archived 都不行）', async () => {
+    const { deps, updates } = makeDeps({
+      p1: { memory_id: 'p1', content: 'x', memory_type: 'identity', status: 'pending' },
+      a1: { memory_id: 'a1', content: 'x', memory_type: 'identity', status: 'archived' },
+    })
+    assert.equal((await setAnchor(deps, 'p1', true)).changed, false)
+    assert.equal((await setAnchor(deps, 'a1', true)).changed, false)
+    assert.equal(updates.length, 0)
+  })
+
+  test('普通记忆不能设锚点', async () => {
+    const { deps } = makeDeps({
+      f1: { memory_id: 'f1', content: 'x', memory_type: 'fact', status: 'active' },
+    })
+    const out = await setAnchor(deps, 'f1', true)
+    assert.equal(out.changed, false)
+    assert.match(out.note, /不是 identity/)
+  })
+
+  test('找不到条目如实返回', async () => {
+    const { deps } = makeDeps({})
+    const out = await setAnchor(deps, 'nope', true)
+    assert.equal(out.changed, false)
+    assert.match(out.note, /找不到/)
   })
 })
