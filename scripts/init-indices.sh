@@ -4,6 +4,12 @@
 # 重要：ES 免费版（basic license）不支持 DLS（document level security），
 # 所以个人库改成「一人一索引」：personal_memory_<user_id>，用索引级 ACL 隔离。
 # 索引模板负责让新用户的索引自动继承同一套 mapping。
+#
+# 阶段 5.1 新增两个字段：
+#  · related    —— 记忆之间的邻接表 [{id, weight}]。用 `enabled: false`：扩散激活
+#                 在检索后读 _source 计算，不需要检索它；不索引 = 零倒排开销。
+#  · activation —— 会衰减的「强度」，与 hit_count（计数）是两回事。
+# 都是纯新增：老文档读不到就是空数组 / 0，不影响既有排序。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,6 +62,8 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "importance":        { "type": "keyword" },
         "hit_count":         { "type": "integer" },
         "last_hit_at":       { "type": "date" },
+        "related":           { "type": "object", "enabled": false },
+        "activation":        { "type": "float" },
         "superseded_at":     { "type": "date" },
         "blocked_reason":    { "type": "keyword" },
         "personal_only_reason": { "type": "text" },
