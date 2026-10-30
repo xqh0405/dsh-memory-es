@@ -26,6 +26,8 @@ export interface ConfigType {
     /** 文档索引前缀；实际索引 = 前缀 + identity.userId（与记忆分开，见 README 文档入库方案） */
     docPrefix: string
     team: string
+    /** 审计流水索引（阶段 7.3 起采纳/拒绝候选会写） */
+    audit: string
     /** 检索埋点前缀；实际索引 = 前缀 + identity.userId（只记查了什么/召回几条/耗时） */
     searchLogPrefix: string
   }
@@ -112,6 +114,8 @@ export const Config: z<ConfigType> = z.object({
       .description('个人文档索引前缀；实际索引 = 前缀 + identity.userId。与记忆索引分开：文档是长文切片，记忆是一句事实。'),
     team: z.string().default('team_knowledge')
       .description('团队知识库索引名。'),
+    audit: z.string().default('memory_audit')
+      .description('审计流水索引名（采纳/拒绝 identity 候选会写）。'),
     searchLogPrefix: z.string().default('search_log_')
       .description('检索埋点索引前缀；实际索引 = 前缀 + identity.userId。只存"查了什么、召回几条、耗时多少"，用于每日巡检的空结果率与 P95；写失败静默降级，绝不影响检索。'),
   }),

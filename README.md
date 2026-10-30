@@ -202,7 +202,7 @@ npm run eval:thresholds        # 网格扫描置信阈值，出帕累托前沿
 
 - [x] **7.1 identity 类型**：新增 `memory_type=identity` 承载稳定自述；半衰期 3650 天（其它类型最长 365）；**默认不进普通检索**，显式 `memory_type: [identity]` 才返回。→ 2026-10-30
 - [x] **7.2 夜间提炼**：`memory_traits` 读近 N 天 active 记忆（排除 identity）→ 模型归纳 → 写 `memory_type=identity` + `status=pending` 候选（带 `evidence_ids`）。**默认 dry_run**；模型不可用就跳过。→ 2026-10-30
-- [ ] **7.3 采纳闸门**：审核台采纳才写 identity，拒绝留审计；不采纳时线上条目字节不变。
+- [x] **7.3 采纳闸门**：`memory_review`（list/approve/reject）——只有 `pending`+`identity` 能被采纳；采纳 → `active`、拒绝 → `archived`（不删）。审计优先写 `memory_audit`，无权限时降级把 `reviewed_at`/`reviewed_by`/`review_note` 记在条目上。→ 2026-10-30
 - [ ] **7.4 版本与回滚**：沿现有 `superseded_by` 链回溯，可一键回到上一版。
 - [ ] **7.5 锚点保护**：标记为锚点的 identity 条目不允许被提炼任务覆盖。
 

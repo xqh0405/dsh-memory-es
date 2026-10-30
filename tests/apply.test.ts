@@ -112,7 +112,7 @@ describe('apply', () => {
     assert.equal(requests.length, 0, '加载期不应发任何请求')
     assert.deepEqual(
       harness.registered.map((tool) => tool.name).sort(),
-      ['doc_search', 'memory_distill', 'memory_promote', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
+      ['doc_search', 'memory_distill', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
     )
     assert.equal(harness.logs.length, 1)
     assert.match(harness.logs[0], /ready: user=xqh index=personal_memory_xqh/)
@@ -122,9 +122,9 @@ describe('apply', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
-    assert.equal(harness.registered.length, 7, '七个工具各一次 effect（含 memory_distill / memory_traits / doc_search）')
+    assert.equal(harness.registered.length, 8, '八个工具各一次 effect（含 memory_distill / memory_traits / memory_review / doc_search）')
     assert.equal(harness.sections.length, 2, '记忆段 + 心情段各一次 effect')
-    assert.equal(harness.disposers.length, 11, '七个工具 + 两个提示段 + 两个事件监听，都走 ctx.effect')
+    assert.equal(harness.disposers.length, 12, '八个工具 + 两个提示段 + 两个事件监听，都走 ctx.effect')
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
     assert.equal(harness.sections.length, 0)
