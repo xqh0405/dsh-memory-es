@@ -34,16 +34,37 @@ test('系统提示词强调保留数字/路径/命令（防止提炼成空话）
   assert.match(DISTILL_SYSTEM, /数字|版本号|路径|命令|错误码/)
 })
 
-test('pickRoute：配置 > 会话模型 > 列表第一个', () => {
-  const llm = { listModels: () => [{ provider: 'deepseek', model: 'deepseek-chat' }] }
+test('pickRoute：配置 > 会话模型 > 列表第一个', async () => {
+  const llm = { listModels: async () => [{ provider: 'deepseek', model: 'deepseek-chat' }] }
   const session = { provider: 'siliconflow', model: 'qwen3-32b' }
   // 配置写死时最优先
-  assert.deepEqual(pickRoute(llm, 'p', 'm', session), { provider: 'p', model: 'm', source: 'config' })
+  assert.deepEqual(await pickRoute(llm, 'p', 'm', session), { provider: 'p', model: 'm', source: 'config' })
   // 配置留空 → 用会话模型（不是列表第一个）
-  assert.deepEqual(pickRoute(llm, '', '', session), { provider: 'siliconflow', model: 'qwen3-32b', source: 'session' })
+  assert.deepEqual(await pickRoute(llm, '', '', session), { provider: 'siliconflow', model: 'qwen3-32b', source: 'session' })
   // 连会话模型都没有才回落
-  assert.deepEqual(pickRoute(llm, '', '', undefined), { provider: 'deepseek', model: 'deepseek-chat', source: 'first' })
-  assert.equal(pickRoute({ listModels: () => [] }), null)
+  assert.deepEqual(await pickRoute(llm, '', '', undefined), { provider: 'deepseek', model: 'deepseek-chat', source: 'first' })
+  assert.equal(await pickRoute({ listModels: async () => [] }), null)
+})
+
+test('pickRoute：listModels 返回 Promise（宿主真实形态，回归）', async () => {
+  // 宿主签名是 listModels(provider): Promise<LlmModelInfo[]>；
+  // 旧实现没 await → 拿 Promise 去 for...of → "models is not iterable"，整条提炼直接挂。
+  const llm = { listModels: (p) => Promise.resolve([{ provider: p || 'deepseek', model: 'deepseek-chat' }]) }
+  assert.deepEqual(await pickRoute(llm, '', '', undefined), {
+    provider: 'deepseek',
+    model: 'deepseek-chat',
+    source: 'first',
+  })
+})
+
+test('pickRoute：listModels 抛错 → 返回 null（不把异常抛给调用方）', async () => {
+  const llm = { listModels: async () => { throw new Error('boom') } }
+  assert.equal(await pickRoute(llm, '', '', undefined), null)
+})
+
+test('pickRoute：listModels 返回 { models: [...] } 包裹形态也能认', async () => {
+  const llm = { listModels: async () => ({ models: [{ providerId: 'p2', modelId: 'm2' }] }) }
+  assert.deepEqual(await pickRoute(llm, '', '', undefined), { provider: 'p2', model: 'm2', source: 'first' })
 })
 
 test('collectStream：只累加 text-delta', async () => {

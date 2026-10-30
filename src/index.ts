@@ -255,7 +255,7 @@ export function apply(ctx: Context, config: ConfigType): void {
       listModels?: (provider?: string) => unknown[]
     } | null
     if (llm === null || llm === undefined || typeof llm.prepareCall !== 'function') return ''
-    const route = pickRoute(llm as never, config.distill.provider, config.distill.model, undefined)
+    const route = await pickRoute(llm as never, config.distill.provider, config.distill.model, undefined)
     if (route === null) return ''
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 90_000)

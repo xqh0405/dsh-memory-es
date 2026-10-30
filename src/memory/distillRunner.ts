@@ -101,12 +101,12 @@ export function parseDistillOutput(text: string): ParsedDistill | null {
  *   2. **调用方会话的模型**（memory_save 时带进来的 route）——"默认用你正在用的模型"；
  *   3. 宿主模型列表的第一个（兜底，可能和你会话用的不是同一个，所以只作最后手段）。
  */
-export function pickRoute(
+export async function pickRoute(
   llm: NonNullable<DistillRunnerDeps['llm']>,
   configProvider?: string,
   configModel?: string,
   sessionRoute?: { provider?: string; model?: string },
-): { provider: string; model: string; source: 'config' | 'session' | 'first' } | null {
+): Promise<{ provider: string; model: string; source: 'config' | 'session' | 'first' } | null> {
   if (configProvider !== undefined && configProvider !== '' && configModel !== undefined && configModel !== '') {
     return { provider: configProvider, model: configModel, source: 'config' }
   }
@@ -120,9 +120,17 @@ export function pickRoute(
     return { provider: sessionRoute.provider, model: sessionRoute.model, source: 'session' }
   }
   if (typeof llm.listModels !== 'function') return null
-  let models: unknown[]
+  // ⚠️ 宿主签名是 `listModels(provider): Promise<LlmModelInfo[]>`，必须 await；
+  // 不 await 拿到的是 Promise 对象，`for...of` 会抛 "models is not iterable"。
+  let models: unknown[] = []
   try {
-    models = llm.listModels(configProvider) ?? []
+    const raw: unknown = await llm.listModels(configProvider)
+    if (Array.isArray(raw)) {
+      models = raw
+    } else if (raw !== null && typeof raw === 'object' && Array.isArray((raw as { models?: unknown }).models)) {
+      // 防御：万一宿主改成 { models: [...] } 的包裹形态
+      models = (raw as { models: unknown[] }).models
+    }
   } catch {
     return null
   }
@@ -175,7 +183,7 @@ export async function runDistillJob(
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_llm_service' })
     return { ok: false, reason: 'no_llm_service' }
   }
-  const route = pickRoute(llm, deps.provider, deps.model, job.route)
+  const route = await pickRoute(llm, deps.provider, deps.model, job.route)
   if (!route) {
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_model' })
     return { ok: false, reason: 'no_model' }
