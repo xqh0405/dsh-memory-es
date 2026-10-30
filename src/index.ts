@@ -24,6 +24,7 @@ import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
+import { defineHistoryTool } from './memory/history.ts'
 import { collectStream, pickRoute } from './memory/distillRunner.ts'
 import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob } from './memory/distillRunner.ts'
@@ -275,6 +276,22 @@ export function apply(ctx: Context, config: ConfigType): void {
       clearTimeout(timer)
     }
   }
+
+  /** 阶段 7.4：版本链与回滚（沿 supersedes / superseded_by 双向走）。 */
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineHistoryTool({
+          userId,
+          personalPrefix,
+          reader,
+          writer,
+          now: () => new Date(),
+          log: (event) => logger.info('history %o', event),
+        }),
+      ),
+    'dsh-memory-es.history',
+  )
 
   /** 阶段 7.3：采纳闸门。pending 的 identity 只有过这里才会生效。 */
   ctx.effect(
