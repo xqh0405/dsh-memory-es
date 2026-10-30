@@ -130,6 +130,16 @@ describe('buildMemoryDoc（纯函数）', () => {
     assert.deepEqual(built.doc.embedding, VECTOR)
   })
 
+  test('阶段 7.1：identity 类型可保存，且落在 memory_type 上', () => {
+    const built = buildMemoryDoc(
+      { content: '我倾向于先给出结论再解释理由', memory_type: 'identity', importance: 'critical' },
+      { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'general' },
+      { now: NOW, memoryId: FIXED_ID, embedding: null },
+    )
+    assert.equal(built.doc.memory_type, 'identity')
+    assert.equal(built.doc.importance, 'critical')
+  })
+
   test('阶段 6.1：valence/arousal 可选，给了才写字段', () => {
     const withMood = buildMemoryDoc(
       { content: '那天他很高兴', valence: 0.6, arousal: 0.4 },

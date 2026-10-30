@@ -170,6 +170,7 @@ export function mergeScopes(
  * 语义更重，所以整体给得更长。照抄会把正当的知识提前衰减掉。
  */
 export const MEMORY_TYPE_HALF_LIFE_DAYS: Readonly<Record<string, number>> = {
+  identity: 3650, // 自述：十年尺度，近似「不衰减」——它本来就该比事实更稳定
   decision: 365, // 决定：用户定下的口径，一年内基本不变
   fact: 365, // 事实：工程事实，确认过就长期成立
   context: 180, // 背景：项目/环境背景，半年内仍有效

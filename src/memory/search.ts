@@ -20,6 +20,7 @@ import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
 import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type RankingConfig } from '../fragment.ts'
+import { IDENTITY_MEMORY_TYPE } from './save.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
@@ -190,9 +191,14 @@ function buildMeta(
   input: SearchInput,
   now: Date,
 ): { meta: MetaFilterOptions; filtered: boolean } {
+  // 阶段 7.1：identity 默认不进普通检索——它是「我是谁」，不是「发生过什么」，
+  // 混在事实里会挤占召回。显式按 memory_type 选了 identity 才返回。
+  const wantsIdentity =
+    Array.isArray(input.memory_type) && input.memory_type.includes(IDENTITY_MEMORY_TYPE)
   const meta: MetaFilterOptions = {
     status: 'active',
     memory_type: input.memory_type,
+    excludeMemoryTypes: wantsIdentity ? undefined : [IDENTITY_MEMORY_TYPE],
     domain: input.domain,
     now,
   }
@@ -476,7 +482,8 @@ export function defineSearchTool(deps: SearchDeps) {
       memory_type: {
         type: 'array',
         items: { type: 'string' },
-        description: '按记忆类型收窄（可多选）：preference / fact / task_progress / decision / context。',
+        description:
+          '按记忆类型收窄（可多选）：preference / fact / task_progress / decision / context / identity。**identity 默认不返回**，要读自述必须显式选它。',
       },
       domain: {
         type: 'array',

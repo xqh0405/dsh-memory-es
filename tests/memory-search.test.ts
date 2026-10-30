@@ -582,3 +582,54 @@ describe('defineSearchTool', () => {
     }
   })
 })
+
+describe('identity 门控（阶段 7.1）：默认不返回，显式选才返回', () => {
+  const filtersOf = (body: Record<string, unknown>, route: 'bm25' | 'knn'): unknown[] => {
+    if (route === 'knn') return ((body.knn as { filter?: unknown[] } | undefined)?.filter ?? [])
+    const query = body.query as { bool?: { filter?: unknown[] } } | undefined
+    return query?.bool?.filter ?? []
+  }
+  const excludesIdentity = (filters: unknown[]): boolean =>
+    filters.some((f) => {
+      const text = JSON.stringify(f)
+      return text.includes('must_not') && text.includes('"memory_type":["identity"]')
+    })
+
+  test('不传 memory_type：两路都排除 identity', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.9)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 3)], knn: [hit('t1', 0.8)] },
+    })
+    try {
+      await searchMemories(h.deps(), { query: 'x' })
+      for (const route of ['bm25', 'knn'] as const) {
+        for (const index of [PERSONAL_INDEX, TEAM_INDEX]) {
+          const body = h.bodyOf(index, route)
+          assert.ok(body, `${index} ${route} 请求应当发出`)
+          assert.equal(excludesIdentity(filtersOf(body, route)), true, `${index} ${route} 应排除 identity`)
+        }
+      }
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('显式选 identity 时不排除（否则永远读不到自述）', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.9)] },
+      [TEAM_INDEX]: { bm25: [], knn: [] },
+    })
+    try {
+      await searchMemories(h.deps(), { query: '我是怎么工作的', memory_type: ['identity'] })
+      for (const route of ['bm25', 'knn'] as const) {
+        const body = h.bodyOf(PERSONAL_INDEX, route)
+        assert.ok(body, `${route} 请求应当发出`)
+        assert.equal(excludesIdentity(filtersOf(body!, route)), false, `${route} 不该排除 identity`)
+        // 仍然带着 memory_type 的收窄条件（单值 → term，不是 terms）
+        assert.equal(JSON.stringify(body).includes('"term":{"memory_type":"identity"}'), true, `${route} 应带收窄`)
+      }
+    } finally {
+      await h.fake.close()
+    }
+  })
+})

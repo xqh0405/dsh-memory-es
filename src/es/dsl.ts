@@ -48,6 +48,8 @@ export interface MetaFilterOptions {
   /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用） */
   status?: string | null
   memory_type?: FilterValue
+  /** 明确排除的类型（阶段 7.1：普通检索默认排除 identity） */
+  excludeMemoryTypes?: FilterValue
   domain?: FilterValue
   /** updated_at >= now - N 天；不传就不加时间窗 */
   updatedWithinDays?: number
@@ -114,6 +116,14 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
     filters.push({ term: { status } })
   }
   pushValueFilter(filters, 'memory_type', options.memory_type)
+  if (options.excludeMemoryTypes !== undefined && options.excludeMemoryTypes !== null) {
+    const excluded = (Array.isArray(options.excludeMemoryTypes) ? options.excludeMemoryTypes : [options.excludeMemoryTypes])
+      .map((v) => v.trim())
+      .filter((v) => v !== '')
+    if (excluded.length > 0) {
+      filters.push({ bool: { must_not: [{ terms: { memory_type: excluded } }] } })
+    }
+  }
   pushValueFilter(filters, 'domain', options.domain)
   pushValueFilter(filters, 'review_state', options.review_state ?? null)
 

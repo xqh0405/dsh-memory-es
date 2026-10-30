@@ -120,3 +120,22 @@ describe('knnBody', () => {
     assert.throws(() => knnBody(broken, 1024), /第 3 维/)
   })
 })
+
+describe('excludeMemoryTypes（阶段 7.1）', () => {
+  const isExclude = (f: unknown): boolean =>
+    JSON.stringify(f).includes('"must_not":[{"terms":{"memory_type":["identity"]}}]')
+
+  test('传数组时生成排除条件，且排在状态之后、时效过滤之前', () => {
+    const filters = buildFilters({ excludeMemoryTypes: ['identity'] })
+    assert.deepEqual(filters[0], { term: { status: 'active' } })
+    assert.ok(isExclude(filters[1]), '第二条就是排除条件')
+    assert.equal(filters.length, 4, 'status + 排除 + 两条时效过滤')
+  })
+
+  test('传字符串也接受；空串与空数组不生成条件', () => {
+    assert.ok(isExclude(buildFilters({ excludeMemoryTypes: 'identity' })[1]))
+    assert.equal(buildFilters({ excludeMemoryTypes: '' }).some(isExclude), false, '空串 = 不排除')
+    assert.equal(buildFilters({ excludeMemoryTypes: [] }).some(isExclude), false, '空数组 = 不排除')
+    assert.equal(buildFilters({}).some(isExclude), false, '不传 = 不排除')
+  })
+})

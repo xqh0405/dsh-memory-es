@@ -31,7 +31,18 @@ import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 export { assertDocOwner } from './common.ts'
 
 /** §3.3 的枚举，顺序即给模型看的顺序 */
-export const MEMORY_TYPES = ['preference', 'fact', 'task_progress', 'decision', 'context'] as const
+export const MEMORY_TYPES = ['preference', 'fact', 'task_progress', 'decision', 'context', 'identity'] as const
+
+/**
+ * 阶段 7.1：`identity` 承载「稳定的自述」——关于"我是谁/我怎么做事"的长期断言，
+ * 由夜间提炼任务从大量日常记忆里归纳出来，经审核台采纳后才写入。
+ *
+ * 它与普通事实的区别不是内容，而是**来源与寿命**：普通记忆是"发生过什么"，
+ * identity 是"从发生过的事里看出的自己"。所以：
+ *  · 半衰期极长（它本该比事实更稳定）；
+ *  · 默认**不进**普通检索结果（否则自述会挤占事实召回，见 search.ts 的排除逻辑）。
+ */
+export const IDENTITY_MEMORY_TYPE = 'identity'
 export type MemoryType = (typeof MEMORY_TYPES)[number]
 
 export const PRIVACY_VALUES = ['normal', 'private'] as const
@@ -399,7 +410,8 @@ export function defineSaveTool(deps: SaveDeps) {
       memory_type: {
         type: 'string',
         enum: [...MEMORY_TYPES],
-        description: '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景。',
+        description:
+          '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景，identity=稳定自述（由提炼任务产出、审核后写入，不要随手用）。',
       },
       importance: {
         type: 'string',

@@ -200,7 +200,7 @@ npm run eval:thresholds        # 网格扫描置信阈值，出帕累托前沿
 
 现状：有 `memory_promote`、pending 审核台、审计链，但没有「关于自己」的收敛路径。
 
-- [ ] **7.1 identity 类型**：新增 `memory_type=identity` 承载稳定自述，检索门控可单独配权重。
+- [x] **7.1 identity 类型**：新增 `memory_type=identity` 承载稳定自述；半衰期 3650 天（其它类型最长 365）；**默认不进普通检索**，显式 `memory_type: [identity]` 才返回。→ 2026-10-30
 - [ ] **7.2 夜间提炼**：读近 N 天记忆与会话 → 产出候选 traits → 写 pending 队列（复用 S9 审核台）。
 - [ ] **7.3 采纳闸门**：审核台采纳才写 identity，拒绝留审计；不采纳时线上条目字节不变。
 - [ ] **7.4 版本与回滚**：沿现有 `superseded_by` 链回溯，可一键回到上一版。
