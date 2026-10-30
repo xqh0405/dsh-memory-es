@@ -725,8 +725,6 @@ async function handleMood(ctx, res) {
       _source: { excludes: ['embedding', 'content'] },
     })
     const hit = doc.hits?.hits?.[0]
-    // 一行调试：面板显示"没记录"时，要能分清是查空了还是没查
-    console.error(`[记忆库面板] /mood index=${names.personal} hits=${doc.hits?.hits?.length ?? -1}`)
     if (!hit) return json(res, 200, { ok: true, value: { exists: false, valence: 0, arousal: 0, events: [] } })
     const src = hit._source ?? {}
     return json(res, 200, {
@@ -800,12 +798,43 @@ async function handleIdentityReview(ctx, res, req) {
 
   // 锚点：不改 status，只改 anchor 标志（规则与 src/memory/review.ts 的 setAnchor 一致）
   if (action === 'anchor') {
+    // 与 src/memory/review.ts 的 setAnchor 同规则：只有 identity 且 active 才能设锚点
+    if (String(src.memory_type) !== 'identity') {
+      return json(res, 409, { ok: false, error: `这条的类型是 ${String(src.memory_type) || '未知'}，不是 identity，不能设锚点` })
+    }
     if (String(src.status) !== 'active') {
       return json(res, 409, { ok: false, error: `只有生效中的自述能设锚点（当前 ${String(src.status)}）` })
     }
     const anchor = body.value.anchor !== false
-    await writer.update(names.personal, memoryId, { anchor, updated_at: new Date().toISOString() }, { refresh: 'wait_for' })
-    return json(res, 200, { ok: true, value: { memoryId, status: 'active', anchor } })
+    const anchorAt = new Date().toISOString()
+    await writer.update(names.personal, memoryId, { anchor, updated_at: anchorAt }, { refresh: 'wait_for' })
+    // 审计必须与工具层同口径：面板点一下和 memory_review 调一次，审核流水里都该有一条
+    const anchorAudit = {
+      event: anchor ? 'identity_anchor_set' : 'identity_anchor_cleared',
+      actor: config.identity.userId,
+      at: anchorAt,
+      subject_type: 'personal_memory',
+      subject_id: memoryId,
+      memory_id: memoryId,
+      from_state: 'active',
+      to_state: 'active',
+      reason: anchor ? 'identity_anchor_set' : 'identity_anchor_cleared',
+      note: anchor ? '设为锚点：提炼不再归纳它' : '取消锚点',
+    }
+    let anchorAuditState = 'personal_only'
+    try {
+      await writer.index(names.personalAudit, anchorAudit, { refresh: 'wait_for' })
+      try {
+        const consolidator = createReadClient(() => resolveClientConfig(ctx, 'consolidator'))
+        await consolidator.index(names.audit, anchorAudit, { refresh: 'wait_for' })
+        anchorAuditState = 'ok'
+      } catch {
+        /* 团队库写不了就只留个人那份 */
+      }
+    } catch {
+      anchorAuditState = 'failed'
+    }
+    return json(res, 200, { ok: true, value: { memoryId, status: 'active', anchor, audit: anchorAuditState } })
   }
 
   const target = action === 'approve' ? 'active' : 'archived'
