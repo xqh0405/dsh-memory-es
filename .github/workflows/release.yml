@@ -24,7 +24,16 @@ jobs:
           cache: npm
 
       - name: 安装依赖
-        run: npm ci
+        run: |
+          # npm 10 解析这些 `*` 形式的 peerDependencies 的 arborist 会崩
+          # （Cannot read properties of null (reading 'children')），跳过 peer 解算；
+          # peer 本来就该由 dsh 宿主提供，构建期再单独补装同版本，只用于编译与 .d.ts。
+          npm ci --legacy-peer-deps
+          npm install --no-save --legacy-peer-deps \
+            @deepseek-ai/cordis@4.0.5 \
+            @deepseek-ai/schemastery@3.18.5 \
+            @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 \
+            @deepseek-ai/dsh-tools@0.2.1-rc.3
 
       - name: 构建并打包
         run: bash scripts/package.sh --build
