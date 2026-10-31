@@ -23,7 +23,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "==> 打包主插件"
-tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib package.json cordis.patch.yml
+# 0.3.0 起插件与面板是一个包，cordis.patch.yml 里两条条目（主插件 + 面板宿主）：
+# 只推 lib 会让第二条解析不到 dsh-memory-es/panel，容器启动就报「1 entry did not activate」，
+# 所以 panel 必须一起带上（它只是几个 JS + locale，不增加依赖）。
+tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib panel package.json cordis.patch.yml
 
 echo "==> 打包表情包"
 if [ -d "$REPO_ROOT/stickers" ]; then

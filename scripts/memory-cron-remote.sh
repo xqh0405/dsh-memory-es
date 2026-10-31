@@ -13,7 +13,7 @@ set -uo pipefail
 CONTAINER="${CONTAINER:-dsh}"
 ES_DIR="${ES_DIR:-/srv/es-memory/deploy/es-remote}"
 ES_URL="${ES_URL:-https://dsh-es-remote:9200}"
-CLI_DIR="/data/dsh/local-plugins/dsh-memory-es-panel/cli"
+CLI_DIR="${CLI_DIR:-/data/dsh/local-plugins/dsh-memory-es/panel/cli}"   # 0.3.0 起单包布局
 STATE_DIR="${STATE_DIR:-/srv/es-memory/.state}"
 CONF="$STATE_DIR/remote-cron.env"
 LOG="$STATE_DIR/cron.log"

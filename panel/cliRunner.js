@@ -35,9 +35,11 @@ export function defaultStateDir() {
  */
 const CLI_DIR_CANDIDATES = [
   process.env.MEMORY_ES_CLI_DIR,
-  '/data/dsh/local-plugins/dsh-memory-es-panel/cli',        // 容器内（DSH_HOME=/data/dsh）
-  join(homedir(), '.dsh/local-plugins/dsh-memory-es-panel/cli'), // 本机安装
-  join(HERE, 'cli'),                                        // 兜底（node_modules 下跑不了，仅当装了本地目录）
+  // 0.3.0 起插件与面板是一个包：local-plugins/dsh-memory-es/panel/cli
+  ...(process.env.DSH_HOME ? [join(process.env.DSH_HOME, 'local-plugins/dsh-memory-es/panel/cli')] : []),
+  '/data/dsh/local-plugins/dsh-memory-es/panel/cli',             // 容器内（DSH_HOME=/data/dsh）
+  join(homedir(), '.dsh/local-plugins/dsh-memory-es/panel/cli'), // 本机安装
+  join(HERE, 'cli'),                                             // 兜底（node_modules 下跑不了，仅当装了本地目录）
 ].filter((value) => typeof value === 'string' && value !== '')
 
 function resolveCliDir() {
