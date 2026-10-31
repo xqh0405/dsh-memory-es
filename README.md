@@ -48,6 +48,21 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 单账号模式 `mem-user-<uid>`，个人库读写由本人账号承担、团队库按角色授权；
 工具参数里没有 `user_id`，索引名由 `identity.userId` 派生。
 
+## 安装
+
+从 [Releases](https://github.com/xqh0405/dsh-memory-es/releases/latest) 下载 `dsh-memory-es-<版本>.tar.gz`，解包后一条命令安装——不需要克隆仓库，也不需要构建：
+
+```bash
+tar xzf dsh-memory-es-0.2.0.tar.gz
+cd dsh-memory-es-0.2.0
+./install.sh                        # 本机：DSH_HOME=~/.dsh，profile=web
+./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
+```
+
+装完重启 dsh web，再核对版本：插件日志 `ready: v0.2.0`、面板自检 `自检通过 v0.2.0`、面板页脚「版本 0.2.0」。
+
+包里还带 `manifest.json`（版本、commit、构建时间）与 `SHA256SUMS`（`sha256sum -c SHA256SUMS`）。
+
 ## 版本
 
 当前 **0.2.0**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
