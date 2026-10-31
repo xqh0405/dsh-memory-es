@@ -1,0 +1,67 @@
+name: Release
+
+# 打 tag（v0.2.0 这种）即发布：在 Actions 里构建发行包并作为 Release 附件上传。
+# 这样发布不需要本地机器参与，也不需要仓库 owner 手工上传。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建并打包
+        run: bash scripts/package.sh --build
+
+      - name: 校验包
+        run: |
+          cd dist
+          tar tzf ./*.tar.gz >/dev/null
+          sha256sum -c ./*.tar.gz.sha256
+
+      - name: 创建 Release 并上传附件
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## dsh-memory-es ${{ github.ref_name }}
+
+            DSH（DeepSeek Harness）的记忆插件：Elasticsearch 存储与检索，
+            个人记忆库 + 团队知识库双层隔离。
+
+            ### 安装
+
+            ```bash
+            tar xzf dsh-memory-es-*.tar.gz
+            cd dsh-memory-es-*
+            ./install.sh                        # 本机：DSH_HOME=~/.dsh，profile=web
+            ./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
+            ```
+
+            装完重启 dsh web。核对版本：插件日志 `ready: v…`、面板自检 `自检通过 v…`、
+            面板页脚「版本 …」。
+
+            ### 校验
+
+            ```bash
+            sha256sum -c dsh-memory-es-*.tar.gz.sha256
+            ```
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
