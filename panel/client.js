@@ -2185,10 +2185,6 @@ window.__ModuleLoader__.load({
     }
 
     // ── 页面主体 ─────────────────────────────────────────────────────────
-    let activeLocale = ''
-    function ctxLocaleActive() {
-      return activeLocale
-    }
 
     function MemoryPanel({ t }) {
       const [tab, setTab] = React.useState('overview')
@@ -2236,13 +2232,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.wrap },
         h('h2', { style: S.h2 }, t('title')),
         h('p', { style: S.sub },
-          `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'} · 语言 ${(() => {
-            try {
-              return ctxLocaleActive() || '未知'
-            } catch {
-              return '未知'
-            }
-          })()}`),
+          `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'}`),
         h('div', { style: S.tabs },
           [
             ['overview', t('tabOverview')],
@@ -2298,11 +2288,6 @@ window.__ModuleLoader__.load({
           }
         })
         const t = ctx.locale.bind(NS)
-        try {
-          activeLocale = ctx.locale.getLocale?.()?.active ?? ''
-        } catch {
-          activeLocale = ''
-        }
 
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
