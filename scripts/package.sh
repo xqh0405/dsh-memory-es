@@ -38,7 +38,7 @@ done
 
 cd "$ROOT"
 
-VERSION="$(bash scripts/version.sh check 2>/dev/null | sed 's/^版本一致：//')" || {
+VERSION="$(bash scripts/version.sh check 2>/dev/null | sed 's/^版本：//')" || {
   echo '版本号不一致，先跑 scripts/version.sh bump patch 对齐' >&2
   exit 1
 }
@@ -67,19 +67,18 @@ fi
 NAME="dsh-memory-es-${VERSION}"
 STAGE="$OUT/$NAME"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/plugin" "$STAGE/panel" "$STAGE/plugin/lib"
+# 一个包：plugin/ 就是 dsh-memory-es 包本身（lib + panel + package.json + patch）
+mkdir -p "$STAGE/plugin/lib"
 
 echo '==> 收集文件'
 cp -a lib/. "$STAGE/plugin/lib/"
 cp -f package.json cordis.patch.yml "$STAGE/plugin/"
 
-cp -f panel/*.js panel/package.json panel/cordis.patch.yml "$STAGE/panel"/
-# 注意：set -e 下不能写 `[ -f x ] && cp`——条件为假时整个列表返回非零会直接退出
-if [ -f panel/icon.svg ]; then cp -f panel/icon.svg "$STAGE/panel"/; fi
-if [ -d panel/locale ]; then cp -a panel/locale "$STAGE/panel"/; fi
-# 面板的「整理 / 导出」按钮要跑 CLI：源码必须随面板包进去（与 deploy-panel.sh 同一布局）
-mkdir -p "$STAGE/panel/cli"
-cp -a consolidate src "$STAGE/panel/cli/"
+mkdir -p "$STAGE/plugin/panel"
+cp -a panel/. "$STAGE/plugin/panel/"
+# 面板的「整理 / 导出」按钮要跑 CLI：源码随包进去（panel/cli 仓库里不存副本，打包时生成）
+mkdir -p "$STAGE/plugin/panel/cli"
+cp -a consolidate src "$STAGE/plugin/panel/cli/"
 
 if [ "$WITH_STICKERS" = "1" ] && [ -f stickers/stickers.json ]; then
   mkdir -p "$STAGE/stickers"
@@ -109,7 +108,7 @@ JSON
 cat >"$STAGE/README-INSTALL.md" <<MD
 # dsh-memory-es ${VERSION} 安装包
 
-一条命令装/更新（本机或容器里都适用）：
+**一个包**（插件 + 面板），一条命令装/更新：
 
 \`\`\`bash
 tar xzf ${NAME}.tar.gz
@@ -117,6 +116,9 @@ cd ${NAME}
 ./install.sh                     # 本机：DSH_HOME=~/.dsh，profile=web
 # 容器里：./install.sh --dsh-home /data/dsh
 \`\`\`
+
+从旧版（面板是独立包）升级时，\`install.sh\` 会自动移除 \`dsh-memory-es-panel\` 并从
+\`dsh.profile.bundles\` 删掉旧名，否则会出现两个「记忆库」面板。
 
 装完重启 dsh-web（本机：kill -TERM \$(systemctl show dsh-web -p MainPID --value)；
 容器：docker restart <容器名>）。
@@ -126,7 +128,7 @@ cd ${NAME}
 - 面板自检：\`[记忆库面板] 自检通过 v${VERSION} …\`
 - 面板页脚：\`版本 ${VERSION}\`
 
-只装插件不装面板：\`./install.sh --no-stickers\` 仍会装面板；不想要表情包用 \`--no-stickers\`。
+不想要表情包用 \`--no-stickers\`（插件与面板仍会装）。
 MD
 
 echo '==> 生成校验和'

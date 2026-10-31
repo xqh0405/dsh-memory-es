@@ -1,9 +1,9 @@
 /**
- * 版本号一致性守卫。
+ * 版本号守卫。
  *
- * 版本号散在两个包里（主插件 + 面板），而面板页脚与 `/overview` 显示的是**服务端读到的**
- * 那份，所以两处必须永远同号。历史教训是「部署了新版，页脚还是旧号」——比没有版本号更误导。
- * 这组测试把「两处一致 + 格式是数字 semver + 能被运行时读到」钉住。
+ * 0.3.0 起插件与面板是**同一个包**，版本号只在 `package.json` 里写一次：
+ * 主插件的 `ready` 日志与面板的 `/overview`（页脚）都读它。
+ * 这组测试把「格式是数字 semver + 主插件与面板读的是同一处」钉住。
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -19,13 +19,16 @@ function pkgVersion(relative: string): string {
 }
 
 describe('版本号', () => {
-  test('主插件与面板的 package.json 版本一致', () => {
-    assert.equal(pkgVersion('../package.json'), pkgVersion('../panel/package.json'))
+  test('包根 package.json 有版本，且是 X.Y.Z 纯数字', () => {
+    const version = pkgVersion('../package.json')
+    assert.match(version, SEMVER, `版本号必须形如 0.3.0，当前是「${version}」`)
   })
 
-  test('版本是 X.Y.Z 纯数字（不出现 -beta / 日期串）', () => {
-    const version = pkgVersion('../package.json')
-    assert.match(version, SEMVER, `版本号必须形如 0.2.0，当前是「${version}」`)
+  test('面板读的是包根的版本（合并后不再有 panel/package.json）', () => {
+    const panel = readFileSync(new URL('../panel/index.js', import.meta.url), 'utf8')
+    assert.match(panel, /new URL\('\.\.\/package\.json', import\.meta\.url\)/)
+    // 反向断言：如果哪天又出现独立的 panel/package.json，这里会红
+    assert.throws(() => readFileSync(new URL('../panel/package.json', import.meta.url)))
   })
 
   test('运行时能读到版本（ready 日志与 /overview 都靠它）', () => {

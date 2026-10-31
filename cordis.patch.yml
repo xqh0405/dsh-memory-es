@@ -1,5 +1,10 @@
 # dsh bundle patch：把插件插进 profile 的 layer 栈
-# id 是插件 id（Config/apply 用它），name 是 npm 包名
+# 一个包两个条目：
+#   · dsh-memory-es        —— Node 半边（工具/提示段/定时任务）
+#   · dsh-memory-es/panel  —— 面板宿主（webServer 路由）；单独一个条目，
+#     这样主插件不必依赖 webServer，在非 web profile 也能正常加载
 - insert:
     - id: dsh-memory-es
       name: 'dsh-memory-es'
+    - id: memory-es-panel
+      name: 'dsh-memory-es/panel'

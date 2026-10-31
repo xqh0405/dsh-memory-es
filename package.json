@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-es",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 记忆插件：Elasticsearch 双层记忆库（团队知识 + 个人记忆）",
   "keywords": [
     "dsh",
@@ -24,11 +24,16 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./panel": "./panel/index.js",
+    "./client": "./panel/client.js",
+    "./locale/*.json": "./panel/locale/*.json",
+    "./icon": "./panel/icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "panel",
     "cordis.patch.yml"
   ],
   "engines": {
@@ -38,6 +43,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "peerDependencies": {
@@ -59,5 +72,6 @@
     "eval": "node scripts/eval-search.ts",
     "eval:prod": "node scripts/eval-search.ts --gate",
     "eval:thresholds": "node scripts/eval-thresholds.ts"
-  }
+  },
+  "icon": "./panel/icon.svg"
 }

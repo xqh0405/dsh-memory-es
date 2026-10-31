@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.2.0**
+**当前版本：0.3.0**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -50,27 +50,27 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 
 ## 安装
 
-从 [Releases](https://github.com/xqh0405/dsh-memory-es/releases/latest) 下载 `dsh-memory-es-<版本>.tar.gz`，解包后一条命令安装——不需要克隆仓库，也不需要构建：
+从 [Releases](https://github.com/xqh0405/dsh-memory-es/releases/latest) 下载 `dsh-memory-es-<版本>.tar.gz`，解包后一条命令安装——不需要克隆仓库，也不需要构建。**插件与面板在同一个包里**，只装一次；从旧版（面板是独立包）升级时脚本会自动移除旧面板：
 
 ```bash
-tar xzf dsh-memory-es-0.2.0.tar.gz
-cd dsh-memory-es-0.2.0
+tar xzf dsh-memory-es-0.3.0.tar.gz
+cd dsh-memory-es-0.3.0
 ./install.sh                        # 本机：DSH_HOME=~/.dsh，profile=web
 ./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
 ```
 
-装完重启 dsh web，再核对版本：插件日志 `ready: v0.2.0`、面板自检 `自检通过 v0.2.0`、面板页脚「版本 0.2.0」。
+装完重启 dsh web，再核对版本：插件日志 `ready: v0.3.0`、面板自检 `自检通过 v0.3.0`、面板页脚「版本 0.3.0」。
 
 包里还带 `manifest.json`（版本、commit、构建时间）与 `SHA256SUMS`（`sha256sum -c SHA256SUMS`）。
 
 ## 版本
 
-当前 **0.2.0**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.3.0**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本
-scripts/version.sh bump patch   # 修 bug：0.2.0 → 0.2.1
-scripts/version.sh bump minor   # 新能力：0.2.1 → 0.3.0
+scripts/version.sh bump patch   # 修 bug：0.3.0 → 0.3.1
+scripts/version.sh bump minor   # 新能力：0.3.1 → 0.4.0
 ```
 
 运行态三处可核对：插件日志 `ready: vX.Y.Z`、面板自检 `自检通过 vX.Y.Z`、面板页脚「版本 X.Y.Z」。

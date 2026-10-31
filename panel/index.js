@@ -24,13 +24,13 @@ const ENTRY_ID = 'dsh-memory-es'
 const AUDIT_INDEX = 'memory_audit'
 
 /**
- * 面板版本：读同目录的 `package.json`（唯一来源，不手写常量）。
+ * 面板版本：读包根的 `package.json`（合并成一个包后版本号只有一处）。
  * 浏览器读不到文件系统，所以由 `/overview` 把版本回传给前端显示——
  * 页面上的版本号因此一定是「服务端真正加载的那份」，而不是 bundle 里过期的字符串。
  */
 const PANEL_VERSION = (() => {
   try {
-    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
     return typeof pkg.version === 'string' && pkg.version.trim() !== '' ? pkg.version.trim() : 'unknown'
   } catch {
     return 'unknown'
