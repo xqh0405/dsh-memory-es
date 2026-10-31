@@ -36,7 +36,12 @@ jobs:
             @deepseek-ai/dsh-tools@0.2.1-rc.3
 
       - name: 构建并打包
-        run: bash scripts/package.sh --build
+        run: |
+          # 不走 scripts/build.sh：它的第二步 link-deps 要把宿主 dsh 的
+          # node_modules 链进来，CI 里没有宿主、必然失败。四个 peer 已在
+          # 「安装依赖」按宿主版本补装，直接 tsdown + 打包即可。
+          npx tsdown
+          bash scripts/package.sh
 
       - name: 校验包
         run: |
