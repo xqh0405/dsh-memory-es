@@ -93,6 +93,17 @@ require_enabled() {
   fi
 }
 
+# ES 目标与 CA：本机可能只是「客户端」（ES 跑在 125），cron 必须跟着指。
+# 不配就落到 CLI 默认的 https://127.0.0.1:9200 —— 本机 ES 退役后那里是空库，
+# 整理/导出会「每天 rc=0、每天 0 条」，看着成功其实什么都没做（2026-10-31 巡检发现）。
+apply_es_target() {
+  local url ca
+  url=$(conf_get ES_URL)
+  ca=$(conf_get ES_CA)
+  if [ -n "$url" ]; then export ES_URL="$url"; fi
+  if [ -n "$ca" ]; then export ES_CA="$ca"; fi
+}
+
 cmd_status() {
   ensure_conf
   printf '开关文件: %s\n' "$CONF"
@@ -157,16 +168,26 @@ cmd_check_certs() {
   local p12="$ROOT/deploy/es/certs/elastic-certificates.p12"
   local pass
   pass=$(sed -n 's/^CERT_PASS=//p' "$ROOT/deploy/es/.env" 2>/dev/null | tail -1)
-  if [ ! -f "$p12" ]; then
-    echo "证书检查：找不到 $p12（跳过）"
-    return 0
-  fi
   local not_after end_ts now_ts days
-  not_after=$(openssl pkcs12 -in "$p12" -clcerts -nokeys -passin pass:"$pass" 2>/dev/null \
-    | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
-  if [ -z "$not_after" ]; then
-    echo "证书检查：读不到证书有效期（CERT_PASS 不对？）"
-    return 1
+  if [ -n "${ES_CA:-}" ] && [ -f "$ES_CA" ]; then
+    # 连的是远端 ES（如 125）：本地 p12 是另一套证书，必须看真正在用的那张 CA。
+    # 用 PEM 直接读，不需要 CERT_PASS。
+    not_after=$(openssl x509 -in "$ES_CA" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+    if [ -z "$not_after" ]; then
+      echo "证书检查：读不到 $ES_CA 的有效期（不是 PEM？）"
+      return 1
+    fi
+  else
+    if [ ! -f "$p12" ]; then
+      echo "证书检查：找不到 $p12（跳过）"
+      return 0
+    fi
+    not_after=$(openssl pkcs12 -in "$p12" -clcerts -nokeys -passin pass:"$pass" 2>/dev/null \
+      | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+    if [ -z "$not_after" ]; then
+      echo "证书检查：读不到证书有效期（CERT_PASS 不对？）"
+      return 1
+    fi
   fi
   end_ts=$(date -d "$not_after" +%s 2>/dev/null || echo 0)
   now_ts=$(date +%s)
@@ -182,6 +203,15 @@ cmd_check_certs() {
 cmd_prune_audit() {
   local apply=0
   [ "${PRUNE_APPLY:-0}" = "1" ] && apply=1
+  # 审计清理必须用 elastic 身份（业务账号故意没有 memory_audit 的 delete）。
+  # 当 ES 在远端（如 125）而本机没有那台的 elastic 密码时，跑下去只会每天 401；
+  # 明确跳过并说清楚该去哪跑，比静默失败好。
+  if [ -n "${ES_URL:-}" ] && [ "${ES_URL}" != "https://127.0.0.1:9200" ] && [ "${ES_URL}" != "http://127.0.0.1:9200" ]; then
+    echo "审计清理：ES 指向 ${ES_URL}，本机没有该实例的 elastic 凭据，已跳过。"
+    echo "  需要清理时在 ES 所在主机上执行：ES_DIR=<该部署目录> scripts/prune-audit.sh --apply"
+    log_line "prune-audit skipped (remote es: ${ES_URL})"
+    return 0
+  fi
   log_line "prune-audit start (apply=$apply keep=${AUDIT_KEEP_DAYS:-90}d)"
   local out rc
   if [ "$apply" = "1" ]; then
@@ -195,10 +225,12 @@ cmd_prune_audit() {
   return "$rc"
 }
 
+# 所有子命令共用同一个 ES 目标（status/enable/disable 不受影响，只是多了两个环境变量）
+apply_es_target
+
 case "${1:-}" in
   status) cmd_status ;;
-  enable)
-    ensure_conf
+  enable)    ensure_conf
     conf_set MEMCRON_ENABLED 1
     echo "已启用：$(conf_get MEMCRON_ENABLED)（整理任务 apply=$(conf_get CONSOLIDATE_APPLY)）"
     ;;

@@ -17,7 +17,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
-CA="${CA:-$ES_DIR/certs/ca.crt}"
+# ES_CA 是「ES 在别的机器」时的逃生口（memory-cron.sh 的 apply_es_target 会导出它）
+CA="${CA:-${ES_CA:-$ES_DIR/certs/ca.crt}}"
 ENV_FILE="$ES_DIR/.env"
 source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"

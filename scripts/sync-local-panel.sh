@@ -22,6 +22,9 @@ for dest in "${DESTINATIONS[@]}"; do
     continue
   fi
   cp -f "$ROOT"/panel/*.js "$dest"/
+  # package.json 必须一起同步：面板的版本号从它读（页脚/自检行显示的就是这个值），
+  # 漏了会出现「代码是新的、页脚还是旧版本」。
+  cp -f "$ROOT"/panel/package.json "$dest"/package.json
   # CLI 源码：面板内置的那份必须和仓库同步，否则「面板能连 ES、整理却报凭据缺失」
   if [ -d "$dest/cli" ]; then
     mkdir -p "$dest/cli/src/es" "$dest/cli/src/memory"

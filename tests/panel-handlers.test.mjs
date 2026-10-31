@@ -596,3 +596,16 @@ test('维护概览：带 user 时统计那个人的个人库', async () => {
     await es.close()
   }
 })
+
+test('可编辑字段白名单：es.url / caCertPath 必须不可写（凭据外发面）', async () => {
+  const { EDITABLE } = await import('../panel/index.js')
+  const keys = EDITABLE.map((field) => field.path.join('.'))
+  // 这两个字段决定「Basic Auth 凭据发往哪个地址」，可写 = 会话被盗就能把管理员凭据导走；
+  // 而且改完本来也要重启才生效，收益不比手改 profile 高。
+  assert.equal(keys.includes('es.url'), false, 'es.url 不该出现在面板可写字段里')
+  assert.equal(keys.includes('es.caCertPath'), false, 'caCertPath 不该出现在面板可写字段里')
+  // 反面：其余字段仍在白名单里（别为了安全把整个配置面关死）
+  for (const needed of ['es.requestTimeoutMs', 'embedding.dims', 'persona.seed', 'journal.at', 'traits.days']) {
+    assert.ok(keys.includes(needed), `${needed} 应当仍可编辑`)
+  }
+})

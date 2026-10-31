@@ -14,7 +14,7 @@
 # ⚠️ 会重启容器 —— 白天不要跑成员容器（唯一例外 dsh-test），部署窗口见 MEMORY。
 set -uo pipefail
 
-HOST="${PANEL_HOST:-root@192.168.1.125}"
+HOST="${PANEL_HOST:?请用 PANEL_HOST=user@host 指定目标主机}"
 KEY="${PANEL_SSH_KEY:-$HOME/.ssh/dsh_ai}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

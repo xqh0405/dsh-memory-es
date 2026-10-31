@@ -98,6 +98,34 @@ export interface ConfigType {
     model: string
     timeoutMs: number
   }
+  /** 阶段 9.1：人格内核（部署者写，模型不改） */
+  persona: {
+    enabled: boolean
+    /** 基础人格文本；空串 = 不注入 */
+    seed: string
+  }
+  /** 阶段 9.6：每日自动提炼用户画像（等价于每天替你跑一次 memory_traits dry_run=false） */
+  traits: {
+    enabled: boolean
+    /** 每天几点之后跑（HH:MM，本地时区） */
+    at: string
+    /** 回看多少天的记忆 */
+    days: number
+  }
+  /** 阶段 9.5：每日回顾（把一天的对话压成一段，写进「日记」的回顾栏） */
+  journal: {
+    enabled: boolean
+    /** 每天几点之后跑（HH:MM，本地时区）；过了点补跑也认 */
+    at: string
+  }
+  /** 阶段 9.2：表情包（图片在包外，按目录配置） */
+  stickers: {
+    enabled: boolean
+    /** 表情包目录：需含 stickers.json 与图片；支持 ~ 展开 */
+    dir: string
+    /** 单次回复最多贴几张 */
+    maxPerTurn: number
+  }
 }
 
 export const Config: z<ConfigType> = z.object({
@@ -226,6 +254,45 @@ export const Config: z<ConfigType> = z.object({
     provider: z.string().default(''),
     model: z.string().default(''),
     timeoutMs: z.number().default(30_000),
+  }),
+  /**
+   * 阶段 9.1：人格内核。
+   *
+   * 为什么是「配置」而不是「记忆条目」：人格是**部署者的设定**，不该由模型归纳改写；
+   * 放配置里意味着它跟代码一起版本化、改完重启即生效，不存在「被学歪」的路径。
+   * 可演化的表层（阶段 9.3）另走 memory_type=persona + 人工审核。
+   */
+  persona: z.object({
+    enabled: z.boolean().default(true)
+      .description('是否注入人格段。关掉等于这个插件不提供人格（行为与未安装此插件一致）。'),
+    seed: z.string().default('')
+      .description('基础人格（部署者写）：我是谁、什么口吻、守什么边界。空串 = 不注入，不留空段落。'),
+  }),
+  // 阶段 9.6：每日自动提炼。产物是 pending 候选，仍要人工审核才生效
+  traits: z.object({
+    enabled: z.boolean().default(true),
+    at: z.string().default('02:30'),
+    days: z.number().step(1).min(1).max(90).default(14),
+  }),
+  // 阶段 9.5：每日回顾。默认开，但只在有足够对话时才真的调模型（少于 3 轮直接跳过）
+  journal: z.object({
+    enabled: z.boolean().default(true),
+    at: z.string().default('23:30'),
+  }),
+  /**
+   * 阶段 9.2：表情包。
+   *
+   * **图片不进仓库**（11 张约 2.9 MB，会把包撑大）：只要求配置目录里有 `stickers.json`。
+   * 目录不存在、文件缺失、JSON 坏了都只是「不注入」，不能影响插件启动——
+   * 表情包是装饰能力，不该成为启动前置条件。
+   */
+  stickers: z.object({
+    enabled: z.boolean().default(true)
+      .description('是否注入表情包说明段。关掉后模型不会再贴图。'),
+    dir: z.string().default('~/.dsh/stickers')
+      .description('表情包目录：需要包含 stickers.json 与图片文件。支持 ~ 展开。'),
+    maxPerTurn: z.number().step(1).min(1).max(5).default(1)
+      .description('单次回复最多贴几张（默认 1，防止刷屏）。'),
   }),
 })
 

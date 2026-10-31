@@ -96,11 +96,17 @@ PUB=$(get_env MEM_READER_PASSWORD); [ -n "${PUB:-}" ] || { PUB=$(rand_pw); set_e
 # MEM_CONSOLIDATOR_PASSWORD 仍保留（整理任务跨用户扫库时要用）
 PWC=$(get_env MEM_CONSOLIDATOR_PASSWORD); [ -n "${PWC:-}" ] || { PWC=$(rand_pw); set_env MEM_CONSOLIDATOR_PASSWORD "$PWC"; }
 
-admin -X PUT "$ES/_security/user/$READER" -d "{\"password\":\"$PUB\",\"roles\":[\"mem_personal_$USER_ID\",\"mem_team_read\"]}" >/dev/null
+# 密码一律走 stdin（-d @- + heredoc）：写在命令行会被同机任何用户从 /proc/<pid>/cmdline 读到，
+# 这正是 scripts/lib/curl-es.sh 要防的事（2026-10-31 巡检发现这里还漏着）。
+admin -X PUT "$ES/_security/user/$READER" -d @- >/dev/null <<JSON
+{"password":"$PUB","roles":["mem_personal_$USER_ID","mem_team_read"]}
+JSON
 echo "  $READER ok"
 # 不再创建 mem-writer（通配 personal_memory_*，等于能写别人的个人库）
 echo '  mem-writer 已废弃（通配越权），改由 init-user.sh 建 per-user 账号'
-admin -X PUT "$ES/_security/user/mem-consolidator" -d "{\"password\":\"$PWC\",\"roles\":[\"mem_consolidator\"]}" >/dev/null
+admin -X PUT "$ES/_security/user/mem-consolidator" -d @- >/dev/null <<JSON
+{"password":"$PWC","roles":["mem_consolidator"]}
+JSON
 echo '  mem-consolidator ok'
 
 # 清理历史遗留的 API key 值（已改用 Basic Auth，留着会让人误以为还在用）

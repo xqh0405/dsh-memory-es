@@ -261,6 +261,11 @@ async function main(): Promise<void> {
   }
   const userId = args.user ?? env.MEM_USER_ID ?? ''
   if (userId === '') throw new Error('缺少用户：用 --user 指定，或在 .env 里配 MEM_USER_ID')
+  // 用户 id 会直接拼进索引名（personal_memory_<uid>），必须与面板同一条白名单：
+  // 传 `*` 就能用管理员的通配读扫所有人的个人库（2026-10-31 巡检补齐；面板早就有这道）。
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) {
+    throw new Error(`用户 id 不合法（只允许字母、数字、_ 和 -，长度 1~64）：${userId}`)
+  }
 
   // 两种身份模式：
   //  · 单账号（推荐，一人一个 ES 账号）：MEM_USERNAME/MEM_PASSWORD，个人库读写 + 团队库按角色授权
@@ -276,8 +281,10 @@ async function main(): Promise<void> {
     }
   }
 
+  // ES_CA 让「本机已指向另一台 ES」时不必把 CA 复制进 deploy/es/certs（那会盖掉本机 CA）。
+  // 2026-10-31 巡检：本机 cron 一直连 127.0.0.1 的退役库，export 每天报「共 0 条」而 rc=0。
   const url = args.esUrl ?? 'https://127.0.0.1:9200'
-  const caCertPath = `${args.esDir}/certs/ca.crt`
+  const caCertPath = process.env.ES_CA ?? `${args.esDir}/certs/ca.crt`
   const client = (username: string, password: string) =>
     createEsClient({ url, caCertPath, username, password, requestTimeoutMs: 10_000 })
 

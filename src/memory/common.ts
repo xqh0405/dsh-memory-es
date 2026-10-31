@@ -38,6 +38,19 @@ export function personalIndexFor(personalPrefix: string, userId: string): string
 }
 
 /**
+ * 「不是事实」的三类记忆，默认不进普通检索、也不进提炼素材池。
+ *
+ *  · identity —— 关于**用户**的稳定自述（进系统提示与 memory_review）；
+ *  · persona  —— 关于**我**的人格表层（阶段 9.3，进人格段）；
+ *  · journal  —— 每日回顾（阶段 9.5，进面板「日记」栏）。
+ *
+ * 为什么集中定义在这里：`traits.ts` 与 `persona.ts` 互相依赖（后者要 hashContent），
+ * 各自 export 常量再互相 import 会形成循环，ESM 下取值可能落到 TDZ。
+ * 各模块自己的常量（save/persona/journal）语义相同，由 tests/non-fact-types.test.ts 钉住一致性。
+ */
+export const NON_FACT_MEMORY_TYPES = ['identity', 'persona', 'journal'] as const
+
+/**
  * F3：写前/改前断言归属。做成独立纯函数，是为了不让它跟着注入点一起被改掉。
  * （save.ts 从本模块转出，保持老调用点不变。）
  */

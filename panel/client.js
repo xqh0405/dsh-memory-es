@@ -14,20 +14,19 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const NS = 'memory-es-panel'
-    // 构建标记 + 语言探针：改完字体/文案后，"页面是不是新 bundle" 不靠猜
-    const BUILD = 'identity-ui2-20261030'
     const API = '/memory-es/api'
 
     const ZH = {
       sectionLabel: '记忆库',
       title: '记忆库',
       subtitle: 'Elasticsearch 后端记忆（dsh-memory-es）：概览与浏览。',
+      versionLabel: '版本',
       tabOverview: '概览',
       tabBrowse: '记忆浏览',
       tabReview: '审核台',
       tabIdentity: '自述',
-      idTitle: '待采纳的自述候选',
-      idEmpty: '还没有候选。用 memory_traits 提炼一次（dry_run 先看）再回来。',
+      idTitle: '待采纳的候选（自述 / 人格）',
+      idEmpty: '还没有候选。自述用 memory_traits 提炼，人格用 memory_persona 归纳（两者都先 dry_run 看看）。',
       idEvidence: '依据',
       idApprove: '采纳',
       idReject: '拒绝',
@@ -47,6 +46,40 @@ window.__ModuleLoader__.load({
       idHistoryTitle: '版本历史',
       idHistoryEmpty: '没有更早的版本。',
       idClose: '收起',
+      tabPersona: '人格',
+      personaKernel: '人格内核（你定的）',
+      personaKernelHint: '来自配置 persona.seed；模型不会改它，改它要动配置文件',
+      personaKernelEmpty: '配置里的 persona.seed 为空，现在只有学到的倾向在生效。',
+      personaLearned: '我学到的倾向',
+      personaLearnedHint: '从会话里归纳、经你采纳后才生效；pending 不进提示词',
+      personaLearnedEmpty: '还没有学到的倾向。用 memory_persona 归纳一次，再回来采纳。',
+      personaPending: '待采纳',
+      personaEdit: '编辑',
+      personaSave: '保存',
+      personaCancel: '取消',
+      personaSaved: '已保存。配置热重载后下一轮提示词生效；若下一轮没变，重启 dsh-web。',
+      personaStickers: '表情包',
+      personaStickerDir: '目录',
+      personaStickerLimit: '单次最多',
+      personaStickerMissing: '文件缺失',
+      personaStickerNone: '这个目录里没有 stickers.json（图片不进仓库，要自己放）',
+      personaDiary: '日记',
+      diaryTabJournal: '每日回顾',
+      diaryTabEvents: '变迁',
+      diaryJournalEmpty: '还没有回顾。默认每天 23:30 之后把当天对话压成一段；也可以在对话里让助手跑 memory_journal 补某一天。',
+      diaryJournalHint: '按天一段，直接生效、不进审核',
+      personaDiaryHint: '这里只记「我怎么变成现在这样」：人格与自述条目何时被采纳、何时被拒绝',
+      personaDiaryEmpty: '还没有记录。',
+      colWhen: '时间',
+      colKind: '类型',
+      colState: '状态',
+      colContent: '内容',
+      colLabel: '名称',
+      colFile: '文件',
+      kindPersona: '人格',
+      kindIdentity: '自述',
+      stateActive: '生效中',
+      stateArchived: '已拒绝',
       tabConfig: '配置',
       tabMaint: '维护',
       cardPersonal: '个人记忆',
@@ -193,6 +226,7 @@ window.__ModuleLoader__.load({
       sectionLabel: 'Memory',
       title: 'Memory',
       subtitle: 'Elasticsearch-backed memory (dsh-memory-es): overview and browse.',
+      versionLabel: 'Version',
       tabOverview: 'Overview',
       tabBrowse: 'Browse',
       tabReview: 'Review',
@@ -218,6 +252,40 @@ window.__ModuleLoader__.load({
       idHistoryTitle: 'Version history',
       idHistoryEmpty: 'No earlier versions.',
       idClose: 'Hide',
+      tabPersona: 'Persona',
+      personaKernel: 'Core persona (yours)',
+      personaKernelHint: 'From persona.seed in config; the model never rewrites it',
+      personaKernelEmpty: 'persona.seed is empty — only the learned traits are active.',
+      personaLearned: 'Traits I learned',
+      personaLearnedHint: 'Distilled from sessions, active only after your approval; pending never reaches the prompt',
+      personaLearnedEmpty: 'Nothing learned yet. Run memory_persona, then approve here.',
+      personaPending: 'pending',
+      personaEdit: 'Edit',
+      personaSave: 'Save',
+      personaCancel: 'Cancel',
+      personaSaved: 'Saved. Takes effect next turn after config reload; restart dsh-web if it does not.',
+      personaStickers: 'Stickers',
+      personaStickerDir: 'Directory',
+      personaStickerLimit: 'Max per reply',
+      personaStickerMissing: 'missing',
+      personaStickerNone: 'No stickers.json in that directory (images are not shipped).',
+      personaDiary: 'Diary',
+      diaryTabJournal: 'Daily',
+      diaryTabEvents: 'Changes',
+      diaryJournalEmpty: 'No daily recaps yet. They are written automatically after the configured time; run memory_journal to backfill a day.',
+      diaryJournalHint: 'One entry per day; takes effect without review',
+      personaDiaryHint: 'Only records how I became this: when persona/identity entries were approved or rejected',
+      personaDiaryEmpty: 'No records yet.',
+      colWhen: 'When',
+      colKind: 'Kind',
+      colState: 'State',
+      colContent: 'Content',
+      colLabel: 'Label',
+      colFile: 'File',
+      kindPersona: 'Persona',
+      kindIdentity: 'Identity',
+      stateActive: 'active',
+      stateArchived: 'rejected',
       tabConfig: 'Config',
       tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
@@ -1094,6 +1162,325 @@ window.__ModuleLoader__.load({
 
     // ── 审核台 ───────────────────────────────────────────────────────────
     // ── 自述：候选采纳 + 个人审核记录（阶段 7.2/7.3）────────────────────
+    /**
+     * 阶段 9.4：人格页。
+     *
+     * 三个来源各管一层，别混：
+     *  - `/persona`  内核（你写的）+ 学到的倾向（approve 过的）
+     *  - `/stickers` 表情包清单，`exists=false` 标红——图片不在仓库里，缺文件很常见
+     *  - `/diary`    条目级的状态变迁（生效/被拒），只回答「我怎么变成现在这样」
+     */
+    /**
+     * 阶段 9.4 人格页（2026-10-31 重排版式）。
+     *
+     * 为什么这么排：四个区块平铺展开时，表情包一行一个、日记一天几条，
+     * 跑几个月页面就变成一条望不到头的长卷。改成
+     *   内核 / 学到的倾向 = 常驻（这是"我是谁"，要一眼看到）
+     *   表情包 / 日记     = 折叠（这是"证据与足迹"，需要时再翻）
+     * 标题行常驻，看一眼就知道有多少条，不用展开去数。
+     */
+    function Persona({ t }) {
+      const [persona, setPersona] = React.useState({ loading: true, data: null, error: '' })
+      const [stickers, setStickers] = React.useState(null)
+      const [diary, setDiary] = React.useState({ loading: true, rows: [], journals: [], error: '' })
+      const [diaryTab, setDiaryTab] = React.useState('journal')
+      // 内核可编辑：draft 与 seed 分开，取消时不污染已保存的值
+      const [editing, setEditing] = React.useState(false)
+      const [draft, setDraft] = React.useState('')
+      const [saving, setSaving] = React.useState(false)
+      const [saveMsg, setSaveMsg] = React.useState('')
+      // 折叠状态：默认只收起表情包与日记
+      const [openKeys, setOpenKeys] = React.useState({ stickers: false, diary: false })
+      const toggle = (key) => setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }))
+
+      const load = React.useCallback(() => {
+        setPersona((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/persona')
+          .then((value) => setPersona({ loading: false, data: value, error: '' }))
+          .catch((error) => setPersona({ loading: false, data: null, error: String(error.message ?? error) }))
+        apiGet('/stickers')
+          .then((value) => setStickers(value))
+          .catch(() => setStickers(null))
+        setDiary((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/diary', { size: '30' })
+          .then((value) => setDiary({
+            loading: false,
+            rows: Array.isArray(value.rows) ? value.rows : [],
+            journals: Array.isArray(value.journals) ? value.journals : [],
+            error: '',
+          }))
+          .catch((error) => setDiary({ loading: false, rows: [], journals: [], error: String(error.message ?? error) }))
+      }, [])
+
+      React.useEffect(() => { load() }, [load])
+
+      const saveSeed = () => {
+        setSaving(true)
+        setSaveMsg('')
+        apiPost('/config', {
+          confirm: true,
+          changes: [{ key: 'persona.seed', value: draft, type: 'string' }],
+        })
+          .then(() => {
+            setEditing(false)
+            setSaveMsg(t('personaSaved'))
+            load()
+          })
+          .catch((error) => setSaveMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setSaving(false))
+      }
+
+      /** 卡片外壳。expandable=true 时标题行可点，正文按 openKeys 收起。 */
+      const card = (title, hint, body, options = {}) => {
+        const { expandable = false, open = true, count = null, extra = null } = options
+        const expanded = expandable ? Boolean(open) : true
+        const head = h('div', {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            ...(expandable ? { cursor: 'pointer', userSelect: 'none' } : {}),
+          },
+          ...(expandable ? { onClick: () => toggle(options.key) } : {}),
+        },
+          expandable
+            ? h('span', {
+                style: {
+                  display: 'inline-block',
+                  width: 10,
+                  fontSize: 10,
+                  color: 'var(--dsw-alias-label-secondary)',
+                  transition: 'transform .12s',
+                },
+              }, expanded ? '▾' : '▸')
+            : null,
+          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' }, children: title }),
+          count !== null && count !== undefined
+            ? h('span', { style: S.pill('plain') }, String(count))
+            : null,
+          hint
+            ? h('span', {
+                style: {
+                  ...S.muted,
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 11.5,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  opacity: expandable && !expanded ? 1 : 0.9,
+                },
+                children: hint,
+              })
+            : h('span', { style: { flex: 1 } }),
+          extra,
+        )
+        return h('div', { style: { ...S.card, marginBottom: 10 } },
+          head,
+          expanded ? h('div', { style: { marginTop: 8 } }, body) : null)
+      }
+
+      if (persona.loading) return h('div', { style: S.muted, children: '…' })
+
+      const data = persona.data ?? {}
+      const entries = Array.isArray(data.entries) ? data.entries : []
+      const seed = typeof data.seed === 'string' ? data.seed : ''
+      const seedLines = seed.trim() === '' ? 0 : seed.trim().split('\n').length
+      const stickerRows = stickers && Array.isArray(stickers.items) ? stickers.items : []
+      const diaryRows = diary.rows
+
+      // ── 内核（可编辑）────────────────────────────────────────────────
+      const kernelBody = editing
+        ? h('div', null,
+            h('textarea', {
+              value: draft,
+              rows: 12,
+              onChange: (event) => setDraft(event.target.value),
+              style: {
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: 10,
+                borderRadius: 8,
+                border: '1px solid var(--dsw-alias-border-l1)',
+                background: 'var(--dsw-alias-bg-l2)',
+                color: 'var(--dsw-alias-label-primary)',
+                fontSize: 12,
+                lineHeight: 1.6,
+                fontFamily: 'inherit',
+                resize: 'vertical',
+              },
+            }),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', { type: 'button', style: S.btn, disabled: saving, onClick: saveSeed },
+                saving ? '…' : t('personaSave')),
+              h('button', {
+                type: 'button',
+                style: S.btn,
+                onClick: () => { setEditing(false); setSaveMsg('') },
+              }, t('personaCancel')),
+              h('span', { style: S.muted, children: `${draft.length} 字` })))
+        : seed.trim() === ''
+          ? h('div', { style: S.muted, children: t('personaKernelEmpty') })
+          : h('pre', {
+              style: {
+                margin: 0,
+                padding: 10,
+                // 定高滚动：文本再长也不把页面顶下去
+                maxHeight: 200,
+                overflow: 'auto',
+                borderRadius: 8,
+                background: 'var(--dsw-alias-bg-l2)',
+                fontSize: 12,
+                lineHeight: 1.65,
+                whiteSpace: 'pre-wrap',
+              },
+              children: seed,
+            })
+
+      const kernelCard = card(
+        t('personaKernel'),
+        seed.trim() === '' ? t('personaKernelHint') : `${data.seedLength || seed.length} 字 · ${seedLines} 行 · ${data.enabled === false ? '已关闭' : '已启用'}`,
+        h('div', null,
+          saveMsg === ''
+            ? null
+            : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: saveMsg }),
+          kernelBody),
+        {
+          extra: editing
+            ? null
+            : h('button', {
+                type: 'button',
+                style: { ...S.btn, flexShrink: 0 },
+                onClick: () => { setDraft(seed); setSaveMsg(''); setEditing(true) },
+              }, t('personaEdit')),
+        },
+      )
+
+      // ── 学到的倾向（常驻，条数封顶 + 内部滚动）─────────────────────────
+      const learnedCard = card(
+        t('personaLearned'),
+        entries.length === 0 ? t('personaLearnedHint') : (data.pendingCount > 0 ? `${data.pendingCount} ${t('personaPending')}` : ''),
+        entries.length === 0
+          ? h('div', { style: S.muted, children: t('personaLearnedEmpty') })
+          : h('ul', {
+              style: {
+                margin: 0,
+                paddingLeft: 18,
+                lineHeight: 1.75,
+                maxHeight: 220,
+                overflow: 'auto',
+              },
+            }, entries.map((row) => h('li', { key: row.memoryId, children: row.content }))),
+        { count: entries.length },
+      )
+
+      // ── 表情包（默认收起）────────────────────────────────────────────
+      const missing = stickerRows.filter((item) => !item.exists).length
+      const stickersCard = card(
+        t('personaStickers'),
+        stickers
+          ? `${t('personaStickerDir')} ${stickers.dir} · ${t('personaStickerLimit')} ${stickers.maxPerTurn}${missing > 0 ? ` · ${missing} 个${t('personaStickerMissing')}` : ''}`
+          : t('personaStickerNone'),
+        !stickers
+          ? h('div', { style: S.muted, children: t('personaStickerNone') })
+          : stickerRows.length === 0
+            ? h('div', { style: S.muted, children: stickers.error || t('personaStickerNone') })
+            : h('div', { style: { maxHeight: 260, overflow: 'auto' } },
+                h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+                  h('thead', null, h('tr', null,
+                    h('th', { style: S.th }, t('colLabel')),
+                    h('th', { style: S.th }, t('colWhen')),
+                    h('th', { style: S.th }, t('colFile')),
+                    h('th', { style: S.th }, ''))),
+                  h('tbody', null,
+                    stickerRows.map((item) => h('tr', { key: item.id || item.file },
+                      h('td', { style: S.td, children: item.label }),
+                      h('td', { style: S.td, children: item.when }),
+                      h('td', { style: { ...S.td, ...S.mono }, children: item.file }),
+                      h('td', { style: S.td },
+                        h('span', { style: S.pill(item.exists ? 'ok' : 'warn') },
+                          item.exists ? '✓' : t('personaStickerMissing')))))))),
+        { key: 'stickers', expandable: true, open: openKeys.stickers, count: stickerRows.length },
+      )
+
+      // ── 日记（默认收起）──────────────────────────────────────────────
+      // 两栏：每日回顾（按天一段） / 变迁（审核足迹）。默认看回顾——「日记」本来就该记日子。
+      const journalRows = diary.journals
+      const segBtn = (key, label, count) =>
+        h('button', {
+          type: 'button',
+          key,
+          style: {
+            ...S.btn,
+            padding: '4px 10px',
+            fontSize: 12,
+            ...(diaryTab === key
+              ? { background: 'var(--dsw-alias-bg-l2)', borderColor: 'var(--dsw-alias-border-l2)', fontWeight: 600 }
+              : {}),
+          },
+          onClick: () => setDiaryTab(key),
+        }, `${label} ${count}`)
+
+      const journalView = journalRows.length === 0
+        ? h('div', { style: S.muted, children: t('diaryJournalEmpty') })
+        : h('div', { style: { maxHeight: 360, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10 } },
+            journalRows.map((row) => h('div', {
+              key: row.memoryId || row.date,
+              style: {
+                border: '1px solid var(--dsw-alias-border-l1)',
+                borderRadius: 8,
+                padding: '8px 10px',
+              },
+            },
+              h('div', { style: { ...S.mono, fontSize: 11.5, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 } },
+                row.date),
+              h('div', { style: { fontSize: 12.5, lineHeight: 1.7, whiteSpace: 'pre-wrap' }, children: row.content }))))
+
+      const eventsView = diaryRows.length === 0
+        ? h('div', { style: S.muted, children: t('personaDiaryEmpty') })
+        : h('div', { style: { maxHeight: 320, overflow: 'auto' } },
+            h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+              h('thead', null, h('tr', null,
+                h('th', { style: S.th }, t('colWhen')),
+                h('th', { style: S.th }, t('colKind')),
+                h('th', { style: S.th }, t('colState')),
+                h('th', { style: S.th }, t('colContent')))),
+              h('tbody', null,
+                diaryRows.map((row) => h('tr', { key: row.memoryId },
+                  h('td', { style: { ...S.td, ...S.mono }, children: (row.updatedAt || '').slice(0, 19).replace('T', ' ') }),
+                  h('td', { style: S.td }, row.memoryType === 'persona' ? t('kindPersona') : t('kindIdentity')),
+                  h('td', { style: S.td },
+                    h('span', { style: S.pill(row.status === 'active' ? 'ok' : 'warn') },
+                      row.status === 'active' ? t('stateActive') : t('stateArchived'))),
+                  h('td', { style: S.td, children: row.content }))))))
+
+      const diaryCard = card(
+        t('personaDiary'),
+        diaryTab === 'journal' ? t('diaryJournalHint') : t('personaDiaryHint'),
+        diary.loading
+          ? h('div', { style: S.muted, children: '…' })
+          : h('div', null,
+              h('div', { style: { display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
+                segBtn('journal', t('diaryTabJournal'), journalRows.length),
+                segBtn('events', t('diaryTabEvents'), diaryRows.length)),
+              diaryTab === 'journal' ? journalView : eventsView),
+        {
+          key: 'diary',
+          expandable: true,
+          open: openKeys.diary,
+          count: diaryTab === 'journal' ? journalRows.length : diaryRows.length,
+        },
+      )
+
+      return h('div', null,
+        persona.error ? h('div', { style: S.err, children: persona.error }) : null,
+        kernelCard,
+        learnedCard,
+        stickersCard,
+        diaryCard,
+      )
+    }
+
     function Identity({ t }) {
       const [pending, setPending] = React.useState({ loading: true, rows: [], error: '' })
       const [active, setActive] = React.useState([])
@@ -1164,6 +1551,9 @@ window.__ModuleLoader__.load({
                         key: row.memoryId,
                         style: { border: '1px solid var(--dsw-alias-border-1, rgba(127,127,127,.22))', borderRadius: 10, padding: 10 },
                       },
+                        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 } },
+                          h('span', { style: S.pill(row.memoryType === 'persona' ? 'ok' : 'plain') },
+                            row.memoryType === 'persona' ? t('kindPersona') : t('kindIdentity'))),
                         h('div', { style: { fontSize: 13, lineHeight: 1.7 } }, row.content),
                         h('div', { style: { ...S.muted, fontSize: 12, marginTop: 4 } },
                           `${t('idEvidence')} ${row.evidenceCount ?? 0} 条 · ${String(row.createdAt ?? '').replace('T', ' ').slice(0, 16)}`),
@@ -1836,14 +2226,17 @@ window.__ModuleLoader__.load({
           .catch(() => setMood(null))
       }, [])
 
+      const firstLoad = React.useRef(true)
       React.useEffect(() => {
-        if (tab === 'overview') loadOverview()
+        // 首次挂载无论哪个 tab 都拉一次（页脚要显示服务端版本）；之后切回概览时刷新。
+        if (firstLoad.current || tab === 'overview') loadOverview()
+        firstLoad.current = false
       }, [tab, loadOverview])
 
       return h('div', { style: S.wrap },
         h('h2', { style: S.h2 }, t('title')),
         h('p', { style: S.sub },
-          `${t('subtitle')} · 构建 ${BUILD} · 语言 ${(() => {
+          `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'} · 语言 ${(() => {
             try {
               return ctxLocaleActive() || '未知'
             } catch {
@@ -1856,6 +2249,7 @@ window.__ModuleLoader__.load({
             ['browse', t('tabBrowse')],
             // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
             ['identity', t('tabIdentity')],
+            ['persona', t('tabPersona')],
             // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
             ...(caps.canReview ? [['review', t('tabReview')]] : []),
             // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
@@ -1878,6 +2272,8 @@ window.__ModuleLoader__.load({
           ? h(Review, { t })
           : tab === 'identity'
           ? h(Identity, { t })
+          : tab === 'persona'
+          ? h(Persona, { t })
           : tab === 'overview'
           ? h(Overview, {
               data: overview.data,

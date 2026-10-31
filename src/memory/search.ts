@@ -20,7 +20,7 @@ import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
 import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type RankingConfig } from '../fragment.ts'
-import { IDENTITY_MEMORY_TYPE } from './save.ts'
+import { NON_FACT_MEMORY_TYPES } from './common.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
@@ -191,14 +191,16 @@ function buildMeta(
   input: SearchInput,
   now: Date,
 ): { meta: MetaFilterOptions; filtered: boolean } {
-  // 阶段 7.1：identity 默认不进普通检索——它是「我是谁」，不是「发生过什么」，
-  // 混在事实里会挤占召回。显式按 memory_type 选了 identity 才返回。
-  const wantsIdentity =
-    Array.isArray(input.memory_type) && input.memory_type.includes(IDENTITY_MEMORY_TYPE)
+  // 阶段 7.1 / 9.3 / 9.5：identity / persona / journal 默认不进普通检索。
+  // 它们分别是「我是谁」「我的人格」「某一天的回顾」，混在事实里只会挤占召回
+  // （2026-10-31 实测：persona 条目能排到第 1、第 2 名）。
+  // 用户显式在 memory_type 里点了某几类时，只放行被点的那几类。
+  const selectedTypes = Array.isArray(input.memory_type) ? input.memory_type : []
+  const excludedTypes = NON_FACT_MEMORY_TYPES.filter((type) => !selectedTypes.includes(type))
   const meta: MetaFilterOptions = {
     status: 'active',
     memory_type: input.memory_type,
-    excludeMemoryTypes: wantsIdentity ? undefined : [IDENTITY_MEMORY_TYPE],
+    excludeMemoryTypes: excludedTypes.length > 0 ? [...excludedTypes] : undefined,
     domain: input.domain,
     now,
   }

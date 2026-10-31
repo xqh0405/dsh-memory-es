@@ -17,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { personalIndexFor } from './common.ts'
+import { PERSONA_MEMORY_TYPE } from './persona.ts'
 import { IDENTITY_MEMORY_TYPE } from './save.ts'
 import { TRAIT_STATUS } from './traits.ts'
 
@@ -28,7 +29,11 @@ export const REJECTED_STATUS = 'archived' as const
 export interface ReviewCandidate {
   memory_id: string
   content: string
-  evidence_ids: string[]
+  /**
+   * 证据：identity 候选存记忆 id 数组；persona 候选存**对象**（ref/session/原话摘录）。
+   * 所以在读取侧原样透传，不按 string 过滤——否则 persona 的证据会被清成 0 条。
+   */
+  evidence_ids: unknown[]
   created_at: string | null
 }
 
@@ -61,7 +66,10 @@ export interface ReviewOutcome {
   note: string
 }
 
-/** 列出待采纳的候选（只有 identity + pending） */
+/** 能走采纳闸门的类型：用户画像（identity）与我的人格（persona） */
+export const REVIEWABLE_MEMORY_TYPES: readonly string[] = [IDENTITY_MEMORY_TYPE, PERSONA_MEMORY_TYPE]
+
+/** 列出待采纳的候选（identity + persona，且 status=pending） */
 export async function listCandidates(deps: ReviewDeps, limit = 20): Promise<ReviewCandidate[]> {
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const res = await deps.reader.search(index, {
@@ -72,7 +80,7 @@ export async function listCandidates(deps: ReviewDeps, limit = 20): Promise<Revi
       bool: {
         filter: [
           { term: { status: TRAIT_STATUS } },
-          { term: { memory_type: IDENTITY_MEMORY_TYPE } },
+          { terms: { memory_type: [...REVIEWABLE_MEMORY_TYPES] } },
         ],
       },
     },
@@ -81,9 +89,7 @@ export async function listCandidates(deps: ReviewDeps, limit = 20): Promise<Revi
   for (const hit of res.hits) {
     const src = hit.source as Record<string, unknown>
     if (typeof src.memory_id !== 'string' || typeof src.content !== 'string') continue
-    const evidence = Array.isArray(src.evidence_ids)
-      ? src.evidence_ids.filter((v): v is string => typeof v === 'string')
-      : []
+    const evidence = Array.isArray(src.evidence_ids) ? src.evidence_ids : []
     out.push({
       memory_id: src.memory_id,
       content: src.content,
@@ -137,10 +143,10 @@ async function transition(
 
   const currentStatus = typeof source.status === 'string' ? source.status : ''
   const type = typeof source.memory_type === 'string' ? source.memory_type : ''
-  if (type !== IDENTITY_MEMORY_TYPE) {
+  if (!REVIEWABLE_MEMORY_TYPES.includes(type)) {
     return {
       memory_id: memoryId, changed: false, status: currentStatus, audit: 'skipped',
-      note: `这条的类型是 ${type || '未知'}，不是 identity，不能走采纳闸门。`,
+      note: `这条的类型是 ${type || '未知'}，不是 identity/persona，不能走采纳闸门。`,
     }
   }
   if (currentStatus !== TRAIT_STATUS) {
@@ -213,7 +219,7 @@ export async function setAnchor(
   const type = typeof source.memory_type === 'string' ? source.memory_type : ''
   const status = typeof source.status === 'string' ? source.status : ''
   if (type !== IDENTITY_MEMORY_TYPE) {
-    return { memory_id: memoryId, changed: false, status, audit: 'skipped', note: `这条的类型是 ${type || '未知'}，不是 identity，不能设锚点。` }
+    return { memory_id: memoryId, changed: false, status, audit: 'skipped', note: `这条的类型是 ${type || '未知'}，不是 identity，不能设锚点（锚点只对用户画像有意义）。` }
   }
   if (status !== APPROVED_STATUS) {
     return { memory_id: memoryId, changed: false, status, audit: 'skipped', note: `只有生效中的自述能设锚点（当前 ${status}）。` }

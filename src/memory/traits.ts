@@ -14,9 +14,10 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
-import { personalIndexFor } from './common.ts'
+import { NON_FACT_MEMORY_TYPES, personalIndexFor } from './common.ts'
 import { IDENTITY_MEMORY_TYPE } from './save.ts'
 
 /** 候选 trait 的状态：检索只认 active，所以 pending 天然不进结果 */
@@ -30,6 +31,20 @@ export const TRAITS_MAX_OUTPUT = 8
 export const TRAIT_MAX_CHARS = 300
 /** 证据条数下限：少于两条支撑的不叫"稳定" */
 export const TRAIT_MIN_EVIDENCE = 2
+
+/**
+ * 同义候选的判定阈值（kNN 余弦相似度）。
+ *
+ * 为什么需要它：模型每次归纳的措辞都不同（「自建的 UI/面板/日志一律用中文」vs
+ * 「你要求自建的 UI、面板、日志一律使用中文」），而原先的幂等键是**精确内容哈希**，
+ * 措辞一变就被当成新条目。2026-10-31 实测：一次提炼新写的 7 条里 3 条是旧 pending 的同义重复。
+ *
+ * 0.9 的取舍：bge-m3 对「同义换句」通常给到 0.93+，对不同主题的句子一般在 0.85 以下；
+ * 阈值定低了会把「同属一个主题但结论不同」的两条误判成重复。
+ */
+export const TRAIT_DEDUP_MIN_SCORE = 0.9
+/** 判重只取最近邻几条：再多也只是噪声，我们要的是「有没有一条足够像的」 */
+export const TRAIT_DEDUP_TOPK = 5
 
 export const TRAITS_SYSTEM = [
   '你是一个记忆整理器。你的任务是：从一个人最近的记忆条目里，归纳出关于这个人自己的、稳定的模式。',
@@ -74,6 +89,13 @@ export interface TraitsDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'search'>
   writer: Pick<EsClient, 'index'>
+  /**
+   * 向量服务：候选自述也要带 embedding，否则下一批提炼没法跟它做语义判重
+   * （kNN 只查得到有向量的文档）。不可用时跳过判重，**不能因此阻断写入**。
+   */
+  embed?: { embed(text: string, call?: { signal?: AbortSignal }): Promise<number[]> }
+  /** 索引的向量维度，与 `knnBody` 一致 */
+  dims?: number
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
@@ -154,7 +176,11 @@ export async function collectTraitSources(
           { range: { updated_at: { gte: since } } },
         ],
         must_not: [
-          { term: { memory_type: IDENTITY_MEMORY_TYPE } },
+          // identity / persona / journal 都不是「发生过什么」的素材：
+          // identity 是产出物本身（再归纳就是自我循环），persona 说的是「我」不是「用户」，
+          // journal 是我自己写的回顾（喂回去只会强化幻觉）。2026-10-31 只排了 identity，
+          // persona 会被当成用户画像素材——正是 README 明令不能混的那条。
+          { terms: { memory_type: [...NON_FACT_MEMORY_TYPES] } },
           // 情绪状态文档不是记忆素材
           { term: { status: 'mood' } },
           // 阶段 7.5：锚点自述不参与重新归纳——否则提炼会拿"你已经被确认的样子"再归纳一遍，
@@ -175,6 +201,54 @@ export async function collectTraitSources(
     })
   }
   return sources
+}
+
+/**
+ * 查「是否已经有一条意思差不多的自述」。
+ *
+ * 只跟 `pending`（待审）与 `active`（已采纳）比：
+ * - 已采纳的不能再产一份，否则每天早上都要驳同一句话；
+ * - 已拒绝（`archived`）的**应当允许重新提出**——模型后来找到更强证据时，它就是新结论。
+ *
+ * 任何一步失败都返回 null（当作「没有重复」）：判重是省人工的手段，
+ * 不能因为它挂了就让整轮提炼失败。
+ */
+export async function findTraitDuplicate(
+  deps: TraitsDeps,
+  content: string,
+): Promise<{ memory_id: string; score: number } | null> {
+  const embed = deps.embed
+  const dims = deps.dims
+  if (embed === undefined || dims === undefined) return null
+  const index = personalIndexFor(deps.personalPrefix, deps.userId)
+
+  let vector: number[]
+  try {
+    vector = await embed.embed(content)
+  } catch (err) {
+    deps.log?.({ tool: 'traits', event: 'dedup_embedding_failed', error: String(err).slice(0, 160) })
+    return null
+  }
+
+  try {
+    // status: null = 不按状态过滤，pending/active/archived 一起取回来再自己筛
+    const res = await deps.reader.search(
+      index,
+      knnBody(vector, dims, { status: null, memory_type: IDENTITY_MEMORY_TYPE }, TRAIT_DEDUP_TOPK),
+    )
+    for (const hit of res.hits) {
+      const src = hit.source as Record<string, unknown>
+      const status = typeof src.status === 'string' ? src.status : ''
+      if (status !== TRAIT_STATUS && status !== 'active') continue
+      if (!(hit.score >= TRAIT_DEDUP_MIN_SCORE)) continue
+      const memoryId = typeof src.memory_id === 'string' ? src.memory_id : hit.id
+      return { memory_id: memoryId, score: hit.score }
+    }
+    return null
+  } catch (err) {
+    deps.log?.({ tool: 'traits', event: 'dedup_search_failed', error: formatEsError(err) })
+    return null
+  }
 }
 
 /** 写一条候选 trait。用内容哈希做幂等（同一条被提炼两次不会产生两份）。 */
@@ -206,6 +280,16 @@ export async function writeTraitCandidate(
     updated_at: now.toISOString(),
   }
 
+  // 候选也要带向量：没有它，下一批提炼的 kNN 判重根本看不到这一条，
+  // 只能靠精确哈希——措辞一变就又写一份（2026-10-31 实测的症状）
+  if (deps.embed !== undefined && deps.dims !== undefined) {
+    try {
+      doc.embedding = await deps.embed.embed(trait.content)
+    } catch (err) {
+      deps.log?.({ tool: 'traits', event: 'candidate_embedding_failed', error: String(err).slice(0, 160) })
+    }
+  }
+
   try {
     // create 而不是 index：同 id 已存在时返回 409，靠它做幂等（不会把已拒绝/已采纳的条目覆盖回 pending）
     await deps.writer.index(index, doc, { id: memoryId, refresh: 'wait_for', opType: 'create' })
@@ -221,7 +305,15 @@ export interface TraitsResult {
   sources: number
   candidates: number
   written: number
+  /** 因与已有 pending/active 自述同义而被跳过的条数（判重不可用时恒为 0） */
+  duplicates: number
   skipped: string | null
+  /** 干跑时带上模型原始输出（前 200 字符）：空数组和「解析失败」结果一样，必须能区分 */
+  rawPreview?: string
+  /** 原始输出总长度：与 rawPreview 对比可判断是否被 maxTokens 截断 */
+  rawLength?: number
+  /** 原始输出结尾：合法 JSON 应以 ] 收尾；不是就说明被截断 */
+  rawTail?: string
 }
 
 /**
@@ -238,7 +330,7 @@ export async function runTraitsJob(
   const sources = await collectTraitSources(deps, input.days)
   if (sources.length < TRAIT_MIN_EVIDENCE) {
     log({ tool: 'traits', skipped: 'too_few_sources', sources: sources.length })
-    return { sources: sources.length, candidates: 0, written: 0, skipped: 'too_few_sources' }
+    return { sources: sources.length, candidates: 0, written: 0, duplicates: 0, skipped: 'too_few_sources' }
   }
 
   const raw = await input.summarize(buildTraitsPrompt(sources, input.days))
@@ -248,16 +340,41 @@ export async function runTraitsJob(
   log({ tool: 'traits', event: 'parsed', sources: sources.length, candidates: candidates.length, chars: raw.length })
 
   if (input.dryRun === true) {
-    return { sources: sources.length, candidates: candidates.length, written: 0, skipped: 'dry_run' }
+    return {
+      sources: sources.length,
+      candidates: candidates.length,
+      written: 0,
+      skipped: 'dry_run',
+      duplicates: 0,
+      // 诊断用：空数组、格式没解析出来、JSON 被截断，在结果上一模一样，必须能区分
+      rawPreview: raw.slice(0, 200),
+      rawLength: raw.length,
+      rawTail: raw.slice(-80),
+    }
   }
 
   let written = 0
+  let duplicates = 0
   for (const trait of candidates) {
+    // 先看有没有同义候选：模型每批都换句措辞，只靠精确内容哈希拦不住
+    const dup = await findTraitDuplicate(deps, trait.content)
+    if (dup !== null) {
+      duplicates += 1
+      log({
+        tool: 'traits',
+        event: 'skipped_duplicate',
+        existing: dup.memory_id,
+        score: Number(dup.score.toFixed(4)),
+      })
+      continue
+    }
     const result = await writeTraitCandidate(deps, trait, input.days)
+    // 409 = 同一内容哈希已存在，也归入重复（不能静默算成「写了 0 条却不说为什么」）
     if (result.written) written += 1
+    else duplicates += 1
   }
-  log({ tool: 'traits', event: 'done', sources: sources.length, candidates: candidates.length, written })
-  return { sources: sources.length, candidates: candidates.length, written, skipped: null }
+  log({ tool: 'traits', event: 'done', sources: sources.length, candidates: candidates.length, written, duplicates })
+  return { sources: sources.length, candidates: candidates.length, written, duplicates, skipped: null }
 }
 
 /** 与 save.ts 一致的内容归一化哈希口径（便于两边判重口径相同） */
@@ -315,7 +432,12 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
           sources: { type: 'number', required: true },
           candidates: { type: 'number', required: true },
           written: { type: 'number', required: true },
+          duplicates: { type: 'number', required: true },
           skipped: { type: 'string', required: true },
+          // 诊断三件套：schema 是 additionalProperties:false，漏一个字段工具就整体报错
+          rawPreview: { type: 'string' },
+          rawLength: { type: 'number' },
+          rawTail: { type: 'string' },
           text: { type: 'string', required: true },
         },
       },
@@ -328,7 +450,7 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
       const dryRun = input.dry_run !== false
       const summarize = deps.summarize
       if (summarize === undefined) {
-        return { sources: 0, candidates: 0, written: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
+        return { sources: 0, candidates: 0, written: 0, duplicates: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
       }
       const result = await runTraitsJob(deps, { days, summarize, dryRun })
       return { ...result, skipped: result.skipped ?? '', text: renderTraitsText(result, days, dryRun) }
@@ -346,7 +468,14 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
     return `最近 ${days} 天只有 ${result.sources} 条记忆，不足两条，无法归纳。`
   }
   if (result.skipped === 'dry_run') {
-    return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选（干跑，未落库）。要落库请用 dry_run=false。`
+    const base = `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选（干跑，未落库）。要落库请用 dry_run=false。`
+    // 0 条时把模型原话带出来：空数组（真的看不出）与格式没解析（模型说了但没解析出来）必须能区分
+    if (result.candidates === 0 && result.rawPreview !== undefined) {
+      const tail = result.rawTail === undefined ? '' : `\n结尾（判断是否被截断）：\n${result.rawTail}`
+      return `${base}\n\n模型原始输出（共 ${result.rawLength ?? 0} 字符，前 200）：\n${result.rawPreview === '' ? '(空)' : result.rawPreview}${tail}`
+    }
+    return base
   }
-  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）。`
+  const dupNote = result.duplicates > 0 ? `，跳过 ${result.duplicates} 条与已有自述同义` : ''
+  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}。`
 }

@@ -22,12 +22,15 @@ PROFILE="${PANEL_PROFILE:-web}"
 LOCAL_PLUGIN="/data/dsh/local-plugins/dsh-memory-es-panel"
 PLUGIN_DIR="/data/dsh/local-plugins/dsh-memory-es"
 PROFILE_PLUGIN="/data/dsh/profiles/${PROFILE}/node_modules/dsh-memory-es-panel"
+STICKERS_DIR="/data/dsh/stickers"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 if [ -n "$SSH_KEY" ]; then SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}"); fi
 
-echo "==> 打包（plugin + panel + consolidate + src）"
+# 部署前先把版本打出来：这次部署的到底是哪一版，日志里要能对上
+VERSION="$(sed -n 's/^  "version": "\([0-9][0-9.]*\)",$/\1/p' "$REPO_ROOT/package.json" | head -1)"
+echo "==> 打包（plugin + panel + consolidate + src）版本 v${VERSION:-unknown}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 # 插件包也要打包：lib 变了却只同步面板，会出现「面板是新版、插件是旧版」的漂移
@@ -36,18 +39,27 @@ tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib package.json cordis.patch.yml
 tar -czf "$work/panel.tgz" -C "$REPO_ROOT" panel
 tar -czf "$work/cli.tgz" -C "$REPO_ROOT" consolidate src
 
+# 表情包：优先用仓库里的基础套（随版本分发、各容器一致），没有才退回本机目录
+if [ -d "$REPO_ROOT/stickers" ]; then
+  tar -czf "$work/stickers.tgz" -C "$REPO_ROOT" stickers
+else
+  echo "  ! 仓库里没有 stickers/，退回本机 ~/.dsh/stickers"
+  tar -czf "$work/stickers.tgz" -C "$HOME/.dsh" stickers
+fi
+
 echo "==> 上传到 $HOST"
-scp -q "${SSH_OPTS[@]}" "$work/plugin.tgz" "$work/panel.tgz" "$work/cli.tgz" "$HOST:/tmp/"
+scp -q "${SSH_OPTS[@]}" "$work/plugin.tgz" "$work/panel.tgz" "$work/cli.tgz" "$work/stickers.tgz" "$HOST:/tmp/"
 
 echo "==> 同步进容器 $CONTAINER"
-ssh "${SSH_OPTS[@]}" "$HOST" bash -s -- "$CONTAINER" "$LOCAL_PLUGIN" "$PROFILE" "$PROFILE_PLUGIN" "$PLUGIN_DIR" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$HOST" bash -s -- "$CONTAINER" "$LOCAL_PLUGIN" "$PROFILE" "$PROFILE_PLUGIN" "$PLUGIN_DIR" "$STICKERS_DIR" <<'REMOTE'
 set -euo pipefail
-container="$1"; local_plugin="$2"; profile="$3"; profile_plugin="$4"; plugin_dir="$5"
+container="$1"; local_plugin="$2"; profile="$3"; profile_plugin="$4"; plugin_dir="$5"; stickers_dir="$6"
 
 docker cp /tmp/plugin.tgz "$container:/tmp/plugin.tgz" >/dev/null
 docker cp /tmp/panel.tgz "$container:/tmp/panel.tgz" >/dev/null
 docker cp /tmp/cli.tgz "$container:/tmp/cli.tgz" >/dev/null
-rm -f /tmp/plugin.tgz /tmp/panel.tgz /tmp/cli.tgz
+docker cp /tmp/stickers.tgz "$container:/tmp/stickers.tgz" >/dev/null
+rm -f /tmp/plugin.tgz /tmp/panel.tgz /tmp/cli.tgz /tmp/stickers.tgz
 
 docker exec "$container" sh -c "
 set -e
@@ -55,6 +67,12 @@ set -e
   tar -xzf /tmp/plugin.tgz -C /tmp/mem-plugin
   tar -xzf /tmp/panel.tgz -C /tmp/mem-panel
   tar -xzf /tmp/cli.tgz  -C /tmp/mem-cli
+
+  # 表情包：整份替换（仓库里的基础套是全集；别用 --strip-components，否则文件散到 /data/dsh 根）
+  mkdir -p $(dirname $stickers_dir)
+  rm -rf $stickers_dir
+  tar -xzf /tmp/stickers.tgz -C $(dirname $stickers_dir)
+  chown -R node:node $stickers_dir
 
   # 0) 插件包本体（lib + package.json + bundle patch）
   mkdir -p $plugin_dir

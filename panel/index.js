@@ -13,6 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
@@ -21,6 +22,20 @@ import { createReadClient } from './es.js'
 const ROUTE = '/memory-es/api'
 const ENTRY_ID = 'dsh-memory-es'
 const AUDIT_INDEX = 'memory_audit'
+
+/**
+ * 面板版本：读同目录的 `package.json`（唯一来源，不手写常量）。
+ * 浏览器读不到文件系统，所以由 `/overview` 把版本回传给前端显示——
+ * 页面上的版本号因此一定是「服务端真正加载的那份」，而不是 bundle 里过期的字符串。
+ */
+const PANEL_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    return typeof pkg.version === 'string' && pkg.version.trim() !== '' ? pkg.version.trim() : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
 
 /** 配置默认值与 `src/config.ts` 保持一致（只用于面板兜底，不替代插件校验） */
 const DEFAULTS = {
@@ -41,13 +56,32 @@ const DEFAULTS = {
   defaults: { domain: 'general' },
   // 入库后的自动蒸馏（默认关：要花 token，用户在看板上自己打开）
   distill: { enabled: false, provider: '', model: '', timeoutMs: 30000 },
+  // 阶段 9：人格内核与表情包（9.4 面板会读这两组）
+  persona: { enabled: true, seed: '' },
+  stickers: { enabled: true, dir: '~/.dsh/stickers', maxPerTurn: 1 },
+  // 阶段 9.5 / 9.6：每日回顾与每日自动提炼
+  journal: { enabled: true, at: '23:30' },
+  traits: { enabled: true, at: '02:30', days: 14 },
 }
 
-/** 只合并已知的两层键：配置是固定 schema，不需要通用深合并 */
+/**
+ * 合并继承层与 override 层。
+ *
+ * ⚠️ 不能只遍历 `DEFAULTS` 的键：那样**配置里有、DEFAULTS 里没有**的组会被静默丢弃。
+ * 2026-10-31 就因此踩过：`persona.seed` 明明写在配置里、插件也读到了（提示词里有种子），
+ * 面板却显示「seed 为空」——因为它在这一层被扔掉了。现在改成两边的键取并集。
+ */
 function mergeConfig(inherited, override) {
   const merged = {}
-  for (const [group, defaults] of Object.entries(DEFAULTS)) {
-    merged[group] = { ...defaults, ...(inherited?.[group] ?? {}), ...(override?.[group] ?? {}) }
+  const groups = new Set([
+    ...Object.keys(DEFAULTS),
+    ...Object.keys(inherited ?? {}),
+    ...Object.keys(override ?? {}),
+  ])
+  for (const group of groups) {
+    const defaults = DEFAULTS[group] ?? {}
+    const base = typeof defaults === 'object' && defaults !== null ? defaults : {}
+    merged[group] = { ...base, ...(inherited?.[group] ?? {}), ...(override?.[group] ?? {}) }
   }
   return merged
 }
@@ -96,6 +130,22 @@ function findEntryRow(ctx) {
     ok: false,
     error: `找到 ${candidates.length} 条候选但没有一条含完整配置（es.url/userId）；label=${entryLabels(candidates[0]).join('|')}`,
   }
+}
+
+/**
+ * 读身份的选择：单账号优先，缺了才回落到旧的 reader（readUsername/readPassword）。
+ *
+ * ⚠️ 只允许这一处实现。2026-10-31 的 bug 就是「面板用单账号、探活却读 readUsername」：
+ * 单账号部署下 readUsername 为空 → 探活 401 → 改 ES 地址被自己拦住，还报「连不上 ES」。
+ */
+function readCredentialOf(identity) {
+  if (identity?.username && identity?.password) {
+    return { username: identity.username, password: identity.password }
+  }
+  if (identity?.readUsername && identity?.readPassword) {
+    return { username: identity.readUsername, password: identity.readPassword }
+  }
+  return null
 }
 
 /** 每次请求现读配置 → 配置改了面板不用重启 */
@@ -167,7 +217,8 @@ function resolveClientConfig(ctx, role = 'reader') {
       },
     }
   }
-  if (!value.identity.readUsername || !value.identity.readPassword) {
+  const credential = readCredentialOf(value.identity)
+  if (!credential) {
     return { ok: false, error: '插件配置缺少身份：要么给 identity.username/password（推荐），要么给 readUsername/readPassword' }
   }
   return {
@@ -176,7 +227,7 @@ function resolveClientConfig(ctx, role = 'reader') {
       url: value.es.url,
       caCertPath: value.es.caCertPath,
       timeoutMs: value.es.requestTimeoutMs,
-      auth: { username: value.identity.readUsername, password: value.identity.readPassword },
+      auth: credential,
     },
   }
 }
@@ -434,6 +485,8 @@ async function handleOverview(ctx, res) {
   json(res, 200, {
     ok: true,
     value: {
+      // 前端页脚显示它：部署后一眼能看出页面连的是哪一版服务端
+      version: PANEL_VERSION,
       es: {
         reachable: !health.error,
         // 读不到集群健康（权限不足），这里不编造状态；可达性由上面的索引读探测给出
@@ -745,6 +798,153 @@ async function handleMood(ctx, res) {
 }
 
 /** 待采纳的 identity 候选（阶段 7.2 产出，status=pending） */
+/**
+ * 阶段 9.4：人格。
+ *
+ * `seed` 是部署者写在配置里的人格内核，`entries` 是 9.3 学出来、**已 approve** 的倾向。
+ * 两者分开返回，前端才能把「你定的」和「我长的」显示成两层。
+ */
+async function handlePersonaGet(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  const [active, pending] = await Promise.all([
+    client.search(names.personal, {
+      size: 50,
+      _source: ['memory_id', 'content', 'created_at', 'updated_at'],
+      sort: [{ updated_at: 'desc' }],
+      query: { bool: { filter: [{ term: { status: 'active' } }, { term: { memory_type: 'persona' } }] } },
+    }),
+    client.search(names.personal, {
+      size: 0,
+      query: { bool: { filter: [{ term: { status: 'pending' } }, { term: { memory_type: 'persona' } }] } },
+      track_total_hits: true,
+    }),
+  ])
+
+  const persona = config.persona ?? {}
+  const seed = str(persona.seed)
+  return json(res, 200, {
+    ok: true,
+    value: {
+      enabled: persona.enabled !== false,
+      seed,
+      seedLength: seed.trim().length,
+      entries: (active.hits?.hits ?? []).map((hit) => ({
+        memoryId: str(hit._source?.memory_id),
+        content: str(hit._source?.content),
+        updatedAt: str(hit._source?.updated_at),
+      })),
+      pendingCount: pending.hits?.total?.value ?? 0,
+    },
+  })
+}
+
+/**
+ * 阶段 9.4：表情包。
+ *
+ * 图片不进仓库（阶段 9.2 定的），所以这里只负责**列出目录里实际有什么**：
+ * `exists=false` 说明 stickers.json 里写了但文件不在，前端用红色标出来——
+ * 这比"贴了图但显示不出来"好排查得多。
+ */
+async function handleStickersGet(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const stickers = configRow.value.stickers ?? {}
+  const rawDir = str(stickers.dir) === '' ? '~/.dsh/stickers' : str(stickers.dir)
+  const dir = rawDir === '~' ? homedir() : rawDir.startsWith('~/') ? join(homedir(), rawDir.slice(2)) : rawDir
+
+  let items = []
+  let error = ''
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, 'stickers.json'), 'utf8'))
+    const list = Array.isArray(parsed.items) ? parsed.items : []
+    items = list
+      .filter((item) => item && typeof item.file === 'string')
+      .map((item) => ({
+        id: str(item.id),
+        label: str(item.label),
+        file: str(item.file),
+        when: str(item.when),
+        exists: existsSync(join(dir, str(item.file))),
+      }))
+  } catch (err) {
+    // 目录不存在是常态（图片不进仓库），这里不当错误刷屏，只回一句可读的提示
+    error = `没有读到 ${join(dir, 'stickers.json')}`
+  }
+
+  return json(res, 200, {
+    ok: true,
+    value: {
+      enabled: stickers.enabled !== false,
+      dir,
+      maxPerTurn: Number.isFinite(stickers.maxPerTurn) ? stickers.maxPerTurn : 1,
+      items,
+      error,
+    },
+  })
+}
+
+/**
+ * 阶段 9.4：日记。
+ *
+ * 取「我这边发生过什么」：人格与自述条目的状态变迁（active / archived），按更新时间倒序。
+ * 刻意不混入记忆浏览的主列表——那是"我知道什么"，这里是"我怎么变成现在这样"。
+ */
+async function handleDiaryGet(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '30', 10) || 30))
+
+  const [result, journalResult] = await Promise.all([
+    client.search(names.personal, {
+      size,
+      _source: ['memory_id', 'content', 'status', 'memory_type', 'updated_at'],
+      sort: [{ updated_at: 'desc' }],
+      query: {
+        bool: {
+          filter: [
+            { terms: { memory_type: ['persona', 'identity'] } },
+            { terms: { status: ['active', 'archived'] } },
+          ],
+        },
+      },
+    }),
+    // 「每日回顾」是另一类：按天一段，直接生效（不进审核队列）
+    client.search(names.personal, {
+      size: 30,
+      _source: ['memory_id', 'content', 'created_at', 'updated_at', 'day'],
+      sort: [{ created_at: 'desc' }],
+      query: { bool: { filter: [{ term: { memory_type: 'journal' } }] } },
+    }),
+  ])
+
+  const rows = (result.hits?.hits ?? []).map((hit) => ({
+    memoryId: str(hit._source?.memory_id),
+    content: str(hit._source?.content),
+    status: str(hit._source?.status),
+    memoryType: str(hit._source?.memory_type),
+    updatedAt: str(hit._source?.updated_at),
+  }))
+  const journals = (journalResult.hits?.hits ?? []).map((hit) => {
+    const source = (hit._source ?? {})
+    const day = typeof source.day === 'string' && source.day !== ''
+      ? source.day
+      : String(source.created_at ?? '').slice(0, 10)
+    return {
+      date: day,
+      content: String(source.content ?? ''),
+      memoryId: String(source.memory_id ?? ''),
+    }
+  })
+  return json(res, 200, { ok: true, value: { rows, journals } })
+}
+
 async function handleIdentityPending(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -753,13 +953,15 @@ async function handleIdentityPending(ctx, res, url) {
   const size = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('size') ?? '20', 10) || 20))
   const result = await client.search(names.personal, {
     size,
-    _source: ['memory_id', 'content', 'evidence_ids', 'created_at'],
+    _source: ['memory_id', 'content', 'memory_type', 'evidence_ids', 'created_at'],
     sort: [{ created_at: 'desc' }],
-    query: { bool: { filter: [{ term: { status: 'pending' } }, { term: { memory_type: 'identity' } }] } },
+    // 阶段 9.4：人格候选也走这个闸门（approve 之后才进提示段）
+    query: { bool: { filter: [{ term: { status: 'pending' } }, { terms: { memory_type: ['identity', 'persona'] } }] } },
   })
   const rows = (result.hits?.hits ?? []).map((hit) => ({
     memoryId: str(hit._source?.memory_id),
     content: str(hit._source?.content),
+    memoryType: str(hit._source?.memory_type),
     evidenceCount: Array.isArray(hit._source?.evidence_ids) ? hit._source.evidence_ids.length : 0,
     createdAt: str(hit._source?.created_at),
   }))
@@ -785,7 +987,7 @@ async function handleIdentityReview(ctx, res, req) {
   const writer = createReadClient(() => resolveClientConfig(ctx, 'personal-writer'))
   const reader = createReadClient(() => resolveClientConfig(ctx))
 
-  // 先读校验：只有 pending + identity 能动
+  // 先读校验：只有 pending + (identity | persona) 能动
   const found = await reader.search(names.personal, {
     size: 1,
     query: { bool: { filter: [{ term: { memory_id: memoryId } }] } },
@@ -793,7 +995,9 @@ async function handleIdentityReview(ctx, res, req) {
   })
   const src = found.hits?.hits?.[0]?._source
   if (!src) return json(res, 404, { ok: false, error: `找不到条目 ${memoryId}` })
-  if (str(src.memory_type) !== 'identity') return json(res, 409, { ok: false, error: '这条不是 identity，不能走采纳闸门' })
+  if (!['identity', 'persona'].includes(str(src.memory_type))) {
+    return json(res, 409, { ok: false, error: `这条是 ${str(src.memory_type) || '未知'}，不能走采纳闸门（只收 identity / persona）` })
+  }
   if (str(src.status) !== 'pending') return json(res, 409, { ok: false, error: `这条当前状态是 ${str(src.status)}（只有 pending 能被采纳）` })
 
   // 锚点：不改 status，只改 anchor 标志（规则与 src/memory/review.ts 的 setAnchor 一致）
@@ -1063,9 +1267,10 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   }
 
   // 审计要能追到"谁"：actor 统一带 userId（panel:xqh），因为免费版 ES 没有安全审计日志，
-  // memory_audit 是唯一的人维度证据。放在身份校验之后算，避免变量未初始化
-  const actorBase = str(input.actor).trim() || 'panel'
-  const actor = actorBase.includes(':') ? actorBase : `${actorBase}:${identity.userId}`
+  // memory_audit 是唯一的人维度证据。
+  // ⚠️ 不能取请求体里的 actor：那是调用方说了算，直接调 API 就能把「谁批的」写成别人
+  // （2026-10-31 巡检发现 `actor: 'cli:someone'` 会原样落进审计与 reviewed_by）。
+  const actor = `panel:${identity.userId}`
 
   const config = configRow.value
   const names = indexNames(config)
@@ -1134,10 +1339,16 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   })
 }
 
-/** 可编辑的配置字段（只暴露安全的几个；密码不进面板） */
+/**
+ * 可编辑的配置字段（只暴露安全的几个；密码不进面板）。
+ *
+ * ⚠️ **`es.url` / `es.caCertPath` 刻意不在这里**（2026-10-31 巡检收窄）：
+ * 它们是"把 Basic Auth 凭据发往哪个地址"的开关。放进可写面，等于会话被盗后
+ * 能把 `mem-admin` 的凭据导到任意主机（改 CA 还能顺带绕过校验）。
+ * 而改完本来也要重启 dsh 才生效（面板自己会提示 restartRequired），
+ * 所以走 profile 的 `cordis.patch.yml` 手动改，收益不比面板低、攻击面小得多。
+ */
 const EDITABLE = [
-  { path: ['es', 'url'], label: 'ES 地址', type: 'string' },
-  { path: ['es', 'caCertPath'], label: 'CA 证书路径', type: 'string' },
   { path: ['es', 'requestTimeoutMs'], label: '请求超时(ms)', type: 'number' },
   { path: ['index', 'team'], label: '团队库索引名', type: 'string' },
   { path: ['embedding', 'url'], label: 'Embedding 地址', type: 'string' },
@@ -1148,6 +1359,41 @@ const EDITABLE = [
   { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
   { path: ['distill', 'model'], label: '蒸馏模型', type: 'string', hint: '留空 = 用宿主第一个可用模型' },
   { path: ['distill', 'timeoutMs'], label: '蒸馏超时(ms)', type: 'number' },
+  // 阶段 9.4：人格内核允许在面板里直接改（改完写回 profile 配置，热重载后下一轮提示词生效）
+  { path: ['persona', 'seed'], label: '人格内核', type: 'string', hint: '这段文字会进系统提示词；留空即不注入人格' },
+  { path: ['persona', 'enabled'], label: '启用人格', type: 'boolean' },
+  // 阶段 9.5：每日回顾（默认开；关掉后不再调模型，已有日记保留）
+  {
+    path: ['journal', 'enabled'],
+    label: '每日回顾',
+    type: 'boolean',
+    hint: '每天到点把当天对话压成一段，写进「人格 → 日记」的回顾栏；关掉后不再调模型',
+  },
+  {
+    path: ['journal', 'at'],
+    label: '回顾时间',
+    type: 'string',
+    hint: 'HH:MM（本地时区）。过了点会补跑；同一天只写一次',
+  },
+  // 阶段 9.6：每日自动提炼（产物仍是待审核候选，不会自己改行为）
+  {
+    path: ['traits', 'enabled'],
+    label: '每日自动提炼',
+    type: 'boolean',
+    hint: '每天到点替你跑一次 memory_traits；产出仍是待审核候选，采纳要人工点',
+  },
+  {
+    path: ['traits', 'at'],
+    label: '提炼时间',
+    type: 'string',
+    hint: 'HH:MM（本地时区），默认 02:30',
+  },
+  {
+    path: ['traits', 'days'],
+    label: '回看天数',
+    type: 'number',
+    hint: '提炼时回看最近多少天的记忆（1~90）',
+  },
 ]
 
 function pick(config, path) {
@@ -1176,6 +1422,8 @@ async function handleConfigGet(ctx, res) {
         teamIndex: value.index.team,
         auditIndex: AUDIT_INDEX,
         userId: value.identity.userId,
+        // 连接目标只读展示：改它请编辑 profile 的 cordis.patch.yml 并重启（见 EDITABLE 的注释）
+        es: `${value.es.url}（CA：${value.es.caCertPath || '系统信任库'}）`,
         reader: value.identity.readUsername,
         writer: value.identity.writerUsername,
         consolidator: value.identity.consolidatorUsername,
@@ -1203,13 +1451,35 @@ async function handleConfigWrite(ctx, res, req) {
   })
   if (!target) return json(res, 503, { ok: false, error: `没有找到 ${ENTRY_ID} 的配置行，无法写入` })
 
-  const changes = Array.isArray(input.changes) ? input.changes : []
+  const rawChanges = Array.isArray(input.changes) ? input.changes : []
+  /**
+   * configEditor 把多行字符串序列化成**折叠标量**（`>`），而折叠会把单换行变成空格 ——
+   * 人格内核粘成一行就毁了段落结构（2026-10-31 实测：存完文件里从 `seed: |` 变成 `seed: >`）。
+   * 对策：写入前把单换行补成一个空行，折叠后正好还原成原来的换行。
+   * 这里同时留一份原始值，供写后校验比对。
+   */
+  const seedDraft = rawChanges.find((c) => c?.key === 'persona.seed')?.value
+  const changes = rawChanges.map((c) =>
+    c?.key === 'persona.seed'
+      ? { ...c, value: String(c.value ?? '').replace(/\n(?!\n)/g, '\n\n') }
+      : c,
+  )
   if (changes.length === 0) return json(res, 400, { ok: false, error: '没有要修改的字段' })
 
   const allowed = new Set(EDITABLE.map((field) => field.path.join('.')))
   for (const change of changes) {
     if (typeof change?.key !== 'string' || !allowed.has(change.key)) {
       return json(res, 400, { ok: false, error: `不可修改的字段：${change?.key}` })
+    }
+  }
+
+  // 人格内核是自由文本，但要有上限：配置里塞进几十万字符会让每轮提示词组装变慢
+  for (const change of changes) {
+    if (change.key === 'persona.seed') {
+      const text = String(change.value ?? '')
+      if (text.length > 20000) {
+        return json(res, 400, { ok: false, error: `人格内核过长（${text.length} 字，上限 20000）` })
+      }
     }
   }
 
@@ -1234,54 +1504,26 @@ async function handleConfigWrite(ctx, res, req) {
     if (patched[group] === undefined || patched[group] === null) patched[group] = {}
     patched[group][key] = value
 
-    const { existsSync } = await import('node:fs')
-    if (change.key === 'es.url') {
-      let parsed
-      try {
-        parsed = new URL(value)
-      } catch {
-        return json(res, 400, { ok: false, error: `ES 地址不是合法 URL：${value}` })
-      }
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        return json(res, 400, { ok: false, error: `ES 地址只支持 http/https，收到 ${parsed.protocol}` })
-      }
-    }
-    if (change.key === 'es.caCertPath' && value !== '' && !existsSync(value)) {
-      return json(res, 400, { ok: false, error: `CA 证书文件不存在：${value}` })
-    }
     if (change.key === 'es.requestTimeoutMs' && (value < 500 || value > 60000)) {
       return json(res, 400, { ok: false, error: '请求超时应在 500~60000 毫秒之间' })
     }
     if (change.key === 'embedding.dims' && (!Number.isInteger(value) || value <= 0)) {
       return json(res, 400, { ok: false, error: '向量维度必须是正整数' })
     }
-  }
-
-  // 改了连接相关的值就先探一次 ES：探不通不落盘，别把 dsh 写坏
-  const touchesConnection = changes.some((c) => c.key === 'es.url' || c.key === 'es.caCertPath')
-  if (touchesConnection && currentValue) {
-    const probe = createReadClient(() => ({
-      ok: true,
-      value: {
-        url: patched.es.url,
-        caCertPath: patched.es.caCertPath,
-        timeoutMs: patched.es.requestTimeoutMs,
-        auth: { username: currentValue.identity.readUsername, password: currentValue.identity.readPassword },
-      },
-    }))
-    try {
-      await probe.search(`${patched.index.personalPrefix}${currentValue.identity.userId}`, {
-        size: 0,
-        track_total_hits: true,
-        query: { match_all: {} },
-      })
-    } catch (error) {
-      return json(res, 400, {
-        ok: false,
-        error: `用新配置连不上 ES，未保存：${String(error?.message ?? error).slice(0, 300)}`,
-      })
+    if (change.key === 'journal.at' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))) {
+      return json(res, 400, { ok: false, error: `回顾时间要写成 HH:MM（00:00~23:59），现在是「${value}」` })
+    }
+    if (change.key === 'traits.at' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))) {
+      return json(res, 400, { ok: false, error: `提炼时间要写成 HH:MM（00:00~23:59），现在是「${value}」` })
+    }
+    if (change.key === 'traits.days' && (!Number.isInteger(value) || value < 1 || value > 90)) {
+      return json(res, 400, { ok: false, error: `回看天数要是 1~90 的整数，现在是「${value}」` })
     }
   }
+
+  // 连接参数（es.url / caCertPath）不在可写白名单里，所以这里不再需要"改连接先探活"。
+  // 探活本身也随之下线：它唯一的作用是防止把坏地址写进配置，而那个入口已经关掉。
+  // （2026-10-31：这两个字段曾把「ES 凭据去哪个地址」变成面板可改的开关。）
 
   try {
     await editor.edit(target.entry, (current) => {
@@ -1293,10 +1535,22 @@ async function handleConfigWrite(ctx, res, req) {
     return json(res, 400, { ok: false, error: `写入失败：${String(error?.message ?? error)}` })
   }
 
+  // 写后校验：人格内核必须真的落成提交的内容，不能"点了保存但文件里还是旧的"
+  let seedWarn = ''
+  if (typeof seedDraft === 'string' && seedDraft !== '') {
+    const after = findEntryRow(ctx)
+    const saved = after.ok ? String(after.value?.persona?.seed ?? '') : ''
+    const norm = (text) => text.replace(/\s+/g, ' ').trim()
+    if (norm(saved) !== norm(seedDraft)) {
+      seedWarn = `人格内核读回不一致：提交 ${norm(seedDraft).length} 字、存下 ${norm(saved).length} 字。保存已写入但内容可能被折叠，请检查配置文件的 seed 段。`
+    }
+  }
+
   json(res, 200, {
     ok: true,
     value: {
       saved: changes.map((change) => change.key),
+      ...(seedWarn ? { warn: seedWarn } : {}),
       // 关键提示：插件在 apply() 时建好 ES 客户端，配置变更必须重启 dsh 才真正生效
       restartRequired: true,
       note: '已保存到 profile 配置。ES 客户端在插件加载时建立，需重启 dsh 后才生效（容器里是 docker restart <容器名>）。',
@@ -1608,6 +1862,9 @@ async function handle(ctx, req, res) {
     if (path === '/memories') return await handleMemories(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
+    if (path === '/persona') return await handlePersonaGet(ctx, res)
+    if (path === '/stickers') return await handleStickersGet(ctx, res)
+    if (path === '/diary') return await handleDiaryGet(ctx, res, url)
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
     if (path === '/identity/active' && req.method === 'GET') return await handleIdentityActive(ctx, res, url)
@@ -1908,7 +2165,7 @@ async function selfTest(ctx) {
     }
 
     console.error(
-      `[记忆库面板] 自检通过 | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
+      `[记忆库面板] 自检通过 v${PANEL_VERSION} | 配置行=${payload.value?.config?.entryLabel ?? '?'} ` +
         `ES=${es.reachable ? '可达' : '不可达'} 个人=${counts.personal} 团队=${counts.team} ` +
         `文档=${counts.docs ?? '—'}(${counts.docChunks ?? '—'} 块) ` +
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
@@ -1972,6 +2229,7 @@ export {
   pendingQuery,
   probeDeleteRights,
   projectHit,
+  EDITABLE,
 }
 
 export const inject = ['webServer', 'configEditor']

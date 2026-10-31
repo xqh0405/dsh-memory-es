@@ -76,6 +76,12 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "traits_window_days": { "type": "integer" },
         "arousal":           { "type": "float" },
         "superseded_at":     { "type": "date" },
+        "reviewed_at":       { "type": "date" },
+        "reviewed_by":       { "type": "keyword" },
+        "review_note":       { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "anchor":            { "type": "boolean" },
+        "day":               { "type": "keyword" },
+        "review_state":      { "type": "keyword" },
         "blocked_reason":    { "type": "keyword" },
         "personal_only_reason": { "type": "text" },
 

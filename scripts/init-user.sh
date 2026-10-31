@@ -146,7 +146,11 @@ case "$TIER" in
   personal-only) ROLES="$ROLES]" ;;
 esac
 
-admin -X PUT "$ES/_security/user/$USER_NAME" -d "{\"password\":\"$PW\",\"roles\":$ROLES}" >/dev/null
+# 密码走 stdin（-d @- + heredoc），不进 argv：同机用户可读 /proc/<pid>/cmdline，
+# 这是 curl-es.sh 的既有约定，这里之前漏了（2026-10-31 巡检）。
+admin -X PUT "$ES/_security/user/$USER_NAME" -d @- >/dev/null <<JSON
+{"password":"$PW","roles":$ROLES}
+JSON
 
 umask 077
 cat >"$USER_ENV" <<ENV

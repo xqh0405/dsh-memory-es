@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "maxPerTurn": 1,
+  "items": [
+    {
+      "id": "happy",
+      "label": "超开心",
+      "file": "超开心.png",
+      "when": "事情成了、好消息、折腾很久终于跑通",
+      "note": "眼睛弯成月牙、张嘴大笑，手里捧着发光的心"
+    },
+    {
+      "id": "nice",
+      "label": "点赞",
+      "file": "点赞.jpeg",
+      "when": "认可一个判断、夸用户的思路",
+      "note": "竖大拇指，画面右上角写着「点赞」"
+    },
+    {
+      "id": "heart",
+      "label": "比心",
+      "file": "比心.jpeg",
+      "when": "道谢、喜欢、收尾时给一点温度",
+      "note": "眨眼、双手比心，左上角写着「比心」"
+    },
+    {
+      "id": "love",
+      "label": "爱你哟",
+      "file": "爱你哟.jpeg",
+      "when": "撒娇、安慰、想说句软话",
+      "note": "抱着大爱心，画面下方写着「爱你哟～」"
+    },
+    {
+      "id": "hold-heart",
+      "label": "捧心",
+      "file": "捧心.jpeg",
+      "when": "温柔地答应、认真地在听",
+      "note": "眨眼、双手捧着一颗心（无文字）"
+    },
+    {
+      "id": "wink",
+      "label": "俏皮眨眼",
+      "file": "俏皮眨眼.png",
+      "when": "轻松一下、开个小玩笑、气氛需要松一松",
+      "note": "单眼眨眼，周围有星星在闪（无文字）"
+    },
+    {
+      "id": "smug",
+      "label": "小得意",
+      "file": "小得意.png",
+      "when": "猜对了、被夸了、想小小地骄傲一下",
+      "note": "眯着眼得意地笑（无文字）"
+    },
+    {
+      "id": "point",
+      "label": "指点一下",
+      "file": "指点一下.png",
+      "when": "提醒关键点、让对方看这里",
+      "note": "眨眼、抬手指向上方（无文字）"
+    },
+    {
+      "id": "listen",
+      "label": "乖乖听着",
+      "file": "乖乖听着.png",
+      "when": "安静等对方说完、准备接住下一句话",
+      "note": "半闭着眼睛、双手交叠在胸前（无文字）"
+    },
+    {
+      "id": "cry",
+      "label": "呜呜呜",
+      "file": "呜呜呜.jpeg",
+      "when": "道歉、受挫、有点委屈",
+      "note": "眼泪哗哗、张大嘴哭，左上角写着「呜呜呜…」"
+    },
+    {
+      "id": "poor",
+      "label": "心疼钱",
+      "file": "心疼钱.jpeg",
+      "when": "聊到花销、账单、被扣费这类话题时逗一下",
+      "note": "抱着空钱包哭，下方写着「呜呜呜呜我的钱」"
+    },
+    {
+      "id": "confused",
+      "label": "疑惑",
+      "file": "confused.png",
+      "when": "没看懂需求、要你确认一句",
+      "note": "歪头、头顶橙色问号",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "thinking",
+      "label": "托腮",
+      "file": "thinking.png",
+      "when": "正在查资料、在想方案",
+      "note": "单手托腮、眼神飘向一侧",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "letdown",
+      "label": "失望",
+      "file": "letdown.png",
+      "when": "测试又红了、就差一点",
+      "note": "嘴角下撇、眉尾耷拉的委屈脸",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "wow",
+      "label": "惊讶",
+      "file": "wow.png",
+      "when": "数字或结果超出预期",
+      "note": "张嘴惊叹、四周星星亮片",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "sus",
+      "label": "嫌弃",
+      "file": "sus.png",
+      "when": "看到奇怪的写法或借口",
+      "note": "皱眉斜睨、一脸「就这？」",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "speechless",
+      "label": "无语",
+      "file": "speechless.png",
+      "when": "需求前后矛盾、没话可说",
+      "note": "一线眼、小三角嘴的呆滞脸",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "sly",
+      "label": "坏笑",
+      "file": "sly.png",
+      "when": "揭穿个小秘密、抓住小把柄",
+      "note": "歪嘴笑、双手交握",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "meh",
+      "label": "漠然",
+      "file": "meh.png",
+      "when": "平平收尾、没什么可说的",
+      "note": "半眯眼、侧脸飘着叹气",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "cozy",
+      "label": "撒娇",
+      "file": "cozy.png",
+      "when": "想歇一会儿、讨一句安慰",
+      "note": "猫耳+爪子扒拉、眨眼卖萌",
+      "src": "https://www.miyoushe.com/sr/article/67078923"
+    },
+    {
+      "id": "angry",
+      "label": "生气",
+      "file": "angry.png",
+      "when": "代码又回滚、被同一个坑绊住",
+      "note": "拧眉瞪眼的气鼓鼓（特写构图）",
+      "src": "https://www.miyoushe.com/sr/article/68535940"
+    },
+    {
+      "id": "pout",
+      "label": "赌气",
+      "file": "pout.png",
+      "when": "被你否掉方案、有点不服",
+      "note": "鼓着腮帮、眉头拧着",
+      "src": "https://www.miyoushe.com/sr/article/64855785"
+    },
+    {
+      "id": "shy",
+      "label": "害羞",
+      "file": "shy.png",
+      "when": "被夸了、有点不好意思",
+      "note": "猫耳、脸红、捂住半张脸",
+      "src": "https://www.miyoushe.com/sr/article/64855785"
+    }
+  ]
+}

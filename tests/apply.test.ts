@@ -112,19 +112,24 @@ describe('apply', () => {
     assert.equal(requests.length, 0, '加载期不应发任何请求')
     assert.deepEqual(
       harness.registered.map((tool) => tool.name).sort(),
-      ['doc_search', 'memory_distill', 'memory_history', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
+      ['doc_search', 'memory_distill', 'memory_history', 'memory_journal', 'memory_persona', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
     )
     assert.equal(harness.logs.length, 1)
-    assert.match(harness.logs[0], /ready: user=xqh index=personal_memory_xqh/)
+    // 版本号在 ready 行里：部署后靠它判断「加载的是哪一版」（格式由 version.test.ts 守）
+    assert.match(harness.logs[0], /ready: v\d+\.\d+\.\d+ user=xqh index=personal_memory_xqh/)
   })
 
   test('注册走 effect：disposer 一调，工具就注销（fiber 卸载能收干净）', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
-    assert.equal(harness.registered.length, 9, '九个工具各一次 effect')
-    assert.equal(harness.sections.length, 2, '记忆段 + 心情段各一次 effect')
-    assert.equal(harness.disposers.length, 13, '九个工具 + 两个提示段 + 两个事件监听，都走 ctx.effect')
+    assert.equal(harness.registered.length, 11, '十一个工具各一次 effect')
+    assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
+    assert.equal(
+      harness.disposers.length,
+      20,
+      '十一个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 两个事件监听，都走 ctx.effect',
+    )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
     assert.equal(harness.sections.length, 0)
@@ -152,7 +157,7 @@ describe('apply', () => {
   test('提示词段：名字/顺序正确，正文非空且不含会触发插值的花括号', () => {
     const harness = fakeCtx()
     apply(harness.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
-    assert.equal(harness.sections.length, 2)
+    assert.equal(harness.sections.length, 4)
     const section = harness.sections.find((s) => s.name === 'dsh-memory-es')!
     assert.equal(section.order, 3200)
     assert.equal(typeof section.text, 'string')

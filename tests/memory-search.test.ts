@@ -556,6 +556,52 @@ describe('团队库审核闸（S9）：pending/rejected 不进检索', () => {
   })
 })
 
+describe('非事实类型（identity / persona / journal）默认不进检索', () => {
+  /** 从 bm25 的 query.bool.filter 里取「排除了哪些 memory_type」 */
+  const excludedTypes = (body: Record<string, unknown>): string[] => {
+    const filters = (body.query as { bool?: { filter?: unknown[] } } | undefined)?.bool?.filter ?? []
+    return filters
+      .flatMap((f) => ((f as { bool?: { must_not?: unknown[] } }).bool?.must_not ?? []))
+      .flatMap((m) => (m as { terms?: { memory_type?: string[] } }).terms?.memory_type ?? [])
+  }
+
+  test('默认三类全排除（persona 曾冒充事实排到第 1）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: '先给结论', scope: 'personal' })
+      const body = h.bodyOf(PERSONAL_INDEX, 'bm25')
+      assert.ok(body, '个人库应当发出请求')
+      assert.deepEqual(excludedTypes(body), ['identity', 'persona', 'journal'])
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('显式选了 identity 时只放行它，另两类仍排除', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'x', scope: 'personal', memory_type: ['identity'] })
+      const body = h.bodyOf(PERSONAL_INDEX, 'bm25')
+      assert.ok(body, '个人库应当发出请求')
+      assert.deepEqual(excludedTypes(body), ['persona', 'journal'])
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('显式选了 journal（补看某天的回顾）时，identity 与 persona 仍排除', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'x', scope: 'personal', memory_type: ['journal'] })
+      const body = h.bodyOf(PERSONAL_INDEX, 'bm25')
+      assert.ok(body, '个人库应当发出请求')
+      assert.deepEqual(excludedTypes(body), ['identity', 'persona'])
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
 describe('defineSearchTool', () => {
   test('参数与输出 schema 合法，execute 返回声明结构', async () => {
     const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.7)] } })
@@ -583,19 +629,19 @@ describe('defineSearchTool', () => {
   })
 })
 
-describe('identity 门控（阶段 7.1）：默认不返回，显式选才返回', () => {
+describe('非事实类型门控（7.1 / 9.3 / 9.5）：默认不返回，显式选才放行', () => {
   const filtersOf = (body: Record<string, unknown>, route: 'bm25' | 'knn'): unknown[] => {
     if (route === 'knn') return ((body.knn as { filter?: unknown[] } | undefined)?.filter ?? [])
     const query = body.query as { bool?: { filter?: unknown[] } } | undefined
     return query?.bool?.filter ?? []
   }
-  const excludesIdentity = (filters: unknown[]): boolean =>
-    filters.some((f) => {
-      const text = JSON.stringify(f)
-      return text.includes('must_not') && text.includes('"memory_type":["identity"]')
-    })
+  /** 取 must_not 里被排除的 memory_type（没有这个过滤时返回空数组） */
+  const excludedOf = (filters: unknown[]): string[] =>
+    filters
+      .flatMap((f) => ((f as { bool?: { must_not?: unknown[] } }).bool?.must_not ?? []))
+      .flatMap((m) => (m as { terms?: { memory_type?: string[] } }).terms?.memory_type ?? [])
 
-  test('不传 memory_type：两路都排除 identity', async () => {
+  test('不传 memory_type：两路、两库都排除三类', async () => {
     const h = await harness({
       [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.9)] },
       [TEAM_INDEX]: { bm25: [hit('t1', 3)], knn: [hit('t1', 0.8)] },
@@ -606,7 +652,11 @@ describe('identity 门控（阶段 7.1）：默认不返回，显式选才返回
         for (const index of [PERSONAL_INDEX, TEAM_INDEX]) {
           const body = h.bodyOf(index, route)
           assert.ok(body, `${index} ${route} 请求应当发出`)
-          assert.equal(excludesIdentity(filtersOf(body, route)), true, `${index} ${route} 应排除 identity`)
+          assert.deepEqual(
+            excludedOf(filtersOf(body, route)),
+            ['identity', 'persona', 'journal'],
+            `${index} ${route} 应排除三类非事实记忆`,
+          )
         }
       }
     } finally {
@@ -614,7 +664,7 @@ describe('identity 门控（阶段 7.1）：默认不返回，显式选才返回
     }
   })
 
-  test('显式选 identity 时不排除（否则永远读不到自述）', async () => {
+  test('显式选 identity：只放行它，persona/journal 仍排除', async () => {
     const h = await harness({
       [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.9)] },
       [TEAM_INDEX]: { bm25: [], knn: [] },
@@ -624,7 +674,7 @@ describe('identity 门控（阶段 7.1）：默认不返回，显式选才返回
       for (const route of ['bm25', 'knn'] as const) {
         const body = h.bodyOf(PERSONAL_INDEX, route)
         assert.ok(body, `${route} 请求应当发出`)
-        assert.equal(excludesIdentity(filtersOf(body!, route)), false, `${route} 不该排除 identity`)
+        assert.deepEqual(excludedOf(filtersOf(body!, route)), ['persona', 'journal'], `${route} 不该排除 identity`)
         // 仍然带着 memory_type 的收窄条件（单值 → term，不是 terms）
         assert.equal(JSON.stringify(body).includes('"term":{"memory_type":"identity"}'), true, `${route} 应带收窄`)
       }

@@ -96,13 +96,14 @@ export async function updateStatus(
     // 先确认替代版本真实存在（否则会留下指向空气的链）
     await loadOwnedDoc(deps, replacementId)
 
-    // ① 旧文档下架：先做这一步，保证检索立刻正确
+    // ① 旧文档下架：先做这一步，保证检索立刻正确。
+    // signal 必须两步都带：只带第二步的话，调用方已取消时第一步照样会写下去。
     const signal = deps.signal
     const oldWrite = await deps.writer.update(
       index,
       current.id,
       { status: 'superseded', superseded_by: replacementId, updated_at: now },
-      { refresh: 'wait_for' },
+      { refresh: 'wait_for', signal },
     )
     // ② 新文档回填 supersedes（可追溯的那一格）
     await deps.writer.update(

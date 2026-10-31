@@ -22,7 +22,8 @@ globalThis.window = {
   },
 }
 
-const src = readFileSync('panel/client.js', 'utf8')
+// 用相对本文件的 URL：node --test 的 cwd 取决于调用方式，不能假设是仓库根
+const src = readFileSync(new URL('../panel/client.js', import.meta.url), 'utf8')
 new Function('window', src)(globalThis.window)
 if (!captured) throw new Error('client.js 没有调用 __ModuleLoader__.load')
 console.log('  module id:', captured.id)

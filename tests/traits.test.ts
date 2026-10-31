@@ -248,3 +248,120 @@ describe('偏好类证据：一条即可支撑（阶段 7.2 修正）', () => {
     assert.equal(out.length, 0)
   })
 })
+
+/**
+ * 判重：模型每批都换句措辞，精确内容哈希拦不住同义重复。
+ * 2026-10-31 实测：一次提炼新写的 7 条里 3 条是旧 pending 的同义改写。
+ */
+describe('判重：同义候选不重复写入', () => {
+  const ONE_CANDIDATE = '[{"content":"你偏好先给结论","evidence_ids":["a1","c3"]}]'
+
+  /** reader 会被调用两次：取素材（无 knn）与判重（有 knn），必须分开回放 */
+  function makeReader(near: Array<{ id: string; score: number; source: Record<string, unknown> }>) {
+    return {
+      search: async (_index: string, body: Record<string, unknown>) => {
+        if (body['knn'] !== undefined) return { hits: near }
+        return { hits: SOURCES.map((s) => ({ source: s })) }
+      },
+    }
+  }
+
+  const EMBED = { embed: async () => [0.1, 0.2, 0.3, 0.4] }
+
+  test('相似度达到阈值时跳过，不写入', async () => {
+    const { runTraitsJob } = await import('../src/memory/traits.ts')
+    let wrote = 0
+    const result = await runTraitsJob(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: makeReader([{ id: 'trait-old', score: 0.95, source: { memory_id: 'trait-old', status: 'pending' } }]),
+        writer: { index: async () => { wrote += 1; return { id: 'x', result: 'created', status: 200 } } },
+        embed: EMBED, dims: 4,
+      } as never,
+      { days: 14, summarize: async () => ONE_CANDIDATE },
+    )
+    assert.equal(result.duplicates, 1)
+    assert.equal(result.written, 0)
+    assert.equal(wrote, 0, '被判定重复时不应调用写入')
+  })
+
+  test('相似度低于阈值时照常写入', async () => {
+    const { runTraitsJob } = await import('../src/memory/traits.ts')
+    let wrote = 0
+    const result = await runTraitsJob(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: makeReader([{ id: 'trait-other', score: 0.6, source: { memory_id: 'trait-other', status: 'pending' } }]),
+        writer: { index: async () => { wrote += 1; return { id: 'x', result: 'created', status: 200 } } },
+        embed: EMBED, dims: 4,
+      } as never,
+      { days: 14, summarize: async () => ONE_CANDIDATE },
+    )
+    assert.equal(result.duplicates, 0)
+    assert.equal(result.written, 1)
+    assert.equal(wrote, 1)
+  })
+
+  test('已拒绝(archived)的旧候选不参与判重——后来找到更强证据应当能重新提出', async () => {
+    const { runTraitsJob } = await import('../src/memory/traits.ts')
+    const result = await runTraitsJob(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: makeReader([{ id: 'trait-old', score: 0.99, source: { memory_id: 'trait-old', status: 'archived' } }]),
+        writer: { index: async () => ({ id: 'x', result: 'created', status: 200 }) },
+        embed: EMBED, dims: 4,
+      } as never,
+      { days: 14, summarize: async () => ONE_CANDIDATE },
+    )
+    assert.equal(result.written, 1)
+    assert.equal(result.duplicates, 0)
+  })
+
+  test('embedding 不可用时跳过判重、照常写入（判重不能把提炼卡死）', async () => {
+    const { runTraitsJob } = await import('../src/memory/traits.ts')
+    const result = await runTraitsJob(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: makeReader([{ id: 'trait-old', score: 0.99, source: { memory_id: 'trait-old', status: 'pending' } }]),
+        writer: { index: async () => ({ id: 'x', result: 'created', status: 200 }) },
+        // 不给 embed / dims
+      } as never,
+      { days: 14, summarize: async () => ONE_CANDIDATE },
+    )
+    assert.equal(result.written, 1)
+    assert.equal(result.duplicates, 0)
+  })
+
+  test('写入的候选带 embedding 向量（没有向量，下一批就查不到它）', async () => {
+    const { writeTraitCandidate } = await import('../src/memory/traits.ts')
+    let captured: Record<string, unknown> | null = null
+    await writeTraitCandidate(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: { search: async () => ({ hits: [] }) },
+        writer: { index: async (_i: string, doc: unknown) => { captured = doc as Record<string, unknown>; return { id: 'x', result: 'created', status: 200 } } },
+        embed: EMBED, dims: 4,
+      } as never,
+      { content: '你偏好先给结论', evidence_ids: ['a1', 'c3'] },
+      14,
+    )
+    assert.deepEqual((captured as unknown as Record<string, unknown>)['embedding'], [0.1, 0.2, 0.3, 0.4])
+  })
+
+  test('embedding 失败时不阻断写入（只是这条以后查不到向量）', async () => {
+    const { writeTraitCandidate } = await import('../src/memory/traits.ts')
+    let captured: Record<string, unknown> | null = null
+    const result = await writeTraitCandidate(
+      {
+        userId: 'u1', personalPrefix: 'personal_memory_',
+        reader: { search: async () => ({ hits: [] }) },
+        writer: { index: async (_i: string, doc: unknown) => { captured = doc as Record<string, unknown>; return { id: 'x', result: 'created', status: 200 } } },
+        embed: { embed: async () => { throw new Error('ollama down') } }, dims: 4,
+      } as never,
+      { content: '你偏好先给结论', evidence_ids: ['a1', 'c3'] },
+      14,
+    )
+    assert.equal(result.written, true, '向量失败不能把候选一起丢掉')
+    assert.equal((captured as unknown as Record<string, unknown>)['embedding'], undefined)
+  })
+})
