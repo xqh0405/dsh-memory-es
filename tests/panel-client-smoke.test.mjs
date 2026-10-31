@@ -62,8 +62,8 @@ const ctx = {
   },
 }
 mod.apply(ctx)
-console.log('  注册记录:', JSON.stringify(registered.filter((r) => r[0] === 'slot' || r[0] === 'memory-es-panel')))
-console.log('  字典:', JSON.stringify(registered.filter((r) => r[0] === 'memory-es-panel')))
+console.log('  注册记录:', JSON.stringify(registered.filter((r) => r[0] === 'slot' || r[0] === 'dsh-memory-es')))
+console.log('  字典:', JSON.stringify(registered.filter((r) => r[0] === 'dsh-memory-es')))
 
 const Component = registered.component
 if (!Component) throw new Error('没有注册组件')

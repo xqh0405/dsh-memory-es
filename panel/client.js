@@ -8,12 +8,12 @@
  * 组件拿到 owner props `{close}`；文案走客户端 locale 服务。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-memory-es-panel',
+  id: 'dsh-memory-es',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
-    const NS = 'memory-es-panel'
+    const NS = 'dsh-memory-es'
     const API = '/memory-es/api'
 
     const ZH = {
