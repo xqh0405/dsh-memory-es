@@ -94,7 +94,16 @@ export interface TraitsDeps {
    * （kNN 只查得到有向量的文档）。不可用时跳过判重，**不能因此阻断写入**。
    */
   embed?: { embed(text: string, call?: { signal?: AbortSignal }): Promise<number[]> }
-  /** 索引的向量维度，与 `knnBody` 一致 */
+  /** 索引的向量维度，与 `knnBody` 一致 */  /**
+   * 每天最多写几条候选（跨多次运行累计）。不传就用 TRAITS_MAX_OUTPUT 的默认口径。
+   * 定时任务一天跑一次、手动调一次也算一轮——没有这个上限，候选会越堆越多。
+   */
+  maxPerDay?: number
+  /** 单次模型返回的候选上限 */
+  maxOutput?: number
+  /** 同义判定阈值（kNN 余弦） */
+  dedupMinScore?: number
+
   dims?: number
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
@@ -120,6 +129,7 @@ export function parseTraitsOutput(
   text: string,
   sourceIds?: ReadonlySet<string>,
   sourceTypes?: ReadonlyMap<string, string>,
+  maxOutput: number = TRAITS_MAX_OUTPUT,
 ): TraitCandidate[] {
   const start = text.indexOf('[')
   const end = text.lastIndexOf(']')
@@ -152,7 +162,7 @@ export function parseTraitsOutput(
     if (unique.length < minEvidence) continue
     if (sourceIds !== undefined && unique.some((id) => !sourceIds.has(id))) continue
     out.push({ content, evidence_ids: unique })
-    if (out.length >= TRAITS_MAX_OUTPUT) break
+    if (out.length >= maxOutput) break
   }
   return out
 }
@@ -204,6 +214,42 @@ export async function collectTraitSources(
 }
 
 /**
+ * 今天已经写了多少条自述候选（pending + active）。
+ *
+ * 为什么按 `created_at` 而不是「本轮写了多少」：定时任务一天跑一次，但手动调一次
+ * `memory_traits` 也算一轮。只看单次的话，一天调三次就能写 15 条——2026-11-01
+ * 实测就是这么攒到 22 条待审的，人工审不过来，候选反而没人看。
+ *
+ * 查不到（ES 抖动）时返回 0：配额是「省人工」的手段，不该因为它自己挂了就阻断提炼。
+ */
+export async function countTraitsToday(deps: TraitsDeps): Promise<number> {
+  const now = deps.now?.() ?? new Date()
+  const start = new Date(now.getTime())
+  start.setHours(0, 0, 0, 0)
+  const index = personalIndexFor(deps.personalPrefix, deps.userId)
+  try {
+    const res = await deps.reader.search(index, {
+      size: 0,
+      track_total_hits: true,
+      query: {
+        bool: {
+          filter: [
+            { term: { memory_type: IDENTITY_MEMORY_TYPE } },
+            { terms: { status: [TRAIT_STATUS, 'active'] } },
+            { range: { created_at: { gte: start.toISOString() } } },
+          ],
+        },
+      },
+    })
+    // search 已经把 ES 的 { hits: { total } } 归一成 { total: number, hits: Hit[] }
+    return typeof res.total === 'number' ? res.total : 0
+  } catch (err) {
+    deps.log?.({ tool: 'traits', event: 'quota_count_failed', error: formatEsError(err) })
+    return 0
+  }
+}
+
+/**
  * 查「是否已经有一条意思差不多的自述」。
  *
  * 只跟 `pending`（待审）与 `active`（已采纳）比：
@@ -240,7 +286,7 @@ export async function findTraitDuplicate(
       const src = hit.source as Record<string, unknown>
       const status = typeof src.status === 'string' ? src.status : ''
       if (status !== TRAIT_STATUS && status !== 'active') continue
-      if (!(hit.score >= TRAIT_DEDUP_MIN_SCORE)) continue
+      if (!(hit.score >= (deps.dedupMinScore ?? TRAIT_DEDUP_MIN_SCORE))) continue
       const memoryId = typeof src.memory_id === 'string' ? src.memory_id : hit.id
       return { memory_id: memoryId, score: hit.score }
     }
@@ -307,6 +353,10 @@ export interface TraitsResult {
   written: number
   /** 因与已有 pending/active 自述同义而被跳过的条数（判重不可用时恒为 0） */
   duplicates: number
+  /** 因「今天已写满 maxPerDay」而被跳过的条数 */
+  quotaSkipped: number
+  /** 当天配额上限：只在「配额用完」时带出来给文案用 */
+  maxPerDay?: number
   skipped: string | null
   /** 干跑时带上模型原始输出（前 200 字符）：空数组和「解析失败」结果一样，必须能区分 */
   rawPreview?: string
@@ -330,13 +380,14 @@ export async function runTraitsJob(
   const sources = await collectTraitSources(deps, input.days)
   if (sources.length < TRAIT_MIN_EVIDENCE) {
     log({ tool: 'traits', skipped: 'too_few_sources', sources: sources.length })
-    return { sources: sources.length, candidates: 0, written: 0, duplicates: 0, skipped: 'too_few_sources' }
+    return { sources: sources.length, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, skipped: 'too_few_sources' }
   }
 
   const raw = await input.summarize(buildTraitsPrompt(sources, input.days))
   const sourceIds = new Set(sources.map((s) => s.memory_id))
   const sourceTypes = new Map(sources.map((s) => [s.memory_id, s.memory_type]))
-  const candidates = parseTraitsOutput(raw, sourceIds, sourceTypes)
+  const maxOutput = deps.maxOutput ?? TRAITS_MAX_OUTPUT
+  const candidates = parseTraitsOutput(raw, sourceIds, sourceTypes, maxOutput)
   log({ tool: 'traits', event: 'parsed', sources: sources.length, candidates: candidates.length, chars: raw.length })
 
   if (input.dryRun === true) {
@@ -346,6 +397,7 @@ export async function runTraitsJob(
       written: 0,
       skipped: 'dry_run',
       duplicates: 0,
+      quotaSkipped: 0,
       // 诊断用：空数组、格式没解析出来、JSON 被截断，在结果上一模一样，必须能区分
       rawPreview: raw.slice(0, 200),
       rawLength: raw.length,
@@ -353,9 +405,32 @@ export async function runTraitsJob(
     }
   }
 
+  // 每日配额：跨多次运行累计，防止「定时跑一次 + 手动调三次」一天写十几条
+  const maxPerDay = deps.maxPerDay ?? TRAITS_MAX_OUTPUT
+  const usedToday = await countTraitsToday(deps)
+  const quota = Math.max(0, maxPerDay - usedToday)
+  if (quota === 0) {
+    log({ tool: 'traits', event: 'quota_exhausted', usedToday, maxPerDay })
+    return {
+      sources: sources.length,
+      candidates: candidates.length,
+      written: 0,
+      duplicates: 0,
+      quotaSkipped: 0,
+      skipped: 'quota_exhausted',
+      maxPerDay,
+    }
+  }
+
   let written = 0
   let duplicates = 0
+  let quotaSkipped = 0
   for (const trait of candidates) {
+    // 名额用完就停：剩下的不是「重复」，而是「今天看不过来了」
+    if (written >= quota) {
+      quotaSkipped += 1
+      continue
+    }
     // 先看有没有同义候选：模型每批都换句措辞，只靠精确内容哈希拦不住
     const dup = await findTraitDuplicate(deps, trait.content)
     if (dup !== null) {
@@ -373,8 +448,18 @@ export async function runTraitsJob(
     if (result.written) written += 1
     else duplicates += 1
   }
-  log({ tool: 'traits', event: 'done', sources: sources.length, candidates: candidates.length, written, duplicates })
-  return { sources: sources.length, candidates: candidates.length, written, duplicates, skipped: null }
+  log({
+    tool: 'traits',
+    event: 'done',
+    sources: sources.length,
+    candidates: candidates.length,
+    written,
+    duplicates,
+    quotaSkipped,
+    usedToday,
+    maxPerDay,
+  })
+  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, skipped: null }
 }
 
 /** 与 save.ts 一致的内容归一化哈希口径（便于两边判重口径相同） */
@@ -433,6 +518,10 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
           candidates: { type: 'number', required: true },
           written: { type: 'number', required: true },
           duplicates: { type: 'number', required: true },
+          quotaSkipped: { type: 'number', required: true },
+          // 只在「配额用完」时返回：output schema 是 additionalProperties:false，
+          // 漏声明一个字段整个工具就报错（2026-11-01 实测）
+          maxPerDay: { type: 'number' },
           skipped: { type: 'string', required: true },
           // 诊断三件套：schema 是 additionalProperties:false，漏一个字段工具就整体报错
           rawPreview: { type: 'string' },
@@ -450,7 +539,7 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
       const dryRun = input.dry_run !== false
       const summarize = deps.summarize
       if (summarize === undefined) {
-        return { sources: 0, candidates: 0, written: 0, duplicates: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
+        return { sources: 0, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
       }
       const result = await runTraitsJob(deps, { days, summarize, dryRun })
       return { ...result, skipped: result.skipped ?? '', text: renderTraitsText(result, days, dryRun) }
@@ -476,6 +565,12 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
     }
     return base
   }
+  if (result.skipped === 'quota_exhausted') {
+    return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，但今天的名额已用完（每天上限 ${result.maxPerDay ?? '?'} 条），本次一条都没写。\n想立刻写就先审掉今天的候选，或者把 traits.maxPerDay 调大。`
+  }
   const dupNote = result.duplicates > 0 ? `，跳过 ${result.duplicates} 条与已有自述同义` : ''
-  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}。`
+  const quotaNote = result.quotaSkipped > 0
+    ? `，另有 ${result.quotaSkipped} 条因为今天名额已满没写（明天再提）`
+    : ''
+  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${quotaNote}。`
 }

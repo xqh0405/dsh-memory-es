@@ -1704,6 +1704,24 @@ const EDITABLE = [
     type: 'number',
     hint: '提炼时回看最近多少天的记忆（1~90）',
   },
+  {
+    path: ['traits', 'maxPerDay'],
+    label: '每天最多候选',
+    type: 'number',
+    hint: '跨多次运行累计（定时一次 + 手动几次都算），默认 5',
+  },
+  {
+    path: ['traits', 'maxOutput'],
+    label: '单次上限',
+    type: 'number',
+    hint: '一次模型调用最多接受几条，默认 5',
+  },
+  {
+    path: ['traits', 'dedupMinScore'],
+    label: '判重阈值',
+    type: 'number',
+    hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.88',
+  },
 ]
 
 function pick(config, path) {
@@ -1828,6 +1846,15 @@ async function handleConfigWrite(ctx, res, req) {
     }
     if (change.key === 'traits.days' && (!Number.isInteger(value) || value < 1 || value > 90)) {
       return json(res, 400, { ok: false, error: `回看天数要是 1~90 的整数，现在是「${value}」` })
+    }
+    if (change.key === 'traits.maxPerDay' && (!Number.isInteger(value) || value < 1 || value > 50)) {
+      return json(res, 400, { ok: false, error: `每天最多候选要是 1~50 的整数，现在是「${value}」` })
+    }
+    if (change.key === 'traits.maxOutput' && (!Number.isInteger(value) || value < 1 || value > 20)) {
+      return json(res, 400, { ok: false, error: `单次上限要是 1~20 的整数，现在是「${value}」` })
+    }
+    if (change.key === 'traits.dedupMinScore' && (!Number.isFinite(value) || value < 0.7 || value > 0.99)) {
+      return json(res, 400, { ok: false, error: `判重阈值要是 0.7~0.99 之间的小数，现在是「${value}」` })
     }
   }
 

@@ -365,3 +365,88 @@ describe('判重：同义候选不重复写入', () => {
     assert.equal((captured as unknown as Record<string, unknown>)['embedding'], undefined)
   })
 })
+
+// ── 每日配额：候选攒到人手审不过来，是这一段的起因（2026-11-01 一天 22 条）──
+
+function quotaDeps(alreadyWrittenToday: number) {
+  const written: string[] = []
+  const deps = {
+    userId: 'tester',
+    personalPrefix: 'personal_memory_',
+    reader: {
+      search: async (_index: string, body: Record<string, unknown>) => {
+        const text = JSON.stringify(body)
+        // 判重用的 kNN：一律「没有相似条目」，把变量控制在配额这一条上
+        if (text.includes('"knn"')) return { total: 0, hits: [] }
+        // 配额计数：唯一会查 status ∈ {pending, active} 的那条
+        //（不能用 memory_type=identity 判别——素材查询的 must_not 里也带 identity）
+        if (text.includes('"pending"')) return { total: alreadyWrittenToday, hits: [] }
+        // 其余是素材查询：给两条真实 sense，否则 too_few_sources 会先挡住
+        return {
+          total: 2,
+          hits: [
+            { id: 'm1', score: 1, source: { memory_id: 'm1', content: '素材一：改动前先验证', memory_type: 'fact' } },
+            { id: 'm2', score: 1, source: { memory_id: 'm2', content: '素材二：结论要有证据', memory_type: 'fact' } },
+          ],
+        }
+      },
+    },
+    writer: {
+      index: async (_i: string, _doc: unknown, opts: { id?: string }) => {
+        written.push(String(opts.id))
+        return { id: String(opts.id), result: 'created', status: 200 }
+      },
+    },
+    now: () => new Date('2026-11-01T10:00:00+08:00'),
+  }
+  return { deps, written }
+}
+
+const sixCandidates = JSON.stringify(
+  Array.from({ length: 6 }, (_, i) => ({
+    content: `第 ${i} 条稳定倾向：处理某类问题时我会先定位根因再动手，编号 ${i}`,
+    evidence_ids: ['m1', 'm2'],
+  })),
+)
+
+test('配额：今天已经写满，就一条都不写', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(5)
+  const result = await runTraitsJob(
+    { ...deps, maxPerDay: 5 } as never,
+    { days: 7, summarize: async () => sixCandidates },
+  )
+  assert.equal(result.skipped, 'quota_exhausted')
+  assert.equal(result.written, 0)
+  assert.equal(written.length, 0, '配额满了不能写任何一条')
+})
+
+test('配额：今天还剩 3 个名额，只写 3 条，其余计入 quotaSkipped', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(2)
+  const result = await runTraitsJob(
+    { ...deps, maxPerDay: 5, maxOutput: 6 } as never,
+    { days: 7, summarize: async () => sixCandidates },
+  )
+  assert.equal(result.written, 3)
+  assert.equal(result.quotaSkipped, 3)
+  assert.equal(written.length, 3)
+})
+
+test('配额：maxPerDay 生效，单次模型吐 8 条也只写 5 条', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(0)
+  const eight = JSON.stringify(
+    Array.from({ length: 8 }, (_, i) => ({
+      content: `倾向 ${i}：这类问题我会先看真实数据再下结论，编号 ${i}`,
+      evidence_ids: ['m1', 'm2'],
+    })),
+  )
+  const result = await runTraitsJob(
+    { ...deps, maxPerDay: 5, maxOutput: 8 } as never,
+    { days: 7, summarize: async () => eight },
+  )
+  assert.equal(result.written, 5, '写入数被 maxPerDay 截住')
+  assert.equal(result.quotaSkipped, 3)
+  assert.equal(written.length, 5)
+})

@@ -111,6 +111,12 @@ export interface ConfigType {
     at: string
     /** 回看多少天的记忆 */
     days: number
+    /** 每天最多写几条新候选（跨多次运行累计，按 created_at 算当天） */
+    maxPerDay: number
+    /** 单次模型返回的候选上限（再多也只是排队等人工审） */
+    maxOutput: number
+    /** 同义判定的 kNN 余弦阈值，越高越严 */
+    dedupMinScore: number
   }
   /** 阶段 9.5：每日回顾（把一天的对话压成一段，写进「日记」的回顾栏） */
   journal: {
@@ -273,6 +279,19 @@ export const Config: z<ConfigType> = z.object({
     enabled: z.boolean().default(true),
     at: z.string().default('02:30'),
     days: z.number().step(1).min(1).max(90).default(14),
+    /**
+     * 每天最多写几条候选。
+     *
+     * 为什么要这个：定时任务每天跑一次、单次能吐 8 条，可是**手动调一次也算一轮**——
+     * 2026-11-01 一天攒了 22 条待审，人工审不过来，候选堆着反而没人看。
+     * 5 条是「一天认真看一遍能看完」的量。
+     */
+    maxPerDay: z.number().step(1).min(1).max(50).default(5)
+      .description('每天最多写几条新候选（跨多次运行累计）。默认 5。'),
+    maxOutput: z.number().step(1).min(1).max(20).default(5)
+      .description('单次模型返回的候选上限，超出部分丢弃。默认 5。'),
+    dedupMinScore: z.number().min(0.7).max(0.99).default(0.88)
+      .description('同义判定阈值（kNN 余弦），越高越严。默认 0.88。'),
   }),
   // 阶段 9.5：每日回顾。默认开，但只在有足够对话时才真的调模型（少于 3 轮直接跳过）
   journal: z.object({

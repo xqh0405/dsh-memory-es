@@ -358,6 +358,11 @@ export function apply(ctx: Context, config: ConfigType): void {
     // 判重与候选向量都靠它；embedding 挂了只跳过判重，不影响提炼与写入
     embed,
     dims: config.embedding.dims,
+    // 每天最多写几条候选（跨多次运行累计）：没有它，定时一次 + 手动几次就能攒十几条待审
+    maxPerDay: config.traits.maxPerDay,
+    // 单次模型返回上限与判重阈值
+    maxOutput: config.traits.maxOutput,
+    dedupMinScore: config.traits.dedupMinScore,
     now: () => new Date(),
     summarize: summarizeTraits,
     log: (event: Record<string, unknown>) => logger.info('traits %o', event),
@@ -389,11 +394,12 @@ export function apply(ctx: Context, config: ConfigType): void {
       })
         .then((result) => {
           logger.info(
-            'traits: 完成 sources=%d candidates=%d written=%d duplicates=%d skipped=%s',
+            'traits: 完成 sources=%d candidates=%d written=%d duplicates=%d quota_skipped=%d skipped=%s',
             result.sources,
             result.candidates,
             result.written,
             result.duplicates,
+            result.quotaSkipped,
             result.skipped ?? '',
           )
         })
