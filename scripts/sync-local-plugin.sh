@@ -50,7 +50,13 @@ for dest in "${DESTS[@]}"; do
   dest_lib=$(sum "$dest/lib/index.js")
   dest_panel=$(sum "$dest/panel/index.js")
   if [ "$CHECK_ONLY" = "1" ]; then
-    if [ "$dest_lib" = "$src_lib" ] && [ "$dest_panel" = "$src_panel" ]; then
+    # 逐文件比对，而不是只比两个 index.js。
+    # 2026-11-01 踩过：只比 index.js 时，只改了 panel/client.js 的版本照样报「一致」，
+    # 于是「重启了还是旧界面」这个结论被误判成缓存问题。
+    # panel 里排除 cli/：那是同步时额外补进去的 CLI 源码副本，仓库本来就没有。
+    if diff -rq "$SRC_LIB" "$dest/lib" >/dev/null 2>&1; then lib_ok=1; else lib_ok=0; fi
+    if diff -rq --exclude=cli "$SRC_PANEL" "$dest/panel" >/dev/null 2>&1; then panel_ok=1; else panel_ok=0; fi
+    if [ "$lib_ok" = "1" ] && [ "$panel_ok" = "1" ]; then
       if [ -f "$dest/panel/cli/consolidate/cli.ts" ]; then
         echo "  [ok]   $dest（一致）"
       else
@@ -58,7 +64,9 @@ for dest in "${DESTS[@]}"; do
         pending=1
       fi
     else
-      echo "  [diff] $dest（lib=$dest_lib panel=$dest_panel）"
+      echo "  [diff] $dest（lib 一致=$lib_ok panel 一致=$panel_ok，index.js: lib=$dest_lib panel=$dest_panel）"
+      diff -rq "$SRC_LIB" "$dest/lib" 2>&1 | head -5 | sed 's/^/         /'
+      diff -rq --exclude=cli "$SRC_PANEL" "$dest/panel" 2>&1 | head -5 | sed 's/^/         /'
       pending=1
     fi
     continue

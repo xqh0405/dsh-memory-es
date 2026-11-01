@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
       sectionLabel: '记忆库',
       title: '记忆库',
       subtitle: 'Elasticsearch 后端记忆（dsh-memory-es）：概览与浏览。',
+      backToConversation: '返回会话',
       versionLabel: '版本',
       tabOverview: '概览',
       tabBrowse: '记忆浏览',
@@ -226,6 +227,7 @@ window.__ModuleLoader__.load({
       sectionLabel: 'Memory',
       title: 'Memory',
       subtitle: 'Elasticsearch-backed memory (dsh-memory-es): overview and browse.',
+      backToConversation: 'Back to chat',
       versionLabel: 'Version',
       tabOverview: 'Overview',
       tabBrowse: 'Browse',
@@ -432,6 +434,25 @@ window.__ModuleLoader__.load({
     // ── 样式（全部走主题 token，不写死颜色）─────────────────────────────
     const S = {
       wrap: { padding: '4px 2px 12px' },
+      // 主区全局面板的骨架：照 DSH 官方页面（插件管理 / 计划任务）的尺寸——
+      // 内容宽 960px、全高滚动、页头左标题右动作。不自己做全屏 workshop：
+      // 那种外壳是给要盖住会话的页面用的，我们只是主区里的一个页面。
+      workspace: {
+        width: '100%', minWidth: 0, height: '100%', minHeight: 0,
+        display: 'flex', overflow: 'hidden',
+        color: 'var(--dsw-alias-label-primary)',
+        background: 'var(--dsw-alias-bg-base)',
+        fontSize: 14, lineHeight: 1.6,
+      },
+      workspaceScroll: { scrollbarGutter: 'stable', flex: 1, minHeight: 0, overflow: 'auto' },
+      workspaceContent: { maxWidth: 960, margin: '0 auto', padding: '0 clamp(24px, 4vw, 48px) 48px' },
+      workspaceHeading: {
+        display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
+        gap: 16, marginBottom: 20,
+        // darwin 上要躲开窗口拖拽带；变量未定义时按 0px 算
+        paddingTop: 'calc(28px + var(--dsh-frame-top-clearance, 0px))',
+      },
+      workspaceTitle: { margin: 0, fontSize: 20, fontWeight: 500, lineHeight: '28px' },
       h2: { margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
       sub: { margin: '0 0 14px', fontSize: 13, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' },
       tabs: { display: 'flex', gap: 4, borderBottom: '1px solid var(--dsw-alias-border-l1)', marginBottom: 14 },
@@ -2186,8 +2207,16 @@ window.__ModuleLoader__.load({
 
     // ── 页面主体 ─────────────────────────────────────────────────────────
 
-    function MemoryPanel({ t }) {
-      const [tab, setTab] = React.useState('overview')
+    /**
+     * 记忆库主体。
+     *
+     * `mode` 决定这一页看哪一块（阶段 8 面板搬家）：
+     *  - `main`（主区全局面板）：看东西的地方——概览 / 记忆浏览 / 审核台 / 自述 / 人格；
+     *  - `settings`（设置里的「记忆库」节）：改东西的地方——配置 / 维护。
+     * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
+     */
+    function MemoryPanel({ t, mode = 'settings' }) {
+      const [tab, setTab] = React.useState(mode === 'main' ? 'overview' : 'config')
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
       const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, userId: '' })
 
@@ -2230,22 +2259,26 @@ window.__ModuleLoader__.load({
       }, [tab, loadOverview])
 
       return h('div', { style: S.wrap },
-        h('h2', { style: S.h2 }, t('title')),
+        mode === 'main' ? null : h('h2', { style: S.h2 }, t('title')),
         h('p', { style: S.sub },
           `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'}`),
         h('div', { style: S.tabs },
-          [
-            ['overview', t('tabOverview')],
-            ['browse', t('tabBrowse')],
-            // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
-            ['identity', t('tabIdentity')],
-            ['persona', t('tabPersona')],
-            // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
-            ...(caps.canReview ? [['review', t('tabReview')]] : []),
-            // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
-            ...(caps.canReview ? [['maint', t('tabMaint')]] : []),
-            ['config', t('tabConfig')],
-          ].map(([value, label]) =>
+          (mode === 'main'
+            ? [
+                ['overview', t('tabOverview')],
+                ['browse', t('tabBrowse')],
+                // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
+                ['identity', t('tabIdentity')],
+                ['persona', t('tabPersona')],
+                // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
+                ...(caps.canReview ? [['review', t('tabReview')]] : []),
+              ]
+            : [
+                // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
+                ...(caps.canReview ? [['maint', t('tabMaint')]] : []),
+                ['config', t('tabConfig')],
+              ]
+          ).map(([value, label]) =>
             h('button', {
               key: value,
               type: 'button',
@@ -2278,6 +2311,46 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ── 主区外壳（阶段 8：整页搬到主区）─────────────────────────────────
+
+    /** 侧栏面板 id：同时用作 `main` 的 key 与 `sidebar.panellist` 的 id，两者必须一致。 */
+    const PANEL_ID = 'memory-es'
+
+    /**
+     * 主区壳：官方全局面板骨架 + 「返回会话」。
+     *
+     * 回滚方式：摘掉 `main` 那一组注册即可，设置里的「记忆库」节一行没动、照旧可用。
+     */
+    function MemoryWorkspace({ t, close }) {
+      return h('div', { style: S.workspace },
+        h('div', { style: S.workspaceScroll },
+          h('div', { style: S.workspaceContent },
+            h('div', { style: S.workspaceHeading },
+              h('h1', { style: S.workspaceTitle }, t('sectionLabel')),
+              typeof close === 'function'
+                ? h('button', { type: 'button', style: S.btn, onClick: close }, t('backToConversation'))
+                : null,
+            ),
+            h(MemoryPanel, { t, mode: 'main' }),
+          ),
+        ),
+      )
+    }
+
+    /** 侧栏图标：数据库圆柱 + 底部那颗金点（与 panel/icon.svg 同一个记号，跟随 currentColor）。 */
+    function MemoryIcon({ size = 18 }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': 'true', focusable: 'false',
+      },
+        h('ellipse', { cx: 12, cy: 5.5, rx: 6.5, ry: 2.6 }),
+        h('path', { d: 'M5.5 5.5v6c0 1.44 2.91 2.6 6.5 2.6s6.5-1.16 6.5-2.6v-6' }),
+        h('path', { d: 'M5.5 11.5v6c0 1.44 2.91 2.6 6.5 2.6s6.5-1.16 6.5-2.6v-6', opacity: 0.72 }),
+        h('circle', { cx: 12, cy: 17.6, r: 1.25, fill: 'currentColor', stroke: 'none' }),
+      )
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -2289,12 +2362,42 @@ window.__ModuleLoader__.load({
         })
         const t = ctx.locale.bind(NS)
 
+        // 设置里的「记忆库」节：只留配置 / 维护（主区负责看，设置负责改）
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
           id: 'memory-es',
           order: 60,
           label: () => t('sectionLabel'),
         }, (props) => h(MemoryPanel, { ...props, t })))
+
+        // 主区全局面板 + 侧栏入口（order 31：紧跟 dsh-mnemon 的「记忆系统」30）
+        //
+        // 用 `slots.inject('main')` 等槽位，而不是先 `ctx.get('layout')` 判一下：
+        // layout 服务由 ui-layout 插件在它自己的 apply 里 provide，和本插件没有依赖关系，
+        // 谁先跑不定 —— 2026-11-01 实测这里 ctx.get 拿到 undefined，整组注册被跳过，
+        // 页面上就只剩设置里那节、侧栏没有入口。槽位存在意味着布局已经装好，
+        // 这比服务查询更能表达「我要的是一个能挂面板的布局」。
+        //
+        // close 用惰性取值：点按钮那一刻 layout 必然已在，取不到就当没有返回按钮。
+        ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.inject('sidebar.panellist', () => {
+          const stopMain = ctx.slots.register({
+            name: 'main',
+            key: PANEL_ID,
+            locale: NS,
+            inject: () => ({ close: () => ctx.get('layout')?.selectPanel(null) }),
+          }, MemoryWorkspace)
+          const stopIcon = ctx.slots.register({
+            name: 'sidebar.panellist',
+            id: PANEL_ID,
+            order: 31,
+            label: () => t('sectionLabel'),
+            locale: NS,
+          }, MemoryIcon)
+          return () => {
+            stopIcon?.()
+            stopMain()
+          }
+        })))
       },
     }
   },
