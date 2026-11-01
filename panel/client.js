@@ -37,6 +37,8 @@ window.__ModuleLoader__.load({
       graphGlobalHint: '点击节点看两跳',
       graphFocusHint: '点击空白返回全图',
       graphDegree: '度数',
+      graphExport: '导出 .canvas',
+      graphExportHint: '导出当前视图为 JSON Canvas，可在 Obsidian 等 canvas 工具里打开',
       hitIn: '命中',
       fieldContent: '正文',
       fieldTopic: '主题',
@@ -265,6 +267,8 @@ window.__ModuleLoader__.load({
       graphGlobalHint: 'click a node to see two hops',
       graphFocusHint: 'click empty space to go back',
       graphDegree: 'degree',
+      graphExport: 'Export .canvas',
+      graphExportHint: 'Export the current view as JSON Canvas (opens in Obsidian and other canvas tools)',
       hitIn: 'hit in',
       fieldContent: 'content',
       fieldTopic: 'topic',
@@ -1279,6 +1283,70 @@ window.__ModuleLoader__.load({
       return { positions, bounds: { minX: 0, minY: 0, maxX: width, maxY: height }, focusedCenter: centerId }
     }
 
+    /** JSON Canvas 的六种颜色编号（1 红 / 2 橙 / 3 黄 / 4 绿 / 5 青 / 6 紫） */
+    function canvasColor(domain, clusters) {
+      const index = clusters.findIndex((cluster) => cluster.domain === domain)
+      return String(((index < 0 ? 0 : index) % 6) + 1)
+    }
+
+    /**
+     * 导出 JSON Canvas 1.0（obsidian.md/canvas 的开放格式）。
+     *
+     * 坐标直接取当前布局：用户在屏幕上看到的就是他导出得到的，不需要再跑一遍布局
+     * （重算反而会得到另一个形状，因为布局虽然确定性，但依赖画布尺寸）。
+     * 坐标乘 2 是为了在 canvas 里留出间距——我们的布局是"屏幕像素"，canvas 里节点更大。
+     */
+    function buildCanvasJson(graph, layout) {
+      const points = []
+      for (const node of graph.nodes) {
+        const point = layout.positions.get(node.id)
+        if (point !== undefined) points.push({ node, point })
+      }
+      if (points.length === 0) return null
+      let minX = Infinity
+      let minY = Infinity
+      for (const { point } of points) {
+        minX = Math.min(minX, point.x)
+        minY = Math.min(minY, point.y)
+      }
+      const nodes = points.map(({ node, point }) => ({
+        id: node.id,
+        type: 'text',
+        // 正文放摘要，元信息单独一行——canvas 里节点就是一张小卡片
+        text: `${node.label}\n\n${node.domain} · ${node.type} · ${t_degree(node)}`,
+        x: Math.round((point.x - minX) * 2),
+        y: Math.round((point.y - minY) * 2),
+        width: 280,
+        height: 90,
+        color: canvasColor(node.domain, graph.clusters),
+      }))
+      const edges = graph.edges.map((edge, index) => ({
+        id: `edge-${index}`,
+        fromNode: edge.source,
+        toNode: edge.target,
+        label: edge.weight.toFixed(2),
+      }))
+      return { nodes, edges }
+    }
+
+    /** 只有一处用到度数文案，单独抽出来免得混进闭包里的 t */
+    function t_degree(node) {
+      return `度 ${node.degree}`
+    }
+
+    /** 触发浏览器下载一个 JSON 文件（不引任何依赖）。 */
+    function downloadJson(filename, data) {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }
+
     /**
      * 星图页：Canvas 2D + 确定性布局。
      *
@@ -1486,6 +1554,25 @@ window.__ModuleLoader__.load({
                 },
               }, t('graphBack'))
             : null,
+          h('button', {
+            type: 'button',
+            style: S.btn,
+            onClick: () => {
+              const payload = buildCanvasJson(graph, layout)
+              if (payload === null) return
+              // 打一条摘要：无头浏览器不落盘，靠这行能验证结构；真实浏览器同时会下载
+              // 序列化成字符串：控制台里对象会被折叠成 "Object"，看不到结构
+              console.info('[memory-es] canvas export ' + JSON.stringify({
+                nodes: payload.nodes.length,
+                edges: payload.edges.length,
+                sample: payload.nodes[0],
+                sampleEdge: payload.edges[0],
+              }))
+              const stamp = new Date().toISOString().slice(0, 10)
+              downloadJson(`memory-graph-${stamp}.canvas`, payload)
+            },
+            title: t('graphExportHint'),
+          }, t('graphExport')),
           h('button', {
             type: 'button',
             style: S.btn,
