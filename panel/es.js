@@ -115,6 +115,19 @@ export function createReadClient(resolveConfig) {
       const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
       return call(`/${encodeURIComponent(index)}/_doc/${encodeURIComponent(id)}${query}`, { method: 'DELETE' })
     },
+    /**
+     * 脚本更新（阶段 11 批 B：👍/👎 自增）。
+     *
+     * 为什么不用 update(doc)：读改写会在并发点击时丢计数，而计数器就是「被点了多少次」，
+     * 丢一次就永久少一次。脚本更新是原子的，也不需要先读。
+     */
+    updateScript: (index, id, { source, params = {} }, options = {}) => {
+      const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''
+      return call(
+        `/${encodeURIComponent(index)}/_update/${encodeURIComponent(id)}${query}`,
+        { method: 'POST', body: { script: { source, params } } },
+      )
+    },
     /** 部分更新（审核动作用；需要 index 权限，只有整理身份有） */
     update: (index, id, doc, options = {}) => {
       const query = options.refresh ? `?refresh=${encodeURIComponent(options.refresh)}` : ''

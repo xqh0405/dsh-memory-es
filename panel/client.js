@@ -138,6 +138,11 @@ window.__ModuleLoader__.load({
       slEmpty: '这段时间没有检索记录',
       slLegacyHint: '覆盖率只统计补字段之后的检索；更早的记录没有归一化键，不进簇统计。',
       slUsedIn: '被哪些检索命中过',
+      fbUseful: '👍 有用',
+      fbWrong: '👎 不对',
+      fbDone: '已记录',
+      fbCounts: '反馈：👍 {up} / 👎 {down}',
+      fbEmpty: '还没有反馈',
       slUsedInEmpty: '还没有检索命中过这条',
       slStatusMiss: '没答上',
       slStatusMixed: '有漏答',
@@ -427,6 +432,11 @@ window.__ModuleLoader__.load({
       slEmpty: 'No searches in this range',
       slLegacyHint: 'Coverage counts only searches recorded after the field upgrade; older rows have no cluster key.',
       slUsedIn: 'Matched by which searches',
+      fbUseful: '👍 Useful',
+      fbWrong: '👎 Wrong',
+      fbDone: 'Recorded',
+      fbCounts: 'Feedback: 👍 {up} / 👎 {down}',
+      fbEmpty: 'No feedback yet',
       slUsedInEmpty: 'No search has matched this memory yet',
       slStatusMiss: 'never',
       slStatusMixed: 'missed some',
@@ -3140,6 +3150,8 @@ window.__ModuleLoader__.load({
       const [restoreResult, setRestoreResult] = React.useState(null)
       // 阶段 11：反查「这条记忆被哪些检索命中过」（按需拉，不随列表一起取）
       const [usedIn, setUsedIn] = React.useState(null)
+      // 阶段 11 批 B：👍/👎 结果提示（成功/失败都显示，避免「点了没反应」）
+      const [feedbackResult, setFeedbackResult] = React.useState(null)
       const [delReason, setDelReason] = React.useState('')
       const [delBusy, setDelBusy] = React.useState(false)
       const [delResult, setDelResult] = React.useState(null)
@@ -3234,6 +3246,7 @@ window.__ModuleLoader__.load({
       // 详情换了一条就清掉上一条的反查结果，避免张冠李戴
       React.useEffect(() => {
         setUsedIn(null)
+        setFeedbackResult(null)
       }, [selected === null ? '' : selected.esId])
 
       const doRestore = () => {
@@ -3250,6 +3263,25 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => setRestoreResult({ ok: false, error: String(error.message ?? error) }))
           .finally(() => setRestoreBusy(false))
+      }
+
+      const doFeedback = (verdict) => {
+        if (!selected) return
+        apiPost('/memories/feedback', { esId: selected.esId, verdict, scope: selected.scope })
+          .then((value) => {
+            setFeedbackResult({ ok: true, text: `${t('fbDone')} · ${value?.verdict ?? verdict}` })
+            // 本地先加一，避免整页刷新；下次 load 会以 ES 为准
+            setSelected((prev) =>
+              prev === null
+                ? prev
+                : {
+                    ...prev,
+                    confirmedUse: (prev.confirmedUse ?? 0) + (verdict === 'useful' ? 1 : 0),
+                    corrections: (prev.corrections ?? 0) + (verdict === 'wrong' ? 1 : 0),
+                  },
+            )
+          })
+          .catch((error) => setFeedbackResult({ ok: false, error: String(error.message ?? error) }))
       }
 
       const data = state.data
@@ -3516,6 +3548,9 @@ window.__ModuleLoader__.load({
                   ['source_user', selected.sourceUser || '-'],
                   ['source_memory_id', selected.sourceMemoryId || '-'],
                   [t('colOrigin'), selected.origin || '-'],
+                  ['confirmed_use / corrections',
+                    `${selected.confirmedUse ?? 0} / ${selected.corrections ?? 0}`],
+                  ['feedback_at', selected.feedbackAt ? shortTime(selected.feedbackAt) : t('fbEmpty')],
                   ['promote_state', selected.promoteState || '-'],
                   ...(selected.status === 'quarantine'
                     ? [[t('quarantineReason'), selected.quarantineReason || t('quarantineNoReason')]]
@@ -3557,7 +3592,25 @@ window.__ModuleLoader__.load({
                       .catch((error) => setUsedIn({ rows: [], error: String(error.message ?? error) }))
                   },
                 }, t('slUsedIn')),
+                // 阶段 11 批 B：只有个人库能反馈（团队库的正确性归审核台）
+                selected.scope === 'personal'
+                  ? h('button', { type: 'button', style: S.btn, onClick: () => doFeedback('useful') }, t('fbUseful'))
+                  : null,
+                selected.scope === 'personal'
+                  ? h('button', { type: 'button', style: S.btn, onClick: () => doFeedback('wrong') }, t('fbWrong'))
+                  : null,
               ),
+              feedbackResult
+                ? h('div', {
+                    style: {
+                      marginTop: 8,
+                      fontSize: 12,
+                      color: feedbackResult.ok
+                        ? 'var(--dsw-alias-label-secondary)'
+                        : 'var(--dsw-alias-state-error-primary)',
+                    },
+                  }, feedbackResult.ok ? feedbackResult.text : `${t('error')}: ${feedbackResult.error}`)
+                : null,
               usedIn
                 ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
                     usedIn.error

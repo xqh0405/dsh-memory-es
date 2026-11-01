@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript } = await import(
   '../panel/index.js'
 )
 
@@ -914,4 +914,31 @@ test('indexNames：没显式配置的前缀要兜底（面板读的是「写了�
   assert.equal(names.searchLog, 'search_log_xqh')
   assert.equal(names.docs, 'personal_doc_xqh')
   assert.equal(names.personalAudit, 'personal_audit_xqh')
+})
+
+test('feedbackScript：👍 记 confirmed_use、👎 记 corrections，未知类型抛错', () => {
+  const now = '2026-11-01T12:00:00.000Z'
+  const up = feedbackScript('useful', now)
+  assert.match(up.source, /confirmed_use \+= 1/)
+  assert.doesNotMatch(up.source, /corrections \+= 1/)
+  assert.equal(up.params.now, now, '时间戳来自调用方，脚本不自己取')
+
+  const down = feedbackScript('wrong', now)
+  assert.match(down.source, /corrections \+= 1/)
+  assert.doesNotMatch(down.source, /confirmed_use \+= 1/)
+
+  assert.throws(() => feedbackScript('meh'), /未知反馈类型/)
+})
+
+test('projectHit：反馈计数缺失按 0（0 是真实值，不是「没数据」）', () => {
+  const bare = projectHit({ _id: 'es-1', _source: { memory_id: 'm1' } }, 'personal')
+  assert.equal(bare.confirmedUse, 0)
+  assert.equal(bare.corrections, 0)
+  const scored = projectHit(
+    { _id: 'es-2', _source: { memory_id: 'm2', confirmed_use: 3, corrections: 1, feedback_at: '2026-11-01T12:00:00.000Z' } },
+    'personal',
+  )
+  assert.equal(scored.confirmedUse, 3)
+  assert.equal(scored.corrections, 1)
+  assert.equal(scored.feedbackAt, '2026-11-01T12:00:00.000Z')
 })

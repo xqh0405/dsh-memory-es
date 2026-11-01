@@ -401,6 +401,10 @@ function projectHit(hit, scope) {
     // 阶段 9：写入来源戳与隔离原因（隔离条目靠这两格在面板上审）
     origin: str(source.origin),
     quarantineReason: str(source.quarantine_reason),
+    // 阶段 11 批 B：👍/👎 计数（缺失按 0；0 是真实值，不是「没数据」）
+    confirmedUse: num(source.confirmed_use),
+    corrections: num(source.corrections),
+    feedbackAt: str(source.feedback_at),
     // 命中理由：`score` 是 BM25 分（只在搜索时有），`highlights` 是「哪几个字段、命中了什么」
     score: typeof hit._score === 'number' ? Math.round(hit._score * 100) / 100 : undefined,
     highlights: projectHighlights(hit.highlight),
@@ -1204,6 +1208,71 @@ async function handleDeleteMemory(ctx, res, req) {
     ok: true,
     value: { esId, scope, deleted, auditWritten, auditError, at: now },
   })
+}
+
+/**
+ * 反馈脚本（阶段 11 批 B）：👍 记 `confirmed_use`，👎 记 `corrections`，并刷新 `feedback_at`。
+ *
+ * 抽成纯函数（而不是内联在 handler 里）是为了可测：这段 painless 没有任何类型保护，
+ * 写错一个字段名只会得到 400，而反馈是低频操作，没人会立刻发现。
+ * `now` 可注入，测试里能断言时间戳来自调用方而不是脚本自己取。
+ */
+export function feedbackScript(verdict, now = new Date().toISOString()) {
+  const base = (field) =>
+    `if (ctx._source.${field} == null) { ctx._source.${field} = 0 } ` +
+    `ctx._source.${field} += 1; ctx._source.feedback_at = params.now`
+  if (verdict === 'useful') return { source: base('confirmed_use'), params: { now } }
+  if (verdict === 'wrong') return { source: base('corrections'), params: { now } }
+  throw new Error(`未知反馈类型「${String(verdict)}」（只支持 useful / wrong）`)
+}
+
+/**
+ * POST /memories/feedback：给一条个人记忆记一次 👍/👎。
+ *
+ * 只做个人库：团队库的正确性由审核台（采纳/驳回）负责，两套信号混在一起会让两边都失真。
+ * 排序暂不读这两个计数（效用信号在阶段 12 才接入，且默认关），本轮只负责把数据攒起来。
+ */
+async function handleMemoryFeedback(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  const esId = str(input.esId).trim()
+  const verdict = str(input.verdict).trim()
+  const scope = str(input.scope).trim() || 'personal'
+  if (esId === '') return json(res, 400, { ok: false, error: '缺少 esId（要用 ES 主键）' })
+  if (scope !== 'personal') return json(res, 400, { ok: false, error: '反馈只作用于个人库' })
+
+  let script
+  try {
+    script = feedbackScript(verdict)
+  } catch (error) {
+    return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+  }
+
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const names = indexNames(configRow.value)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  let rights
+  try {
+    rights = await client.hasIndexPrivileges(names.personal, ['index'])
+  } catch (error) {
+    return json(res, 403, { ok: false, error: `权限探测失败：${String(error?.message ?? error)}` })
+  }
+  if (rights?.has_all_requested !== true) {
+    return json(res, 403, { ok: false, error: '没有个人库写权限（反馈需要 index 权限）' })
+  }
+
+  try {
+    await client.updateScript(names.personal, esId, script, { refresh: 'wait_for' })
+  } catch (error) {
+    if (error?.status === 404) return json(res, 404, { ok: false, error: '这条记忆不存在' })
+    throw error
+  }
+
+  console.error(`[memory-es-panel] 反馈 esId=${esId} verdict=${verdict}`)
+  json(res, 200, { ok: true, value: { esId, verdict, at: script.params.now } })
 }
 
 /**
@@ -2632,6 +2701,7 @@ async function handle(ctx, req, res) {
     // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
     if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
     if (path === '/memories/restore' && req.method === 'POST') return await handleRestoreMemory(ctx, res, req)
+    if (path === '/memories/feedback' && req.method === 'POST') return await handleMemoryFeedback(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
     }
@@ -3026,6 +3096,7 @@ export {
   handleMemories,
   handleSearchLog,
   handleSearchLogUsedIn,
+  handleMemoryFeedback,
   handleReviewAction,
   handleStickerImageGet,
   handleStickerAdd,
