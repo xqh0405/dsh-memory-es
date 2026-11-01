@@ -6,7 +6,7 @@
 #
 # 用法：
 #   PANEL_HOST=root@<es-host> PANEL_SSH_KEY=~/.ssh/<key> ./scripts/deploy-all-containers.sh
-#   PANEL_CONTAINERS="dsh-test dsh-xqh" ... ./scripts/deploy-all-containers.sh   # 只发指定容器
+#   PANEL_CONTAINERS="dsh-test dsh-<user>" ... ./scripts/deploy-all-containers.sh   # 只发指定容器
 #
 # ⚠️ 会重启每一个容器：正在生成的回复会被中断，页面要重连（会话历史不丢）。
 #    白天动之前先确认没人在跑任务（看 docker logs --since 20m 更稳）。

@@ -8,7 +8,7 @@
 # 幂等：配置段已存在就跳过；lib 每次覆盖（本来就该覆盖）；贴图整目录替换。
 # 用法：
 #   ./scripts/deploy-persona-pack.sh dsh-test        # 先在一个容器验证
-#   ./scripts/deploy-persona-pack.sh                 # 不给参数 = 除 dsh-xqh/dsh-es 外全部
+#   ./scripts/deploy-persona-pack.sh                 # 不给参数 = 除 dsh-<user>/dsh-es 外全部
 #   PACK_HOST=root@host PACK_SSH_KEY=~/.ssh/key ./scripts/deploy-persona-pack.sh ...
 set -euo pipefail
 
@@ -55,7 +55,7 @@ set -euo pipefail
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
   mapfile -t targets < <(docker ps --filter name=dsh- --format '{{.Names}}' \
-    | grep -v -e '^dsh-es$' -e '^dsh-xqh$' | sort)
+    | grep -v -e '^dsh-es$' -e '^dsh-<user>$' | sort)
 fi
 echo "共 ${#targets[@]} 个容器：${targets[*]}"
 

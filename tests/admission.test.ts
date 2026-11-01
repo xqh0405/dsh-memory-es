@@ -33,7 +33,7 @@ describe('detectSecret：凭据形态', () => {
     ['AWS Access Key', '备份账号 AKIAIOSFODNN7EXAMPLE 只读'],
     ['GitHub Token', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789'],
     ['JWT', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4cWgifQ.c2lnbmF0dXJl'],
-    ['带密码连接串', 'mysql://root:S3cretPass@192.168.0.104:3306/lottery_cloud'],
+    ['带密码连接串', 'mysql://root:S3cretPass@192.0.2.10:3306/lottery_cloud'],
     ['高熵 base64 串', '密钥片段 U2FsdGVkX1+AbCdEf0123456789/XyZ+AbCdEf0123456789'],
   ] as const
 

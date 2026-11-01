@@ -73,7 +73,7 @@ apply() {
   echo
   echo "已改为 ${ver}。让运行态看到它："
   echo '  本机：bash scripts/sync-local-plugin.sh，然后重启 dsh-web'
-  echo '  125 ：PANEL_HOST=root@<es 主机> PANEL_CONTAINER=dsh-xqh bash scripts/deploy-panel.sh'
+  echo '  125 ：PANEL_HOST=root@<es 主机> PANEL_CONTAINER=dsh-<user> bash scripts/deploy-panel.sh'
 }
 
 case "${1:-get}" in

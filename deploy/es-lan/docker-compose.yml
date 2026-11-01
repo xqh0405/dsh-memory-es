@@ -1,10 +1,10 @@
 # 内网共享知识库：单节点 Elasticsearch 8.19.23（security + TLS + IK 分词）
-# 部署机 192.168.1.125，目录 /docker/dsh-es，容器名 dsh-es。
+# 部署机 <ES_HOST>，目录 /docker/dsh-es，容器名 dsh-es。
 #
 # 与另外两套的差异（只三处，其余刻意保持一致，便于对拍）：
-#  1. **端口只绑 192.168.1.125**（内网网卡 enp6s0）：整个局域网（含各成员机的 DSH 容器，
+#  1. **端口只绑 <ES_HOST>**（内网网卡 enp6s0）：整个局域网（含各成员机的 DSH 容器，
 #     走宿主 IP）都能访问，但 wg0(10.9.0.10) 那侧不暴露 —— VPN 对端不全是内网成员。
-#  2. **证书 SAN 带内网 IP 与主机名**：客户端用 https://192.168.1.125:9200、
+#  2. **证书 SAN 带内网 IP 与主机名**：客户端用 https://<ES_HOST>:9200、
 #     https://es-host.local:9200、https://dsh-es:9200 都能通过 hostname 校验。
 #     旧的 es-remote 只签了 127.0.0.1，所以除宿主机外谁都连不上。
 #  3. 存储与编排独立在 /docker/dsh-es（data/certs/plugins/snapshots 都是相对路径下的绑定挂载）。
@@ -47,7 +47,7 @@ services:
       - ./plugins/analysis-ik:/usr/share/elasticsearch/plugins/analysis-ik
       - ./snapshots:/usr/share/elasticsearch/snapshots
     ports:
-      - "192.168.1.125:9200:9200"   # 只绑内网网卡：局域网可达，wg0(10.9.0.10) 不暴露
+      - "<ES_HOST>:9200:9200"   # 只绑内网网卡：局域网可达，wg0(10.9.0.10) 不暴露
     healthcheck:
       test: ["CMD-SHELL", "curl -fsSk -u elastic:$$ELASTIC_PASSWORD https://localhost:9200/_cluster/health >/dev/null || exit 1"]
       interval: 10s
@@ -63,7 +63,7 @@ services:
     networks:
       - default
       - dsh-test
-      - dsh-xqh
+      - dsh-<user>
       - dsh-chencan
       - dsh-hongzhihui
       - dsh-laoliu
@@ -81,7 +81,7 @@ networks:
   # （2026-10-29 发现 dsh-test 就是漏了这一条）。改完要 up -d 重建 ES 才生效；
   # 不想重建时可先跑 scripts/es-attach-networks.sh 做运行时 connect（幂等）。
   dsh-test:         { name: dsh-test_default,         external: true }
-  dsh-xqh:          { name: dsh-xqh_default,          external: true }
+  dsh-<user>:          { name: dsh-<user>_default,          external: true }
   dsh-chencan:      { name: dsh-chencan_default,      external: true }
   dsh-hongzhihui:   { name: dsh-hongzhihui_default,   external: true }
   dsh-laoliu:       { name: dsh-laoliu_default,       external: true }

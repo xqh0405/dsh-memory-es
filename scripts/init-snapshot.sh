@@ -6,8 +6,8 @@
 #
 # 两套部署共用本脚本，靠环境变量区分（曾因写死路径，.125 上从没跑起来过）：
 #   .114 本机：ES_DIR=<repo>/deploy/es        ES=https://127.0.0.1:9200
-#   .125 内网：ES_DIR=/docker/dsh-es          ES=https://192.168.1.125:9200
-# 例：ES_DIR=/docker/dsh-es ES=https://192.168.1.125:9200 bash scripts/init-snapshot.sh
+#   .125 内网：ES_DIR=/docker/dsh-es          ES=https://<ES_HOST>:9200
+# 例：ES_DIR=/docker/dsh-es ES=https://<ES_HOST>:9200 bash scripts/init-snapshot.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

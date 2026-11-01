@@ -458,7 +458,7 @@ test('isTooConcrete：命令/路径/端口/字段名/版本号都算太具体', 
   const tooConcrete = [
     'framework 改动必须先 `mvn deploy` 到 Nexus 再触发构建',
     '改完要去 /data/dsh/profiles 里确认',
-    'ES 只绑在 192.168.50.125:9200',
+    'ES 只绑在 <ES_HOST>:9200',
     '写之前先看 t_lottery_order 的 win_price 列',
     '镜像要打 v0.4.0 这个 tag',
   ]

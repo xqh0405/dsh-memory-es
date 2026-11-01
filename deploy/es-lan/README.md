@@ -20,7 +20,7 @@
 
 | 用途 | 地址 |
 |---|---|
-| 局域网其它机器 | `https://192.168.1.125:9200` |
+| 局域网其它机器 | `https://<ES_HOST>:9200` |
 | 同宿主上的 dsh-<uid> 容器 | `https://dsh-es:9200`（容器名） |
 
 **为什么容器不用宿主 IP**：容器访问宿主映射端口时，DNAT 的目标会变成 ES 容器 IP，
@@ -55,7 +55,7 @@ docker 给成员容器分的是 `192.168.16.0/20` 这类段，会命中 after.ru
 ## 证书
 
 CA `certs/ca.crt`（分发给客户端，配 `NODE_EXTRA_CA_CERTS` / `--cacert`）。
-节点证书 SAN：`dsh-es`、`es-host.local`、`localhost`、`127.0.0.1`、`192.168.1.125`、`10.9.0.10`，10 年。
+节点证书 SAN：`dsh-es`、`es-host.local`、`localhost`、`127.0.0.1`、`<ES_HOST>`、`10.9.0.10`，10 年。
 重新生成要同时给 `--name --dns --ip`，否则 hostname 校验失败。
 
 ## 账号
@@ -80,7 +80,7 @@ CA `certs/ca.crt`（分发给客户端，配 `NODE_EXTRA_CA_CERTS` / `--cacert`�
 初始化顺序（全部幂等）：
 
 ```bash
-export ES_DIR=/docker/dsh-es ES_URL=https://192.168.1.125:9200
+export ES_DIR=/docker/dsh-es ES_URL=https://<ES_HOST>:9200
 bash scripts/init-indices.sh      # 模板 + 个人索引 + team_knowledge
 bash scripts/migrate-s9.sh        # 审核字段 + memory_audit
 bash scripts/init-security.sh     # 角色 + xqh(team-write)
@@ -131,7 +131,7 @@ ES_PW=$(grep '^MEM_PASSWORD=' users/<uid>.env | cut -d= -f2-)
 python3 scripts/migrate-mnemon.py --source insights \
   --db /docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/data/default/mnemon.db \
   --user <uid> \
-  --es https://192.168.1.125:9200 --ca /docker/dsh-es/certs/ca.crt \
+  --es https://<ES_HOST>:9200 --ca /docker/dsh-es/certs/ca.crt \
   --username mem-user-<uid> --password-env ES_PW \
   --ollama http://127.0.0.1:11434 --model bge-m3
 ```
@@ -150,7 +150,7 @@ python3 scripts/migrate-mnemon.py --source insights \
 ```bash
 python3 scripts/migrate-mnemon.py --source runtime \
   --runtime-file /docker/lib/docker/volumes/dsh-home-<uid>/_data/.mnemon/runtime/memories.json \
-  --user <uid> --es https://192.168.1.125:9200 --ca /docker/dsh-es/certs/ca.crt \
+  --user <uid> --es https://<ES_HOST>:9200 --ca /docker/dsh-es/certs/ca.crt \
   --username mem-user-<uid> --password-env ES_PW \
   --ollama http://127.0.0.1:11434 --model bge-m3
 ```
@@ -274,7 +274,7 @@ kNN（自匹配 score 1.0）均正常，IK 分词生效。
 
 ```bash
 cd /docker/dsh-es
-ES_DIR=/docker/dsh-es ES=https://192.168.1.125:9200 ES_CURL_TIMEOUT=240 \
+ES_DIR=/docker/dsh-es ES=https://<ES_HOST>:9200 ES_CURL_TIMEOUT=240 \
   bash scripts/init-snapshot.sh
 ```
 

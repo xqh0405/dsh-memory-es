@@ -12,7 +12,7 @@
 #
 # 用法：
 #   scripts/migrate-origin-fields.sh
-#   ES_URL=https://192.168.50.125:9200 ES_DIR=/docker/dsh-es \
+#   ES_URL=https://<ES_HOST>:9200 ES_DIR=/docker/dsh-es \
 #     ES_CA=/path/ca.crt ES_USER=elastic ES_PASS=... scripts/migrate-origin-fields.sh
 set -euo pipefail
 

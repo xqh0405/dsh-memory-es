@@ -11,7 +11,7 @@
 #
 # 用法：
 #   scripts/migrate-journal-fields.sh
-#   ES_URL=https://192.168.1.125:9200 ES_DIR=/docker/dsh-es scripts/migrate-journal-fields.sh
+#   ES_URL=https://<ES_HOST>:9200 ES_DIR=/docker/dsh-es scripts/migrate-journal-fields.sh
 #   ES_URL=... ES_USER=elastic ES_PASS=... scripts/migrate-journal-fields.sh
 set -euo pipefail
 
