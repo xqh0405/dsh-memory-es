@@ -9,12 +9,12 @@
 #   PANEL_HOST=user@host ./scripts/deploy-panel.sh
 #   PANEL_HOST=user@host PANEL_CONTAINER=dsh-test ./scripts/deploy-panel.sh   # 先拿测试容器验证
 #   可选：PANEL_SSH_KEY=~/.ssh/xxx  （留空走 ssh 默认配置）
-#         PANEL_CONTAINER（默认 dsh-<user>）、PANEL_PROFILE（默认 web）
+#         PANEL_CONTAINER（默认 dsh-xqh）、PANEL_PROFILE（默认 web）
 set -euo pipefail
 
 HOST="${PANEL_HOST:?请用 PANEL_HOST=user@host 指定目标主机}"
 SSH_KEY="${PANEL_SSH_KEY:-}"
-CONTAINER="${PANEL_CONTAINER:-dsh-<user>}"
+CONTAINER="${PANEL_CONTAINER:-dsh-xqh}"
 PROFILE="${PANEL_PROFILE:-web}"
 DSH_HOME_IN_CONTAINER="${PANEL_DSH_HOME:-/data/dsh}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

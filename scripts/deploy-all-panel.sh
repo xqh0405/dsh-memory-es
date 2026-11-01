@@ -19,7 +19,7 @@ KEY="${PANEL_SSH_KEY:-$HOME/.ssh/dsh_ai}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 显式列出而不是 docker ps 通配：dsh-es 是 ES 本体，dsh-* 里还有 dsh-market 之类非实例容器
-ALL=(dsh-<user> dsh-chencan dsh-hongzhihui dsh-laoliu dsh-liuxinling
+ALL=(dsh-xqh dsh-chencan dsh-hongzhihui dsh-laoliu dsh-liuxinling
      dsh-molijin dsh-tanxu dsh-test dsh-zhongjinqi dsh-zhongyuhang)
 
 if [ $# -gt 0 ]; then

@@ -17,7 +17,7 @@ for u in xqh chencan hongzhihui laoliu liuxinling molijin tanxu zhongjinqi zhong
   PW=$(grep '^MEM_PASSWORD=' "users/$u.env" | cut -d= -f2-)
   ES_PW="$PW" python3 scripts/migrate-docs.py \
     --index-json "$R/documents/index.json" --docs-dir "$R/documents/active" \
-    --user "$u" --es https://<ES_HOST>:9200 --ca certs/ca.crt \
+    --user "$u" --es https://192.168.50.125:9200 --ca certs/ca.crt \
     --username "mem-user-$u" --password-env ES_PW \
     --ollama http://127.0.0.1:11434 --model bge-m3 --batch 8
 done
