@@ -19,7 +19,7 @@ import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFil
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
-import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type RankingConfig } from '../fragment.ts'
+import { applyRanking, buildHitReceipts, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type HitReceipt, type RankingConfig, type ReceiptSource } from '../fragment.ts'
 import { NON_FACT_MEMORY_TYPES } from './common.ts'
 import type { RecallCache } from './recallCache.ts'
 
@@ -121,6 +121,8 @@ export interface SearchInput {
   domain?: string[]
   time_range?: string
   limit?: number
+  /** true 时在结果里附「命中回执」（只解释排序，不参与算分；默认关闭省 token） */
+  explain?: boolean
 }
 
 export interface RetrievalConfig {
@@ -192,6 +194,8 @@ export type SearchNote = 'ok' | 'no_match' | 'low_confidence'
 
 export interface SearchResult {
   hits: Projected[]
+  /** 阶段 10：`explain=true` 时给出，与 hits 逐条同序；否则缺省 */
+  receipts?: HitReceipt[]
   note: SearchNote
   /** true = 向量不可用，本次只走了 BM25 */
   degraded: boolean
@@ -350,6 +354,34 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     })
   }
 
+  /**
+   * 阶段 10：把「各路名次/原始分 + 库内 RRF」收成一张表，供回执使用。
+   *
+   * 只在 explain=true 时构建：它不影响排序，但遍历候选也不该白做。
+   * key 用 `${scope}:${id}` —— 同一 id 只可能在一个库里，但两库可能因为
+   * 同 content_sha256 被去重，带上来源才不会串。
+   */
+  const wantExplain = input.explain === true
+  const routeSources = new Map<string, ReceiptSource>()
+  if (wantExplain) {
+    for (const item of settled) {
+      item.hits.forEach((hit, index) => {
+        const key = `${item.scope}:${hit.id}`
+        const current = routeSources.get(key) ?? { rrf: 0 }
+        current[item.route] = { rank: index + 1, score: hit.score }
+        routeSources.set(key, current)
+      })
+    }
+    for (const group of groups) {
+      for (const hit of group.hits) {
+        const key = `${group.source}:${hit.id}`
+        const current = routeSources.get(key) ?? { rrf: 0 }
+        current.rrf = hit.fusedScore
+        routeSources.set(key, current)
+      }
+    }
+  }
+
   const mergedRaw = mergeScopes(groups, { weights: { personal: PERSONAL_WEIGHT } })
   // 阶段 5.3：扩散激活（默认 alpha=0，原样返回）。放在乘子之前——
   // 它属于「相关性」，乘子是后验信号。
@@ -399,7 +431,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   if (merged.length === 0) {
     log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, routes: basis, hits: 0, degraded })
     record('no_match', 0)
-    return { hits: [], note: 'no_match', degraded, filtered, text: '没有找到相关记忆。' }
+    return { hits: [], ...(wantExplain ? { receipts: [] } : {}), note: 'no_match', degraded, filtered, text: '没有找到相关记忆。' }
   }
 
   // 置信信号只取「主库」的一手分数：scope=both 时以个人库为准。
@@ -421,6 +453,17 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
 
   const topMerged = merged.slice(0, limit)
   const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin))
+
+  // 阶段 10：回执与 hits **逐条同序**，且不参与任何打分（纯解释）。
+  const receipts = wantExplain
+    ? buildHitReceipts({
+        hits: topMerged,
+        routes: routeSources,
+        weights: { personal: PERSONAL_WEIGHT },
+        identifiers,
+      })
+    : undefined
+  const explainText = receipts === undefined || receipts.length === 0 ? '' : `\n\n${renderReceipts(receipts)}`
 
   // 阶段 9：把命中记进短期缓存（内存、TTL 30 分钟）。
   // 写入侧的「原样再摄取」判据靠它——不能拿全库比，全库高相似是值钱的同义改写。
@@ -473,10 +516,11 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     record('low_confidence', hits.length, margin === undefined ? {} : { margin })
     return {
       hits,
+      ...(receipts === undefined ? {} : { receipts }),
       note: 'low_confidence',
       degraded,
       filtered,
-      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}`,
+      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${explainText}`,
     }
   }
   log({
@@ -489,7 +533,35 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     ...(margin === undefined ? {} : { margin }),
   })
   record('ok', hits.length, margin === undefined ? {} : { margin })
-  return { hits, note: 'ok', degraded, filtered, text: renderText(hits) }
+  return { hits, ...(receipts === undefined ? {} : { receipts }), note: 'ok', degraded, filtered, text: `${renderText(hits)}${explainText}` }
+}
+
+/**
+ * 回执的文本形态。
+ *
+ * 模型只能看到 `render` 输出的 text，所以 `explain=true` 时必须把理由也写进 text，
+ * 否则 receipts 只活在结构化返回值里、模型永远看不到——那等于没做。
+ */
+export function renderReceipts(receipts: readonly HitReceipt[]): string {
+  const lines = receipts.map((item, index) => {
+    const routes: string[] = []
+    if (item.bm25_rank !== undefined) routes.push(`BM25 第${item.bm25_rank}`)
+    if (item.knn_rank !== undefined) {
+      const cos = item.knn_score === undefined ? '' : `（cos ${item.knn_score.toFixed(3)}）`
+      routes.push(`kNN 第${item.knn_rank}${cos}`)
+    }
+    const weight = item.sourceWeight === 1 ? '' : ` ×${item.sourceWeight}`
+    const flow = `rrf ${item.rrf.toFixed(4)}${weight} → ${item.final.toFixed(4)}`
+    const ids = item.identifiers.length === 0 ? '' : ` · 标识符 ${item.identifiers.join(',')}`
+    const agree = item.reasons.includes('agree') ? ' · 两路一致' : ''
+    const ranked = item.reasons.includes('ranked-up')
+      ? ' · 乘子上调'
+      : item.reasons.includes('ranked-down')
+        ? ' · 乘子下调'
+        : ''
+    return `${index + 1}. ${item.memory_id}（${item.source}）${routes.join(' · ')} · ${flow}${ids}${agree}${ranked}`
+  })
+  return `命中理由（explain）：\n${lines.join('\n')}`
 }
 
 const DESCRIPTION = [
@@ -535,6 +607,11 @@ export function defineSearchTool(deps: SearchDeps) {
         type: 'integer',
         description: `返回条数，默认取配置，上限 ${MAX_RESULT_LIMIT}。`,
       },
+      explain: {
+        type: 'boolean',
+        description:
+          'true 时附「命中回执」：每条的各路名次与原始分、RRF 分、乘子前后分、入选原因（两路一致/仅关键词/标识符命中）。默认关（省 token）；想核对「为什么这条排第一」或怀疑排序有问题时再开。',
+      },
     },
     output: {
       schema: {
@@ -555,6 +632,26 @@ export function defineSearchTool(deps: SearchDeps) {
                 updated_at: { type: 'string', required: true },
                 source: { type: 'string', required: true },
                 score: { type: 'number', required: true },
+              },
+            },
+          },
+          receipts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                memory_id: { type: 'string', required: true },
+                source: { type: 'string', required: true },
+                bm25_rank: { type: 'number' },
+                bm25_score: { type: 'number' },
+                knn_rank: { type: 'number' },
+                knn_score: { type: 'number' },
+                rrf: { type: 'number', required: true },
+                sourceWeight: { type: 'number', required: true },
+                final: { type: 'number', required: true },
+                reasons: { type: 'array', required: true, items: { type: 'string' } },
+                identifiers: { type: 'array', required: true, items: { type: 'string' } },
               },
             },
           },

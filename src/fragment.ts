@@ -397,6 +397,100 @@ export function applyRanking(
 }
 
 /** 给模型看的精简命中（§6.3 的返回结构，content 截断） */
+/**
+ * 一条命中的**回执**（阶段 10）：回答「它为什么出现在这里」。
+ *
+ * 为什么值得做：`note=low_confidence` 只告诉模型「相关性偏低」，
+ * 它不知道自己是不是被两路同时问到、还是只有一路踩着线进来；
+ * 调参时也只能看到名次，看不到「RRF 贡献多少、乘子又改了多少」。
+ * 回执把这些摊开，但**默认不返回**（`explain=true` 才给）——它只解释序，不参与算分。
+ *
+ * 字段刻意**摊平**（`bm25_rank` 而不是 `bm25: {rank}`）：工具的输出 schema 走
+ * DSH 的受限子集，扁平结构既好校验也好喂给面板；嵌套对象是另一个要验证的变量，不值得。
+ */
+export interface HitReceipt {
+  memory_id: string
+  source: Scope
+  /** BM25 路的名次（1 起；缺席 = 这一路没召回它） */
+  bm25_rank?: number
+  /** BM25 的 _score */
+  bm25_score?: number
+  /** kNN 路的名次 */
+  knn_rank?: number
+  /** kNN 的 cosine */
+  knn_score?: number
+  /** 库内 RRF 分（跨库来源权重之前） */
+  rrf: number
+  /** 跨库来源权重（个人库 1.2、团队库 1.0） */
+  sourceWeight: number
+  /** 乘子（importance / 命中 / 新鲜度 / 心情）之后的最终分，排序就按它 */
+  final: number
+  /** 短标签，人读：both-routes / bm25-only / knn-only / agree / ranked-up / ranked-down / identifier-match */
+  reasons: string[]
+  /** 正文里实际出现的查询标识符（没提取到或没出现就是空数组） */
+  identifiers: string[]
+}
+
+/** 回执里对某条记忆的原始信息；key 形如 `${scope}:${id}` */
+export interface ReceiptSource {
+  bm25?: { rank: number; score: number }
+  knn?: { rank: number; score: number }
+  rrf: number
+}
+
+/**
+ * 把「命中 + 各路名次/分数 + 库内 RRF」摊成回执。**纯函数、不排序、不改分**——
+ * 顺序与 `hits` 逐条一致，这一点被单测钉住（回执不能反过来影响检索结果）。
+ */
+export function buildHitReceipts(input: {
+  hits: readonly ScopedHit[]
+  routes: ReadonlyMap<string, ReceiptSource>
+  weights?: Partial<Record<Scope, number>>
+  identifiers?: readonly string[]
+}): HitReceipt[] {
+  const identifiers = (input.identifiers ?? []).map((item) => item.toLowerCase()).filter((item) => item !== '')
+
+  return input.hits.map((hit) => {
+    const key = `${hit.origin}:${hit.id}`
+    const source = input.routes.get(key) ?? { rrf: 0 }
+    const sourceWeight = input.weights?.[hit.origin] ?? 1
+    const weightedRrf = source.rrf * sourceWeight
+    const reasons: string[] = []
+
+    if (source.bm25 !== undefined && source.knn !== undefined) reasons.push('both-routes')
+    else if (source.bm25 !== undefined) reasons.push('bm25-only')
+    else if (source.knn !== undefined) reasons.push('knn-only')
+    else reasons.push('fused-only')
+
+    if (
+      source.bm25 !== undefined &&
+      source.knn !== undefined &&
+      Math.abs(source.bm25.rank - source.knn.rank) <= 1
+    ) {
+      reasons.push('agree')
+    }
+    // 1e-12：浮点比较的容差，避免「乘子其实等于 1」被报成 ranked-up
+    if (hit.fusedScore > weightedRrf + 1e-12) reasons.push('ranked-up')
+    else if (hit.fusedScore < weightedRrf - 1e-12) reasons.push('ranked-down')
+
+    const haystack = String(hit.source.content_exact ?? hit.source.content ?? '').toLowerCase()
+    const matched = identifiers.filter((item) => haystack.includes(item))
+    if (matched.length > 0) reasons.push('identifier-match')
+
+    return {
+      memory_id: typeof hit.source.memory_id === 'string' ? hit.source.memory_id : hit.id,
+      source: hit.origin,
+      ...(source.bm25 === undefined ? {} : { bm25_rank: source.bm25.rank, bm25_score: source.bm25.score }),
+      ...(source.knn === undefined ? {} : { knn_rank: source.knn.rank, knn_score: source.knn.score }),
+      rrf: source.rrf,
+      sourceWeight,
+      final: hit.fusedScore,
+      reasons,
+      identifiers: matched,
+    }
+  })
+}
+
 export interface Projected {
   memory_id: string
   content: string

@@ -610,6 +610,8 @@ describe('defineSearchTool', () => {
       const parameters = def.parameters as { properties: Record<string, unknown> }
       assert.deepEqual(Object.keys(parameters.properties).sort(), [
         'domain',
+        // 阶段 10：explain=true 才附回执（默认关，省 token）
+        'explain',
         'limit',
         'memory_type',
         'query',
