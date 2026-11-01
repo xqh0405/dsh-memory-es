@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-es",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "DSH 记忆插件：Elasticsearch 双层记忆库（团队知识 + 个人记忆）",
   "keywords": [
     "dsh",
