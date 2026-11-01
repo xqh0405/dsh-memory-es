@@ -1,12 +1,23 @@
 # dsh-memory-es
 
-**当前版本：0.3.0**
+**当前版本：0.4.0**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
-![记忆库面板 · 概览](docs/images/panel-overview.jpg)
-
-![记忆库面板 · 记忆浏览](docs/images/panel-browse.jpg)
+<table>
+<tr>
+    <td align="center"><img src="docs/images/tab-1-overview.jpg" width="238" alt="概览"><br><sub>概览</sub></td>
+    <td align="center"><img src="docs/images/tab-2-browse.jpg" width="238" alt="记忆浏览"><br><sub>记忆浏览</sub></td>
+    <td align="center"><img src="docs/images/tab-3-graph.jpg" width="238" alt="星图"><br><sub>星图</sub></td>
+    <td align="center"><img src="docs/images/tab-4-identity.jpg" width="238" alt="自述"><br><sub>自述</sub></td>
+</tr>
+<tr>
+    <td align="center"><img src="docs/images/tab-5-persona.jpg" width="238" alt="人格"><br><sub>人格</sub></td>
+    <td align="center"><img src="docs/images/tab-6-review.jpg" width="238" alt="审核台"><br><sub>审核台</sub></td>
+    <td align="center"><img src="docs/images/tab-7-maintain.jpg" width="238" alt="维护"><br><sub>维护</sub></td>
+    <td align="center"><img src="docs/images/tab-8-config.jpg" width="238" alt="配置"><br><sub>配置</sub></td>
+</tr>
+</table>
 
 ## 功能
 
