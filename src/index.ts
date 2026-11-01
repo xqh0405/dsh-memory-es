@@ -534,7 +534,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   }
 
   /**
-   * 阶段 9.2 / 9.5：表情包。
+   * 阶段 9.2 / 9.4 补：表情包。
    *
    * **按 mtime + size 惰性读**，不再是 apply 时读一次：面板现在支持在线添加表情包，
    * 若还是一次性读，加完必须重启 dsh 才认，那个功能就等于没做。
