@@ -1494,6 +1494,14 @@ window.__ModuleLoader__.load({
           ctx.globalAlpha = alpha
           ctx.fill()
 
+          // 团队记忆画一圈描边：边只在同库内建，所以个人/团队天然各成一簇，
+          // 但界面上必须能分清（2026-11-01 用户问「哪个是团队哪个是私有」时补的）
+          if (node.scope === 'team') {
+            ctx.globalAlpha = Math.min(1, alpha + 0.2)
+            ctx.strokeStyle = 'rgba(255,255,255,.62)'
+            ctx.lineWidth = 1.1
+            ctx.stroke()
+          }
           if (isHover) {
             ctx.globalAlpha = 1
             ctx.strokeStyle = 'rgba(255,255,255,.9)'
@@ -1542,6 +1550,12 @@ window.__ModuleLoader__.load({
                   `${graph.clusters.length} ${t('graphClusters')}` +
                   (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
                   (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
+          // 图例：实心=个人，带描边=团队
+          h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 10, fontSize: 12, ...S.muted } },
+            h('span', { style: { width: 8, height: 8, borderRadius: 999, background: '#6b8cff' } }),
+            t('scopePersonal'),
+            h('span', { style: { width: 8, height: 8, borderRadius: 999, background: '#6b8cff', border: '1px solid rgba(255,255,255,.7)', marginLeft: 4 } }),
+            t('scopeTeam')),
           h('span', { style: { flex: 1 } }),
           h('span', { style: S.muted, fontSize: 12 }, inFocus ? t('graphFocusHint') : t('graphGlobalHint')),
           inFocus
