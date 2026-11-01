@@ -3,5 +3,10 @@
   "compilerOptions": {
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "tests", "consolidate"]
+  "include": [
+    "src",
+    "tests",
+    "consolidate",
+    "scripts"
+  ]
 }

@@ -1,0 +1,35 @@
+{"id": "recall-q01", "severity": "should", "kind": "recall", "query": "dynamic-datasource 的 lazy 为什么改完配置没立刻生效", "limit": 5, "expect_ids": ["ac862854-1a45-4d4e-b97a-ccdd9ae4cc61"], "expect_min_hits": 1}
+{"id": "recall-q02", "severity": "should", "kind": "recall", "query": "备用库的 update_time 和主源口径差在哪", "limit": 5, "expect_ids": ["3c03bdba-f7a5-479a-8384-1e33754ce0cb"], "expect_min_hits": 1}
+{"id": "recall-q03", "severity": "should", "kind": "recall", "query": "Jenkins 共享库的 deployDocker 从哪读服务器配置", "limit": 5, "expect_ids": ["a6515414-507b-4c84-ae98-a29548a355c6"], "expect_min_hits": 1}
+{"id": "recall-q04", "severity": "should", "kind": "recall", "query": "101 和 104 分别是什么环境", "limit": 5, "expect_ids": ["07024c0d-4f4f-49f1-b400-5c705c1350de"], "expect_min_hits": 1}
+{"id": "recall-q05", "severity": "should", "kind": "recall", "query": "IM 模块的 Redis 序列化器换成了什么", "limit": 5, "expect_ids": ["10d1b799-7737-43f1-bd4f-4e6c841b179b"], "expect_min_hits": 1}
+{"id": "recall-q06", "severity": "should", "kind": "recall", "query": "长期归档空间允许放哪些内容", "limit": 5, "expect_ids": ["22f25a77-9c2e-473a-99bd-a9259de47d7c"], "expect_min_hits": 1}
+{"id": "recall-q07", "severity": "should", "kind": "recall", "query": "mnemon CLI 装在哪里、怎么装", "limit": 5, "expect_ids": ["3d79089f-5832-4544-b7dd-49b730166fc1"], "expect_min_hits": 1}
+{"id": "recall-q08", "severity": "should", "kind": "recall", "query": "传统足彩 zc_type 的 1、2、3 各代表什么", "limit": 5, "expect_ids": ["b4457716-ac98-4325-a9e6-660e9592d434"], "expect_min_hits": 1}
+{"id": "recall-q09", "severity": "should", "kind": "recall", "query": "装 node 包一直连不上官方仓库怎么处理", "limit": 5, "expect_ids": ["e3cd48e2-af7a-4b8c-88ab-4923885387a0"], "expect_min_hits": 1}
+{"id": "recall-q10", "severity": "should", "kind": "recall", "query": "宝塔机器对外开放了哪些端口", "limit": 5, "expect_ids": ["89a7f2c1-8bf6-4a6b-8685-29c48e6485a2"], "expect_min_hits": 1}
+{"id": "recall-q11", "severity": "should", "kind": "recall", "query": "本机探测能通，能说明对方没做来源限制吗", "limit": 5, "expect_ids": ["e8c08836-40f2-4d92-9bd4-0a7317853071"], "expect_min_hits": 1}
+{"id": "recall-q12", "severity": "should", "kind": "recall", "query": "jbp 机群上到底有几套对象存储", "limit": 5, "expect_ids": ["7ecd5cd5-5876-488e-8c40-536f756559b7"], "expect_min_hits": 1}
+{"id": "recall-q13", "severity": "should", "kind": "recall", "query": "批量查很多台机器返回空列表，能直接当结论吗", "limit": 5, "expect_ids": ["2195e044-b91e-450f-85c5-1a23c5c85027"], "expect_min_hits": 1}
+{"id": "recall-q14", "severity": "should", "kind": "recall", "query": "视频直播的签名能自己生成吗", "limit": 5, "expect_ids": ["bc773b79-68c1-44f4-b895-c0c3dabe4389"], "expect_min_hits": 1}
+{"id": "recall-q15", "severity": "should", "kind": "recall", "query": "pip 装依赖超时该换什么源", "limit": 5, "expect_ids": ["8749a43b-5518-4215-bd3a-635c53d0c3ce"], "expect_min_hits": 1}
+{"id": "recall-q16", "severity": "should", "kind": "recall", "query": "本地备份服务的端口和容器名是什么", "limit": 5, "expect_ids": ["4b3e3457-3b1a-419a-b2e0-8017ad64d33e"], "expect_min_hits": 1}
+{"id": "recall-q17", "severity": "should", "kind": "recall", "query": "103 的 8443 被谁占用了", "limit": 5, "expect_ids": ["04105149-ba53-45e4-9286-04e67717d671"], "expect_min_hits": 1}
+{"id": "recall-q18", "severity": "should", "kind": "recall", "query": "fastjson 1.2.83 迁移涉及多少文件", "limit": 5, "expect_ids": ["3a5bce4f-2049-4193-b094-d7ca8b02b3ba"], "expect_min_hits": 1}
+{"id": "recall-q19", "severity": "should", "kind": "recall", "query": "lottery-framework 的 main 分支为什么缺 lottery-common", "limit": 5, "expect_ids": ["c5b673d1-0bf5-4cb8-960e-85337e818765"], "expect_min_hits": 1}
+{"id": "recall-q20", "severity": "should", "kind": "recall", "query": "lot.bd_write_sync 已经做到哪一步", "limit": 5, "expect_ids": ["9cd40b1a-72e3-4f5f-a1a0-5129760ae38e"], "expect_min_hits": 1}
+{"id": "recall-q21", "severity": "should", "kind": "recall", "query": "用 exec 前缀语句验证脚本有什么风险", "limit": 5, "expect_ids": ["41ac2101-904c-4b0b-b38e-6b7bb48037e4"], "expect_min_hits": 1}
+{"id": "recall-q22", "severity": "should", "kind": "recall", "query": "dsh-mcp-panel 改完之后 token 为什么丢了", "limit": 5, "expect_ids": ["0975af03-8bba-4e37-8ea8-e74e8b9df9f5"], "expect_min_hits": 1}
+{"id": "recall-q23", "severity": "should", "kind": "recall", "query": "侧边栏怎么切换 Git 分支", "limit": 5, "expect_ids": ["8067de1b-0dca-4d4d-ab01-3cd1861d7a59"], "expect_min_hits": 1}
+{"id": "recall-q24", "severity": "should", "kind": "recall", "query": "workspace-write 下跑 mvn 报 AccessDeniedException 怎么办", "limit": 5, "expect_ids": ["519d16fc-413e-4655-86de-7a6123b3aec3"], "expect_min_hits": 1}
+{"id": "noise-q25", "severity": "should", "kind": "noise", "query": "ZooKeeper 集群选举的超时参数怎么调", "limit": 5, "expect_max_hits": 0}
+{"id": "noise-q26", "severity": "should", "kind": "noise", "query": "Kafka 消费组频繁 rebalance 怎么排查", "limit": 5, "expect_max_hits": 0}
+{"id": "noise-q27", "severity": "should", "kind": "noise", "query": "PostgreSQL 的 autovacuum 阈值怎么计算", "limit": 5, "expect_max_hits": 0}
+{"id": "noise-q28", "severity": "should", "kind": "noise", "query": "Ceph 的 OSD 失去权重怎么恢复", "limit": 5, "expect_max_hits": 0}
+{"id": "noise-q29", "severity": "should", "kind": "noise", "query": "RabbitMQ 死信队列怎么配置 TTL", "limit": 5, "expect_max_hits": 0}
+{"id": "noise-q30", "severity": "should", "kind": "noise", "query": "Kubernetes Ingress 的 TLS 证书怎么自动续期", "limit": 5, "expect_max_hits": 0}
+{"id": "must-no-identity-types", "severity": "must", "kind": "exclude", "query": "我的性格、习惯和偏好是什么样的", "limit": 8, "expect_excluded_types": ["identity", "persona", "journal"]}
+{"id": "must-no-mood-doc", "severity": "must", "kind": "exclude", "query": "现在的心情和情绪状态怎么样", "limit": 8, "expect_not_ids": ["__mood__"]}
+{"id": "must-receipts-shape", "severity": "must", "kind": "shape", "query": "北单 赔率 同步", "limit": 3, "require_receipts": true}
+{"id": "noise-unknown-topic", "severity": "should", "kind": "noise", "query": "量子纠缠与烤面包机的耦合系数", "limit": 5, "expect_max_hits": 0}
+{"id": "must-recall-sanity", "severity": "must", "kind": "recall", "query": "北单 赔率 同步", "limit": 5, "expect_min_hits": 1}

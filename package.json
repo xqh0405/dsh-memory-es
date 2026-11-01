@@ -71,7 +71,10 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
     "eval": "node scripts/eval-search.ts",
     "eval:prod": "node scripts/eval-search.ts --gate",
-    "eval:thresholds": "node scripts/eval-thresholds.ts"
+    "eval:thresholds": "node scripts/eval-thresholds.ts",
+    "eval:contracts": "node scripts/eval-contracts.ts",
+    "eval:contracts:gate": "node scripts/eval-contracts.ts --gate",
+    "tune": "node scripts/tune.ts"
   },
   "icon": "./panel/icon.svg"
 }
