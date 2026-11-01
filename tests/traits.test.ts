@@ -496,3 +496,61 @@ test('提炼：写得太具体的候选会被丢弃，不计入写入', async ()
   assert.equal(result.concreteSkipped, 1, '具体那条应被丢弃')
   assert.equal(written.length, 1)
 })
+
+// ── 锚点：定过稿的条目用更严的阈值判重（用户 2026-11-01）──
+
+function dupDeps(hit: { score: number; anchor: boolean }) {
+  const deps = {
+    userId: 'tester',
+    personalPrefix: 'personal_memory_',
+    // 判重依赖向量服务：没有 embed/dims 就直接短路返回 null（按设计）
+    embed: { embed: async () => new Array(1024).fill(0.01) },
+    dims: 1024,
+    reader: {
+      search: async (_index: string, body: Record<string, unknown>) => {
+        const text = JSON.stringify(body)
+        // 判重走的 kNN 查询：返回一条「像但不够像」的既有自述
+        if (text.includes('"knn"')) {
+          return {
+            total: 1,
+            hits: [
+              {
+                id: 'old-1',
+                score: hit.score,
+                source: {
+                  memory_id: 'old-1',
+                  content: '你倾向于先给结论再解释理由',
+                  status: 'active',
+                  ...(hit.anchor ? { anchor: true } : {}),
+                },
+              },
+            ],
+          }
+        }
+        return { total: 0, hits: [] }
+      },
+    },
+    writer: { index: async () => ({ id: 'x', result: 'created', status: 200 }) },
+  }
+  return deps
+}
+
+test('判重：普通条目 0.85 不算重复（阈值 0.88）', async () => {
+  const { findTraitDuplicate } = await import('../src/memory/traits.ts')
+  const dup = await findTraitDuplicate(dupDeps({ score: 0.85, anchor: false }) as never, '你倾向于先给结论再解释')
+  assert.equal(dup, null)
+})
+
+test('判重：锚定条目 0.85 就算重复（阈值降到 0.82）', async () => {
+  const { findTraitDuplicate } = await import('../src/memory/traits.ts')
+  const dup = await findTraitDuplicate(dupDeps({ score: 0.85, anchor: true }) as never, '你倾向于先给结论再解释')
+  assert.ok(dup !== null, '锚定条目应该拦住')
+  assert.equal(dup.anchored, true)
+  assert.equal(dup.threshold, 0.82)
+})
+
+test('判重：锚定条目 0.80 仍然不算重复（比阈值低 0.02）', async () => {
+  const { findTraitDuplicate } = await import('../src/memory/traits.ts')
+  const dup = await findTraitDuplicate(dupDeps({ score: 0.8, anchor: true }) as never, '你倾向于先给结论再解释')
+  assert.equal(dup, null, '低于 0.82 不该拦')
+})

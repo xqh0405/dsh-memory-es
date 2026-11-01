@@ -117,6 +117,8 @@ export interface ConfigType {
     maxOutput: number
     /** 同义判定的 kNN 余弦阈值，越高越严 */
     dedupMinScore: number
+    /** 锚定条目的判重阈值（更严） */
+    dedupMinScoreAnchored: number
   }
   /** 阶段 9.5：每日回顾（把一天的对话压成一段，写进「日记」的回顾栏） */
   journal: {
@@ -292,6 +294,8 @@ export const Config: z<ConfigType> = z.object({
       .description('单次模型返回的候选上限，超出部分丢弃。默认 5。'),
     dedupMinScore: z.number().min(0.7).max(0.99).default(0.88)
       .description('同义判定阈值（kNN 余弦），越高越严。默认 0.88。'),
+    dedupMinScoreAnchored: z.number().min(0.6).max(0.99).default(0.82)
+      .description('锚定条目的判重阈值（更严，锚点=已定稿）。默认 0.82。'),
   }),
   // 阶段 9.5：每日回顾。默认开，但只在有足够对话时才真的调模型（少于 3 轮直接跳过）
   journal: z.object({

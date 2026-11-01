@@ -363,6 +363,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     // 单次模型返回上限与判重阈值
     maxOutput: config.traits.maxOutput,
     dedupMinScore: config.traits.dedupMinScore,
+    dedupMinScoreAnchored: config.traits.dedupMinScoreAnchored,
     now: () => new Date(),
     summarize: summarizeTraits,
     log: (event: Record<string, unknown>) => logger.info('traits %o', event),

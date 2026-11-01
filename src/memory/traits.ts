@@ -43,8 +43,22 @@ export const TRAIT_MIN_EVIDENCE = 2
  * 阈值定低了会把「同属一个主题但结论不同」的两条误判成重复。
  */
 export const TRAIT_DEDUP_MIN_SCORE = 0.9
-/** 判重只取最近邻几条：再多也只是噪声，我们要的是「有没有一条足够像的」 */
-export const TRAIT_DEDUP_TOPK = 5
+/**
+ * 锚定条目的判重阈值（比普通条目严）。
+ *
+ * 锚点 = 「这条我定稿了」。普通条目 0.88 是「差不多像」的门槛，锚定的用 0.82：
+ * 只要新候选和定稿版有八成像就不再产出。用户 2026-11-01 的要求——自述要少而准，
+ * 宁可漏掉一点新意，也不要每天冒出一条「又说了一遍」的。
+ */
+export const TRAIT_DEDUP_MIN_SCORE_ANCHORED = 0.82
+
+/**
+ * 判重只取最近邻几条。
+ *
+ * 从 5 提到 8：锚定条目要用更严的阈值，可它如果排在 5 名之外，kNN 根本不会返回它，
+ * 那道更严的闸就形同虚设。多取 3 条的成本可以忽略。
+ */
+export const TRAIT_DEDUP_TOPK = 8
 
 /**
  * 「写具体了」的硬标记。
@@ -146,6 +160,8 @@ export interface TraitsDeps {
   maxOutput?: number
   /** 同义判定阈值（kNN 余弦） */
   dedupMinScore?: number
+  /** 锚定条目的同义判定阈值（更严，默认 0.82） */
+  dedupMinScoreAnchored?: number
 
   dims?: number
   now?: () => Date
@@ -305,7 +321,7 @@ export async function countTraitsToday(deps: TraitsDeps): Promise<number> {
 export async function findTraitDuplicate(
   deps: TraitsDeps,
   content: string,
-): Promise<{ memory_id: string; score: number } | null> {
+): Promise<{ memory_id: string; score: number; anchored: boolean; threshold: number } | null> {
   const embed = deps.embed
   const dims = deps.dims
   if (embed === undefined || dims === undefined) return null
@@ -329,9 +345,14 @@ export async function findTraitDuplicate(
       const src = hit.source as Record<string, unknown>
       const status = typeof src.status === 'string' ? src.status : ''
       if (status !== TRAIT_STATUS && status !== 'active') continue
-      if (!(hit.score >= (deps.dedupMinScore ?? TRAIT_DEDUP_MIN_SCORE))) continue
+      // 锚定条目用更严的阈值：定过稿的那几条不该再冒出新版本
+      const anchored = src.anchor === true
+      const threshold = anchored
+        ? (deps.dedupMinScoreAnchored ?? TRAIT_DEDUP_MIN_SCORE_ANCHORED)
+        : (deps.dedupMinScore ?? TRAIT_DEDUP_MIN_SCORE)
+      if (!(hit.score >= threshold)) continue
       const memoryId = typeof src.memory_id === 'string' ? src.memory_id : hit.id
-      return { memory_id: memoryId, score: hit.score }
+      return { memory_id: memoryId, score: hit.score, anchored, threshold }
     }
     return null
   } catch (err) {
@@ -498,6 +519,8 @@ export async function runTraitsJob(
         event: 'skipped_duplicate',
         existing: dup.memory_id,
         score: Number(dup.score.toFixed(4)),
+        anchored: dup.anchored,
+        threshold: dup.threshold,
       })
       continue
     }

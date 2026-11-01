@@ -1722,6 +1722,12 @@ const EDITABLE = [
     type: 'number',
     hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.88',
   },
+  {
+    path: ['traits', 'dedupMinScoreAnchored'],
+    label: '锚定条目阈值',
+    type: 'number',
+    hint: '对已设锚点（定稿）的自述判重更严（0.6~0.99），默认 0.82',
+  },
 ]
 
 function pick(config, path) {
@@ -1855,6 +1861,9 @@ async function handleConfigWrite(ctx, res, req) {
     }
     if (change.key === 'traits.dedupMinScore' && (!Number.isFinite(value) || value < 0.7 || value > 0.99)) {
       return json(res, 400, { ok: false, error: `判重阈值要是 0.7~0.99 之间的小数，现在是「${value}」` })
+    }
+    if (change.key === 'traits.dedupMinScoreAnchored' && (!Number.isFinite(value) || value < 0.6 || value > 0.99)) {
+      return json(res, 400, { ok: false, error: `锚定条目阈值要是 0.6~0.99 之间的小数，现在是「${value}」` })
     }
   }
 
