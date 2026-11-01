@@ -450,3 +450,49 @@ test('配额：maxPerDay 生效，单次模型吐 8 条也只写 5 条', async (
   assert.equal(result.quotaSkipped, 3)
   assert.equal(written.length, 5)
 })
+
+// ── 抽象度：具体到项目操作就不该进候选（用户 2026-11-01："不要这么具体"）──
+
+test('isTooConcrete：命令/路径/端口/字段名/版本号都算太具体', async () => {
+  const { isTooConcrete } = await import('../src/memory/traits.ts')
+  const tooConcrete = [
+    'framework 改动必须先 `mvn deploy` 到 Nexus 再触发构建',
+    '改完要去 /data/dsh/profiles 里确认',
+    'ES 只绑在 192.168.50.125:9200',
+    '写之前先看 t_lottery_order 的 win_price 列',
+    '镜像要打 v0.4.0 这个 tag',
+  ]
+  for (const text of tooConcrete) {
+    assert.equal(isTooConcrete(text), true, `应判为太具体：${text}`)
+  }
+})
+
+test('isTooConcrete：抽象表述不该被误杀', async () => {
+  const { isTooConcrete } = await import('../src/memory/traits.ts')
+  const fine = [
+    '你倾向于先给结论再解释理由',
+    '判断是否生效看外部可验证的结果，而不是返回值有没有报错',
+    '破坏性变更先完成不可逆的前置准备，再动代码',
+    '处理时间先确认时区，再下结论',
+    '排查数据库问题时先看执行计划',
+  ]
+  for (const text of fine) {
+    assert.equal(isTooConcrete(text), false, `不该判为太具体：${text}`)
+  }
+})
+
+test('提炼：写得太具体的候选会被丢弃，不计入写入', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(0)
+  const mixed = JSON.stringify([
+    { content: '改动要先 `docker compose up` 再验证', evidence_ids: ['m1', 'm2'] },
+    { content: '你判断是否生效看外部可验证的结果，而不是返回值', evidence_ids: ['m1', 'm2'] },
+  ])
+  const result = await runTraitsJob(
+    { ...deps, maxPerDay: 5, maxOutput: 5 } as never,
+    { days: 7, summarize: async () => mixed },
+  )
+  assert.equal(result.written, 1, '抽象那条应写入')
+  assert.equal(result.concreteSkipped, 1, '具体那条应被丢弃')
+  assert.equal(written.length, 1)
+})

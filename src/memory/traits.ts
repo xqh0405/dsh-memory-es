@@ -46,25 +46,68 @@ export const TRAIT_DEDUP_MIN_SCORE = 0.9
 /** 判重只取最近邻几条：再多也只是噪声，我们要的是「有没有一条足够像的」 */
 export const TRAIT_DEDUP_TOPK = 5
 
+/**
+ * 「写具体了」的硬标记。
+ *
+ * 提示词里已经要求抽象、还给了正误对比，但模型仍会把项目细节包进「倾向」的句式里
+ * （「破坏性变更会先…先 mvn deploy 到 Nexus」——句式是倾向，内容是项目操作）。
+ * 2026-11-01 用户看到 17 条候选后明确说「不要这么具体」，所以这里再加一道**代码级**的闸：
+ * 出现下列任何标记就不是「做事方式」，是「这个项目怎么做」。
+ *
+ * 只收那些**几乎不可能**出现在抽象倾向里的东西（反引号命令、路径、端口、
+ * 下划线标识符、版本号）。像 SQL / JVM 这类技术名词不算——换个项目照样成立。
+ */
+const CONCRETE_MARKERS: readonly RegExp[] = [
+  /`[^`]+`/,
+  /(?:^|\s)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/,
+  /:\d{2,5}\b/,
+  /\b[a-z][a-z0-9]*_[a-z0-9_]+\b/,
+  /\b(?:mvn|docker|kubectl|helm|npm|pnpm|grep|awk|sed|curl|wget|systemctl|journalctl)\s+\S/,
+  /\bv?\d+\.\d+\.\d+\b/,
+]
+
+/** 这条候选是不是「太具体」了（命中任一硬标记）。 */
+export function isTooConcrete(content: string): boolean {
+  return CONCRETE_MARKERS.some((re) => re.test(content))
+}
+
 export const TRAITS_SYSTEM = [
-  '你是一个记忆整理器。你的任务是：从一个人最近的记忆条目里，归纳出关于这个人自己的、稳定的模式。',
+  '你是一个记忆整理器。你的任务是：从一个人最近的记忆条目里，归纳出关于他自己的、稳定的**做事方式**。',
   '',
-  '什么算「稳定的模式」：',
-  '- 反复出现的工作方式（例如：总是先给结论再解释）',
-  '- 一贯的偏好与取舍（例如：宁可慢一点也不要静默失败）',
-  '- 明确的判断准则（例如：不确定时承认不确定，不猜）',
+  '## 什么叫「稳定的做事方式」',
   '',
-  '什么不算：',
-  '- 具体事件与一次性决定（那属于普通记忆，不需要提升）',
-  '- 项目里的事实（技术栈、端口、路径）',
+  '一句话能说清、换一个项目依然成立的那种。例如：',
+  '- 「先给结论再解释理由」',
+  '- 「判断是否生效看外部可验证的结果，而不是返回值有没有报错」',
+  '- 「破坏性变更先完成不可逆的前置准备，再动代码」',
+  '',
+  '## 什么不算（这一条最重要，请严格）',
+  '',
+  '- **具体事件、一次性决定、某个项目的操作细节** —— 那是普通记忆，不需要提升',
+  '- 任何**只在这个项目里成立**的说法：项目名、产品名、仓库名、命令、函数或字段名、',
+  '  文件路径、端口号、数据库表名、版本号、机器名、具体配置项',
   '- 只出现一次的行为',
   '',
-  '硬性要求：',
-  '1. 每条必须能独立成立，读者不知道上下文也能看懂；不要写「上面提到的」「这些记忆里」。',
-  '2. 每条必须由至少 2 条记忆支撑，并给出支撑条目的 id。**例外**：素材里标注 (preference) 的条目是用户明确表达的偏好与规矩，它本身就是直接证据，1 条即可支撑；其它类型（fact/decision/context）仍需至少 2 条互相印证——那才叫归纳，否则只是复述。',
-  '3. 用第二人称写（"你倾向于……"）或中性陈述，不要写"用户"。',
-  `4. 每条不超过 ${TRAIT_MAX_CHARS} 字，一次最多 ${TRAITS_MAX_OUTPUT} 条。`,
-  '5. 如果看不出任何稳定的模式，输出空数组 []。**宁可空，不要凑**。',
+  '判断标准：**把项目名全部换掉，这句话还成立吗？** 不成立就说明它太具体，要往上抽象一层。',
+  '',
+  '正误对比（左边不要，右边才对）：',
+  '- ❌「framework 改动必须先 mvn deploy 到 Nexus 再触发构建」',
+  '  ✅「有依赖关系的变更按依赖顺序落地，先准备好下游再改上游」',
+  '- ❌「UPDATE 后核对 rowcount、构建看镜像 digest」',
+  '  ✅「不相信返回值，用独立手段复核实际结果」',
+  '- ❌「容器里 TZ=Asia/Shanghai 而 CI 是 UTC，裸 datetime.now() 差 8 小时」',
+  '  ✅「处理时间先确认时区，再下结论」',
+  '- ❌「15 场北单 12/13/14/15 串 1 真实 58 万注 vs 预算 4096」',
+  '  ✅「估算量级时按最坏组合算，不用理想情况的乘积」',
+  '',
+  '## 硬性要求',
+  '',
+  '1. 每条必须能独立成立，读者不知道任何上下文也能看懂；不要写「上面提到的」「这些记忆里」。',
+  `2. 每条尽量控制在 60 字以内、不超过 ${TRAIT_MAX_CHARS} 字。**写得越具体越没有价值**。`,
+  '3. 每条必须由至少 2 条记忆支撑，并给出支撑条目的 id。**例外**：素材里标注 (preference) 的条目是用户明确表达的偏好与规矩，它本身就是直接证据，1 条即可支撑；其它类型（fact/decision/context）仍需至少 2 条互相印证——那才叫归纳，否则只是复述。',
+  '4. 用第二人称写（"你倾向于……"）或中性陈述，不要写"用户"。',
+  `5. 一次最多 ${TRAITS_MAX_OUTPUT} 条。如果看不出任何稳定的模式，输出空数组 []。**宁可空，不要凑**。`,
+  '6. 不要用反引号包裹命令或字段名——出现这种东西就说明你写具体了。',
   '',
   '输出格式（只输出 JSON，不要解释）：',
   '[',
@@ -355,9 +398,13 @@ export interface TraitsResult {
   duplicates: number
   /** 因「今天已写满 maxPerDay」而被跳过的条数 */
   quotaSkipped: number
+  /** 因「写得太具体」（含命令/路径/端口/字段名）而被丢弃的条数 */
+  concreteSkipped: number
   /** 当天配额上限：只在「配额用完」时带出来给文案用 */
   maxPerDay?: number
   skipped: string | null
+  /** 干跑时有候选：直接列出它们的内容（干跑就是为了先看产出，只看数量没法评估） */
+  candidatePreview?: string
   /** 干跑时带上模型原始输出（前 200 字符）：空数组和「解析失败」结果一样，必须能区分 */
   rawPreview?: string
   /** 原始输出总长度：与 rawPreview 对比可判断是否被 maxTokens 截断 */
@@ -380,7 +427,7 @@ export async function runTraitsJob(
   const sources = await collectTraitSources(deps, input.days)
   if (sources.length < TRAIT_MIN_EVIDENCE) {
     log({ tool: 'traits', skipped: 'too_few_sources', sources: sources.length })
-    return { sources: sources.length, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, skipped: 'too_few_sources' }
+    return { sources: sources.length, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, concreteSkipped: 0, skipped: 'too_few_sources' }
   }
 
   const raw = await input.summarize(buildTraitsPrompt(sources, input.days))
@@ -398,6 +445,9 @@ export async function runTraitsJob(
       skipped: 'dry_run',
       duplicates: 0,
       quotaSkipped: 0,
+      concreteSkipped: 0,
+      // 有候选就把内容列出来：不然干跑只回一句「5 条候选」，用户没法判断质量
+      candidatePreview: candidates.map((c, i) => `${i + 1}. ${c.content}`).join('\n').slice(0, 1200),
       // 诊断用：空数组、格式没解析出来、JSON 被截断，在结果上一模一样，必须能区分
       rawPreview: raw.slice(0, 200),
       rawLength: raw.length,
@@ -417,6 +467,7 @@ export async function runTraitsJob(
       written: 0,
       duplicates: 0,
       quotaSkipped: 0,
+      concreteSkipped: 0,
       skipped: 'quota_exhausted',
       maxPerDay,
     }
@@ -425,10 +476,17 @@ export async function runTraitsJob(
   let written = 0
   let duplicates = 0
   let quotaSkipped = 0
+  let concreteSkipped = 0
   for (const trait of candidates) {
     // 名额用完就停：剩下的不是「重复」，而是「今天看不过来了」
     if (written >= quota) {
       quotaSkipped += 1
+      continue
+    }
+    // 太具体的直接丢：那是项目操作，不是做事方式
+    if (isTooConcrete(trait.content)) {
+      concreteSkipped += 1
+      log({ tool: 'traits', event: 'skipped_concrete', preview: trait.content.slice(0, 60) })
       continue
     }
     // 先看有没有同义候选：模型每批都换句措辞，只靠精确内容哈希拦不住
@@ -459,7 +517,7 @@ export async function runTraitsJob(
     usedToday,
     maxPerDay,
   })
-  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, skipped: null }
+  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, concreteSkipped, skipped: null }
 }
 
 /** 与 save.ts 一致的内容归一化哈希口径（便于两边判重口径相同） */
@@ -519,11 +577,13 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
           written: { type: 'number', required: true },
           duplicates: { type: 'number', required: true },
           quotaSkipped: { type: 'number', required: true },
+          concreteSkipped: { type: 'number', required: true },
           // 只在「配额用完」时返回：output schema 是 additionalProperties:false，
           // 漏声明一个字段整个工具就报错（2026-11-01 实测）
           maxPerDay: { type: 'number' },
           skipped: { type: 'string', required: true },
           // 诊断三件套：schema 是 additionalProperties:false，漏一个字段工具就整体报错
+          candidatePreview: { type: 'string' },
           rawPreview: { type: 'string' },
           rawLength: { type: 'number' },
           rawTail: { type: 'string' },
@@ -539,7 +599,7 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
       const dryRun = input.dry_run !== false
       const summarize = deps.summarize
       if (summarize === undefined) {
-        return { sources: 0, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
+        return { sources: 0, candidates: 0, written: 0, duplicates: 0, quotaSkipped: 0, concreteSkipped: 0, skipped: 'no_llm_service', text: '没有可用的模型服务，本次没有提炼（记忆库本身不受影响）。' }
       }
       const result = await runTraitsJob(deps, { days, summarize, dryRun })
       return { ...result, skipped: result.skipped ?? '', text: renderTraitsText(result, days, dryRun) }
@@ -558,6 +618,9 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
   }
   if (result.skipped === 'dry_run') {
     const base = `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选（干跑，未落库）。要落库请用 dry_run=false。`
+    if (result.candidates > 0 && result.candidatePreview !== undefined) {
+      return `${base}\n\n${result.candidatePreview}`
+    }
     // 0 条时把模型原话带出来：空数组（真的看不出）与格式没解析（模型说了但没解析出来）必须能区分
     if (result.candidates === 0 && result.rawPreview !== undefined) {
       const tail = result.rawTail === undefined ? '' : `\n结尾（判断是否被截断）：\n${result.rawTail}`
@@ -572,5 +635,8 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
   const quotaNote = result.quotaSkipped > 0
     ? `，另有 ${result.quotaSkipped} 条因为今天名额已满没写（明天再提）`
     : ''
-  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${quotaNote}。`
+  const concreteNote = result.concreteSkipped > 0
+    ? `，丢弃 ${result.concreteSkipped} 条写得太具体的（含命令/路径/字段名，那属于项目操作不是做事方式）`
+    : ''
+  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${concreteNote}${quotaNote}。`
 }
