@@ -443,7 +443,6 @@ window.__ModuleLoader__.load({
 
     // ── 样式（全部走主题 token，不写死颜色）─────────────────────────────
     const S = {
-      wrap: { padding: '4px 2px 12px' },
       wrapMain: { padding: 0 },
       // 主区全局面板的骨架：照 DSH 官方页面（插件管理 / 计划任务）的尺寸。
       //
@@ -481,15 +480,6 @@ window.__ModuleLoader__.load({
         maxWidth: 1280, margin: '0 auto',
         padding: '18px clamp(20px, 2.5vw, 32px) 48px',
       },
-      workspaceHeading: {
-        display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
-        gap: 16, marginBottom: 20,
-        // darwin 上要躲开窗口拖拽带；变量未定义时按 0px 算
-        paddingTop: 'calc(28px + var(--dsh-frame-top-clearance, 0px))',
-      },
-      workspaceTitle: { margin: 0, fontSize: 20, fontWeight: 500, lineHeight: '28px' },
-      h2: { margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
-      sub: { margin: '0 0 14px', fontSize: 13, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' },
       tabs: { display: 'flex', gap: 4, borderBottom: '1px solid var(--dsw-alias-border-l1)', marginBottom: 14 },
       tab: (active) => ({
         appearance: 'none',
@@ -2391,8 +2381,8 @@ window.__ModuleLoader__.load({
      *  - `settings`（设置里的「记忆库」节）：改东西的地方——配置 / 维护。
      * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
      */
-    function MemoryPanel({ t, mode = 'settings', onStatus }) {
-      const [tab, setTab] = React.useState(mode === 'main' ? 'overview' : 'config')
+    function MemoryPanel({ t, onStatus }) {
+      const [tab, setTab] = React.useState('overview')
       // 工具条要显示 ES 状态与版本：由这里回报（它本来就要拉 overview），
       // 用 ref 存回调，免得把 onStatus 塞进 loadOverview 的依赖里导致重复请求。
       const statusRef = React.useRef(onStatus)
@@ -2444,29 +2434,20 @@ window.__ModuleLoader__.load({
         firstLoad.current = false
       }, [tab, loadOverview])
 
-      return h('div', { style: mode === 'main' ? S.wrapMain : S.wrap },
-        mode === 'main' ? null : h('h2', { style: S.h2 }, t('title')),
-        mode === 'main'
-          ? null
-          : h('p', { style: S.sub },
-              `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'}`),
+      return h('div', { style: S.wrapMain },
         h('div', { style: S.tabs, [TABS_ATTR]: '' },
-          (mode === 'main'
-            ? [
-                ['overview', t('tabOverview')],
-                ['browse', t('tabBrowse')],
-                // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
-                ['identity', t('tabIdentity')],
-                ['persona', t('tabPersona')],
-                // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
-                ...(caps.canReview ? [['review', t('tabReview')]] : []),
-              ]
-            : [
-                // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
-                ...(caps.canReview ? [['maint', t('tabMaint')]] : []),
-                ['config', t('tabConfig')],
-              ]
-          ).map(([value, label]) =>
+          [
+            ['overview', t('tabOverview')],
+            ['browse', t('tabBrowse')],
+            // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
+            ['identity', t('tabIdentity')],
+            ['persona', t('tabPersona')],
+            // 审核台 = 写团队库的权限；没有就不显示（后端也会 403）
+            ...(caps.canReview ? [['review', t('tabReview')]] : []),
+            // 维护 = 整理任务 / 导出镜像，只有管理员可见（后端三个接口也会 403）
+            ...(caps.canReview ? [['maint', t('tabMaint')]] : []),
+            ['config', t('tabConfig')],
+          ].map(([value, label]) =>
             h('button', {
               key: value,
               type: 'button',
@@ -2558,7 +2539,7 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: S.workspaceScroll },
           h('div', { style: S.workspaceContent },
-            h(MemoryPanel, { t, mode: 'main', onStatus: setStatus }),
+            h(MemoryPanel, { t, onStatus: setStatus }),
           ),
         ),
       )
@@ -2599,14 +2580,6 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
           return () => style.remove()
         })
-
-        // 设置里的「记忆库」节：只留配置 / 维护（主区负责看，设置负责改）
-        ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section',
-          id: 'memory-es',
-          order: 60,
-          label: () => t('sectionLabel'),
-        }, (props) => h(MemoryPanel, { ...props, t })))
 
         // 主区全局面板 + 侧栏入口（order 31：紧跟 dsh-mnemon 的「记忆系统」30）
         //

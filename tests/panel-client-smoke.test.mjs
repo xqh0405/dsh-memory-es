@@ -80,19 +80,21 @@ function run(withLayout = true) {
   return { injected, registered, localeDictionaries, disposed, effects, panelSelections }
 }
 
-// ── 1. 有 layout：三个槽位都要注册 ────────────────────────────────────
+// ── 1. 有 layout：主区与侧栏入口都要注册，且**不再注册设置节** ──────────
+// 2026-11-01 用户定：功能全部放主区，不要"设置里一份、主区一份"。
 const full = run(true)
 console.log('  注入的槽位:', JSON.stringify(full.injected))
 console.log('  注册项:', JSON.stringify(full.registered.map((item) => item.meta.name)))
-if (!full.injected.includes('settings.section')) throw new Error('缺少 settings.section 注册')
 if (!full.injected.includes('main')) throw new Error('缺少 main 注册（主区面板）')
 if (!full.injected.includes('sidebar.panellist')) throw new Error('缺少 sidebar.panellist 注册（侧栏入口）')
+if (full.injected.includes('settings.section')) {
+  throw new Error('settings.section 不应再注册——功能已经统一到主区，两处各一份是这次要去掉的状态')
+}
 
 const byName = (name) => full.registered.find((item) => item.meta.name === name)
-const settingsSlot = byName('settings.section')
 const mainSlot = byName('main')
 const sidebarSlot = byName('sidebar.panellist')
-for (const [label, item] of [['settings.section', settingsSlot], ['main', mainSlot], ['sidebar.panellist', sidebarSlot]]) {
+for (const [label, item] of [['main', mainSlot], ['sidebar.panellist', sidebarSlot]]) {
   if (!item) throw new Error(`没有注册组件：${label}`)
 }
 
@@ -121,10 +123,6 @@ if (full.panelSelections.length !== 1 || full.panelSelections[0] !== null) {
   throw new Error(`close 应调用 selectPanel(null)，实际 ${JSON.stringify(full.panelSelections)}`)
 }
 console.log('  返回会话 → selectPanel:', JSON.stringify(full.panelSelections))
-
-// ── 5. 设置节仍在，且拿到的 props 会透传给组件 ────────────────────────
-const settingsTree = settingsSlot.Component({ close: () => {}, t })
-if (!settingsTree || settingsTree.type === undefined) throw new Error('设置节没有渲染出组件')
 
 // ── 6. layout 服务缺席（初始化顺序晚于本插件）时，注册照样完成、close 只是不做事 ──
 // 这是 2026-11-01 实测踩到的真因：先前用 `if (ctx.get('layout'))` 守卫整组注册，
