@@ -609,3 +609,85 @@ test('可编辑字段白名单：es.url / caCertPath 必须不可写（凭据外
     assert.ok(keys.includes(needed), `${needed} 应当仍可编辑`)
   }
 })
+
+// ── 表情包预览：宿主从这里把图片读给浏览器，是新增的对外读取面，规则要钉住 ──────
+function fakeBinaryRes() {
+  return {
+    statusCode: 0,
+    headers: {},
+    body: null,
+    writeHead(status, headers) {
+      this.statusCode = status
+      this.headers = headers ?? {}
+    },
+    end(body) {
+      this.body = body
+    },
+  }
+}
+
+function stickerCtx(dir) {
+  return {
+    get: (name) =>
+      name === 'configEditor'
+        ? {
+            configuration: () => [
+              {
+                entry: { id: 'dsh-memory-es' },
+                // findEntryRow 要「真的带 es.url + userId」的行才算数（空条目会被跳过）
+                inherited: { es: { url: 'https://example:9200' }, identity: { userId: 'xqh' }, stickers: { dir } },
+                override: undefined,
+              },
+            ],
+          }
+        : undefined,
+  }
+}
+
+test('resolveStickerDir：~ 开头的按家目录展开，绝对路径原样', async () => {
+  const { resolveStickerDir } = await import('../panel/index.js')
+  const home = os.homedir()
+  assert.equal(resolveStickerDir({ value: { stickers: { dir: '~/.dsh/stickers' } } }), path.join(home, '.dsh/stickers'))
+  assert.equal(resolveStickerDir({ value: { stickers: { dir: '~' } } }), home)
+  assert.equal(resolveStickerDir({ value: { stickers: { dir: '/srv/pics' } } }), '/srv/pics')
+  // 没配就回落默认目录，不能变成"读当前工作目录"
+  assert.equal(resolveStickerDir({ value: {} }), path.join(home, '.dsh/stickers'))
+})
+
+test('表情包预览：只读同目录图片，路径穿越与非图片一律 400', async () => {
+  const { handleStickerImageGet } = await import('../panel/index.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-sticker-'))
+  fs.writeFileSync(path.join(dir, 'ok.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  fs.writeFileSync(path.join(dir, 'note.txt'), 'not an image')
+  fs.mkdirSync(path.join(dir, 'sub'))
+  fs.writeFileSync(path.join(dir, 'sub', 'inner.png'), 'x')
+  // 上级目录的图片：用来验证 ../ 被挡住
+  fs.writeFileSync(path.join(os.tmpdir(), 'mem-sticker-outside.png'), 'x')
+
+  const ctx = stickerCtx(dir)
+  const call = (file) => {
+    const res = fakeBinaryRes()
+    return handleStickerImageGet(ctx, res, new URL(`http://x/sticker?file=${encodeURIComponent(file)}`)).then(() => res)
+  }
+
+  const ok = await call('ok.png')
+  assert.equal(ok.statusCode, 200)
+  assert.equal(ok.headers['content-type'], 'image/png')
+  assert.ok(Buffer.isBuffer(ok.body), '图片必须按二进制原样返回')
+
+  // 这三条是安全边界：能读到目录外、能读非图片、能靠子目录绕，都等于把宿主文件系统开了个口子
+  for (const [file, why] of [
+    ['../mem-sticker-outside.png', '上级目录'],
+    ['sub/inner.png', '子目录'],
+    ['/etc/passwd', '绝对路径'],
+    ['note.txt', '非图片文件'],
+    ['ok.svg', 'svg（可带脚本）'],
+  ]) {
+    const res = await call(file)
+    assert.equal(res.statusCode, 400, `${why} 应当被拒绝：${file}`)
+  }
+
+  const missing = await call('none.png')
+  assert.equal(missing.statusCode, 404)
+  assert.match(String(missing.body), /文件不存在/)
+})

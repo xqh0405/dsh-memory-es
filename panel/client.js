@@ -77,6 +77,7 @@ window.__ModuleLoader__.load({
       colContent: '内容',
       colLabel: '名称',
       colFile: '文件',
+      colPreview: '预览',
       kindPersona: '人格',
       kindIdentity: '自述',
       stateActive: '生效中',
@@ -284,6 +285,7 @@ window.__ModuleLoader__.load({
       colContent: 'Content',
       colLabel: 'Label',
       colFile: 'File',
+      colPreview: 'Preview',
       kindPersona: 'Persona',
       kindIdentity: 'Identity',
       stateActive: 'active',
@@ -569,6 +571,15 @@ window.__ModuleLoader__.load({
         verticalAlign: 'top',
       },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11.5 },
+      // 表情包缩略图：正方形、不裁切（表情包常有透明边与不规则构图，contain 比 cover 更忠实）
+      stickerThumb: {
+        width: 48,
+        height: 48,
+        objectFit: 'contain',
+        borderRadius: 8,
+        display: 'block',
+        background: 'var(--dsw-alias-bg-layer-2)',
+      },
       pill: (tone) => ({
         display: 'inline-block',
         padding: '1px 7px',
@@ -1413,13 +1424,24 @@ window.__ModuleLoader__.load({
                   h('thead', null, h('tr', null,
                     h('th', { style: S.th }, t('colLabel')),
                     h('th', { style: S.th }, t('colWhen')),
-                    h('th', { style: S.th }, t('colFile')),
+                    h('th', { style: S.th }, t('colPreview')),
                     h('th', { style: S.th }, ''))),
                   h('tbody', null,
                     stickerRows.map((item) => h('tr', { key: item.id || item.file },
                       h('td', { style: S.td, children: item.label }),
                       h('td', { style: S.td, children: item.when }),
-                      h('td', { style: { ...S.td, ...S.mono }, children: item.file }),
+                      // 预览走宿主接口：浏览器读不了 ~/.dsh/stickers。
+                      // 文件名留在 title/alt 里，悬停仍能看到是哪个文件。
+                      h('td', { style: S.td },
+                        item.exists
+                          ? h('img', {
+                              src: `${API}/sticker?file=${encodeURIComponent(item.file)}`,
+                              alt: item.file,
+                              title: item.file,
+                              loading: 'lazy',
+                              style: S.stickerThumb,
+                            })
+                          : h('span', { style: { ...S.mono, opacity: 0.75 }, children: item.file })),
                       h('td', { style: S.td },
                         h('span', { style: S.pill(item.exists ? 'ok' : 'warn') },
                           item.exists ? '✓' : t('personaStickerMissing')))))))),

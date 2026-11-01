@@ -13,9 +13,9 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, extname, join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
 import { createReadClient } from './es.js'
 
@@ -844,6 +844,73 @@ async function handlePersonaGet(ctx, res) {
 }
 
 /**
+ * 表情包目录：配置里可能是 `~`、`~/xxx` 或绝对路径。
+ * 列表与缩略图两条路都用它，免得两边各算一次、算歪了就是「列得出来但读不到图」。
+ */
+function resolveStickerDir(configRow) {
+  const stickers = configRow.value.stickers ?? {}
+  const rawDir = str(stickers.dir) === '' ? '~/.dsh/stickers' : str(stickers.dir)
+  if (rawDir === '~') return homedir()
+  return rawDir.startsWith('~/') ? join(homedir(), rawDir.slice(2)) : rawDir
+}
+
+/** 允许预览的图片类型（不收 svg：它能带脚本）。 */
+const STICKER_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+/** 单张图上限：面板只做预览，超大的图不该顺着这个接口灌进浏览器。 */
+const STICKER_MAX_BYTES = 5 * 1024 * 1024
+
+/**
+ * 阶段 9.4 补：表情包缩略图。
+ *
+ * 浏览器读不了 `~/.dsh/stickers`（那是宿主的磁盘），所以面板里的预览必须由宿主读给它。
+ * 安全靠两条硬规则：
+ *  1. `basename(file) === file` —— 挡住 `../` 与绝对路径，只能读该目录下的文件；
+ *  2. 扩展名白名单 —— 挡住 svg（可带脚本）以及目录里的任何非图片文件。
+ */
+async function handleStickerImageGet(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const dir = resolveStickerDir(configRow)
+  const requested = str(url.searchParams.get('file') ?? '')
+  const name = basename(requested)
+  const ext = extname(name).toLowerCase()
+  if (name === '' || name !== requested || !(ext in STICKER_MIME)) {
+    return json(res, 400, { ok: false, error: '只支持读取表情包目录里的图片文件' })
+  }
+  const abs = join(dir, name)
+  let size = 0
+  try {
+    size = statSync(abs).size
+  } catch {
+    return json(res, 404, { ok: false, error: `文件不存在：${name}` })
+  }
+  if (size > STICKER_MAX_BYTES) {
+    return json(res, 413, { ok: false, error: `图片超过 5 MiB：${name}` })
+  }
+  let body
+  try {
+    body = readFileSync(abs)
+  } catch (error) {
+    return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+  }
+  res.writeHead(200, {
+    'content-type': STICKER_MIME[ext],
+    'content-length': body.length,
+    // 文件名一般不变、内容偶尔替换：5 分钟够用，别每次展开卡片都重读一遍
+    'cache-control': 'private, max-age=300',
+    'content-disposition': 'inline',
+  })
+  res.end(body)
+}
+
+/**
  * 阶段 9.4：表情包。
  *
  * 图片不进仓库（阶段 9.2 定的），所以这里只负责**列出目录里实际有什么**：
@@ -854,8 +921,7 @@ async function handleStickersGet(ctx, res) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
   const stickers = configRow.value.stickers ?? {}
-  const rawDir = str(stickers.dir) === '' ? '~/.dsh/stickers' : str(stickers.dir)
-  const dir = rawDir === '~' ? homedir() : rawDir.startsWith('~/') ? join(homedir(), rawDir.slice(2)) : rawDir
+  const dir = resolveStickerDir(configRow)
 
   let items = []
   let error = ''
@@ -1864,6 +1930,7 @@ async function handle(ctx, req, res) {
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
     if (path === '/persona') return await handlePersonaGet(ctx, res)
     if (path === '/stickers') return await handleStickersGet(ctx, res)
+    if (path === '/sticker') return await handleStickerImageGet(ctx, res, url)
     if (path === '/diary') return await handleDiaryGet(ctx, res, url)
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
@@ -2223,12 +2290,14 @@ export {
   handleMaintenanceGet,
   handleMemories,
   handleReviewAction,
+  handleStickerImageGet,
   handleUsers,
   indexNames,
   mergeConfig,
   pendingQuery,
   probeDeleteRights,
   projectHit,
+  resolveStickerDir,
   EDITABLE,
 }
 
