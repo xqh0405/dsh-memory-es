@@ -2223,6 +2223,36 @@ const EDITABLE = [
     default: 0.82,
     hint: '对已设锚点（定稿）的自述判重更严（0.6~0.99），默认 0.82',
   },
+  // 阶段 12：检索侧三个开关（默认都不改变现有行为）
+  {
+    path: ['retrieval', 'defaultDetail'],
+    label: '缺省返回详略',
+    type: 'string',
+    default: 'full',
+    hint: 'full = 正文最多 500 字（默认）；summary = 摘要 + 120 字，省 ~73% token，模型需要时用 memory_get 展开',
+  },
+  {
+    path: ['retrieval', 'maxPerDomain'],
+    label: '同域条数上限',
+    type: 'number',
+    default: 0,
+    hint: '结果多样化：同一 domain 最多保留几条（0 = 关闭，默认关）',
+  },
+  {
+    path: ['ranking', 'utilityWeight'],
+    label: '效用信号强度',
+    type: 'number',
+    default: 0,
+    hint: '按 👍/👎 提权：score × (1 + w × log1p(点赞−点踩))；0 = 关闭（默认），负效用不惩罚',
+  },
+  // 阶段 12：命中后供给（会改变回答风格，默认关）
+  {
+    path: ['prompt', 'citation'],
+    label: '回答标注出处',
+    type: 'boolean',
+    default: false,
+    hint: '打开后模型引用记忆时会标 id 前 8 位；会改变回答风格，默认关',
+  },
 ]
 
 function pick(config, path) {
@@ -2366,6 +2396,17 @@ async function handleConfigWrite(ctx, res, req) {
     }
     if (change.key === 'traits.dedupMinScoreAnchored' && (!Number.isFinite(value) || value < 0.6 || value > 0.99)) {
       return json(res, 400, { ok: false, error: `锚定条目阈值要是 0.6~0.99 之间的小数，现在是「${value}」` })
+    }
+    // 阶段 12/13：这三个是**枚举/开关**，写错不是"不好看"——插件 apply() 里
+    // validateConfig 不通过会直接 throw，下次重启整个插件都不加载。所以在这里拦住。
+    if (change.key === 'retrieval.defaultDetail' && value !== 'full' && value !== 'summary') {
+      return json(res, 400, { ok: false, error: `缺省返回详略只能是 full 或 summary，现在是「${value}」` })
+    }
+    if (change.key === 'retrieval.maxPerDomain' && (!Number.isInteger(value) || value < 0 || value > 20)) {
+      return json(res, 400, { ok: false, error: `同域条数上限要是 0~20 的整数（0 = 关闭），现在是「${value}」` })
+    }
+    if (change.key === 'ranking.utilityWeight' && (!Number.isFinite(value) || value < 0 || value > 2)) {
+      return json(res, 400, { ok: false, error: `效用信号强度要是 0~2 之间的小数（0 = 关闭），现在是「${value}」` })
     }
   }
 
