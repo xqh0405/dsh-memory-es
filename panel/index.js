@@ -394,7 +394,28 @@ function projectHit(hit, scope) {
     sourceUser: str(source.source_user),
     sourceMemoryId: str(source.source_memory_id),
     promoteState: str(source.promote_state),
+    // 命中理由：`score` 是 BM25 分（只在搜索时有），`highlights` 是「哪几个字段、命中了什么」
+    score: typeof hit._score === 'number' ? Math.round(hit._score * 100) / 100 : undefined,
+    highlights: projectHighlights(hit.highlight),
   }
+}
+
+/**
+ * 把 ES 的 highlight 压成前端能直接渲染的形状。
+ *
+ * 片段里命中的词用 \u0001/\u0002 包着（不用 <mark>）——这样前端可以自己切分、
+ * 用自己的元素渲染，避免把记忆内容当 HTML 塞进页面（记忆正文里可能出现任何字符）。
+ */
+function projectHighlights(highlight) {
+  if (highlight === null || typeof highlight !== 'object') return []
+  const out = []
+  for (const [field, fragments] of Object.entries(highlight)) {
+    if (!Array.isArray(fragments) || fragments.length === 0) continue
+    const text = String(fragments[0])
+    if (text === '') continue
+    out.push({ field, text })
+  }
+  return out
 }
 
 /**
@@ -784,7 +805,20 @@ async function handleMemories(ctx, res, url) {
       track_total_hits: true,
       _source: { excludes: ['embedding'] },
       query: { bool: { must, filter } },
-      sort: [{ updated_at: 'desc' }],
+      // 搜索时去掉按时间的排序，让 ES 按相关性返回（否则命中理由就没意义了）
+      ...(query === ''
+        ? { sort: [{ updated_at: 'desc' }] }
+        : {
+            highlight: {
+              // 用哨兵字符而不是 <mark>：前端自己切分渲染，避免把正文当 HTML
+              pre_tags: ['\u0001'],
+              post_tags: ['\u0002'],
+              fields: {
+                content: { fragment_size: 140, number_of_fragments: 1 },
+                topic_key: { number_of_fragments: 0 },
+              },
+            },
+          }),
     }
   }
 
@@ -797,7 +831,11 @@ async function handleMemories(ctx, res, url) {
   const merged = [
     ...(personal.hits?.hits ?? []).map((hit) => projectHit(hit, 'personal')),
     ...(team.hits?.hits ?? []).map((hit) => projectHit(hit, 'team')),
-  ].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+  ].sort((a, b) => {
+    // 搜索时按相关性：两个库的 _score 直接可比（同一套 BM25，字段权重也一致）
+    if (query !== '') return (b.score ?? 0) - (a.score ?? 0)
+    return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0
+  })
   const rows = merged.slice(page * size, page * size + size)
 
   json(res, 200, {

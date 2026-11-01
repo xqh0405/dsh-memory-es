@@ -37,6 +37,9 @@ window.__ModuleLoader__.load({
       graphGlobalHint: '点击节点看两跳',
       graphFocusHint: '点击空白返回全图',
       graphDegree: '度数',
+      hitIn: '命中',
+      fieldContent: '正文',
+      fieldTopic: '主题',
       tabReview: '审核台',
       tabIdentity: '自述',
       idTitle: '待采纳的候选（自述 / 人格）',
@@ -262,6 +265,9 @@ window.__ModuleLoader__.load({
       graphGlobalHint: 'click a node to see two hops',
       graphFocusHint: 'click empty space to go back',
       graphDegree: 'degree',
+      hitIn: 'hit in',
+      fieldContent: 'content',
+      fieldTopic: 'topic',
       tabReview: 'Review',
       tabIdentity: 'Identity',
       idTitle: 'Draft identity traits',
@@ -1015,6 +1021,40 @@ window.__ModuleLoader__.load({
         ),
       )
 
+    }
+
+    /**
+     * 命中片段：把 ES highlight 里的哨兵字符（\u0001 … \u0002）渲染成高亮词。
+     *
+     * 为什么不用 ES 自带的 `<mark>`：那是把正文当 HTML 插进页面，记忆内容里
+     * 什么字符都可能有。这里只认两个哨兵，其余一律按文本节点渲染。
+     */
+    function HighlightText({ text, style }) {
+      const parts = []
+      const pattern = /\u0001([\s\S]*?)\u0002/g
+      let last = 0
+      let match
+      while ((match = pattern.exec(text)) !== null) {
+        if (match.index > last) parts.push({ text: text.slice(last, match.index), mark: false })
+        parts.push({ text: match[1], mark: true })
+        last = match.index + match[0].length
+      }
+      if (last < text.length) parts.push({ text: text.slice(last), mark: false })
+      return h('span', { style },
+        parts.map((part, index) =>
+          part.mark
+            ? h('mark', {
+                key: index,
+                style: {
+                  background: 'var(--dsw-alias-state-business-primary, #6b8cff)',
+                  color: '#fff',
+                  padding: '0 2px',
+                  borderRadius: 3,
+                },
+              }, part.text)
+            : h('span', { key: index }, part.text),
+        ),
+      )
     }
 
     // ── 星图（阶段 8 第六个页签）──────────────────────────────────────────
@@ -2714,6 +2754,20 @@ window.__ModuleLoader__.load({
                             : stateLabel(row.status, t)),
                         h('span', { style: S.rowTime }, shortTime(row.updatedAt)),
                       ),
+                      // 搜索时补一行「命中在哪、命中了什么词」——这是 P1 要的理由
+                      row.highlights !== undefined && row.highlights.length > 0
+                        ? h('div', { style: { ...S.rowMeta, paddingTop: 0 } },
+                            h('span', { style: { ...S.muted, fontSize: 11.5 } },
+                              `${t('hitIn')} ${row.highlights[0].field === 'topic_key' ? t('fieldTopic') : t('fieldContent')}：`),
+                            h(HighlightText, {
+                              text: row.highlights[0].text,
+                              style: { fontSize: 11.5, color: 'var(--dsw-alias-label-secondary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                            }),
+                            row.score === undefined
+                              ? null
+                              : h('span', { style: { ...S.mono, ...S.muted, fontSize: 11, flex: 'none' } }, ` · ${row.score}`),
+                          )
+                        : null,
                       h('div', { style: S.rowMeta },
                         h('span', null,
                           [domainLabel(row.domain, t), typeLabel(row.memoryType, t), row.topicKey]
