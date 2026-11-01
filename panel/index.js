@@ -13,7 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
@@ -1198,6 +1198,153 @@ async function handleStickersGet(ctx, res) {
   })
 }
 
+const STICKER_LABEL_MAX = 24
+const STICKER_WHEN_MAX = 160
+const STICKER_NOTE_MAX = 200
+const STICKER_NAME_MAX = 60
+/** 上传体上限：base64 约为原始字节的 4/3，5 MiB 的图约 6.8 MB，留 8 MiB 余量 */
+const STICKER_UPLOAD_LIMIT = 8 * 1024 * 1024
+
+/** 自定义表情的 id：custom-N 递增，别去改已有条目占用的编号 */
+function nextCustomStickerId(items) {
+  let max = 0
+  for (const item of Array.isArray(items) ? items : []) {
+    const match = /^custom-(\d+)$/.exec(str(item?.id))
+    if (match) max = Math.max(max, Number(match[1]))
+  }
+  return `custom-${max + 1}`
+}
+
+/** 备份文件名后缀：带上时分秒，出问题时一眼能看出是哪次写入前的版本 */
+function timestampSuffix() {
+  const now = new Date()
+  const pad = (value) => String(value).padStart(2, '0')
+  return (
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+    `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  )
+}
+
+/**
+ * 阶段 9.5：在线添加表情包。
+ *
+ * 浏览器读不到宿主磁盘，所以只能把图 base64 传上来、由宿主落盘。读写规则与预览接口同源
+ * （扩展名白名单、5 MiB 上限、只认 basename），写入侧另加三条：
+ *  1. 同名文件已存在就拒绝——那是用户自己放进去的图，不覆盖；
+ *  2. 先落图片、再写 stickers.json；清单写失败就把刚落的图删掉，不留「清单里没有的孤儿图」；
+ *  3. 写清单前先备份、写走 tmp + rename：坏在半路也不会留下半截 JSON。
+ *
+ * 为什么「什么时候用」必填：模型就是靠这一句话决定贴哪张，缺了它这张图永远贴不出来。
+ */
+async function handleStickerAdd(ctx, res, req) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const stickers = configRow.value.stickers ?? {}
+  const dir = resolveStickerDir(configRow)
+
+  const body = await readJsonBody(req, STICKER_UPLOAD_LIMIT)
+  if (!body.ok) return json(res, 413, { ok: false, error: `${body.error}（单张图片上限 5 MiB）` })
+  const input = body.value && typeof body.value === 'object' ? body.value : {}
+
+  const label = str(input.label).trim()
+  const when = str(input.when).trim()
+  const note = str(input.note).trim()
+  if (label === '') return json(res, 400, { ok: false, error: '名称不能为空' })
+  if (label.length > STICKER_LABEL_MAX) return json(res, 400, { ok: false, error: `名称不能超过 ${STICKER_LABEL_MAX} 个字` })
+  if (when === '') return json(res, 400, { ok: false, error: '「什么时候用」不能为空：模型靠它决定贴哪张' })
+  if (when.length > STICKER_WHEN_MAX) return json(res, 400, { ok: false, error: `「什么时候用」不能超过 ${STICKER_WHEN_MAX} 个字` })
+  if (note.length > STICKER_NOTE_MAX) return json(res, 400, { ok: false, error: `外观描述不能超过 ${STICKER_NOTE_MAX} 个字` })
+
+  const rawFile = input.file && typeof input.file === 'object' ? input.file : {}
+  const dataUrl = str(rawFile.dataUrl)
+  const parsedUrl = /^data:([^;,]+);base64,([\s\S]+)$/.exec(dataUrl)
+  if (parsedUrl === null) {
+    return json(res, 400, { ok: false, error: '图片数据格式不对（需要 data:image/…;base64,…）' })
+  }
+  const mime = parsedUrl[1].trim().toLowerCase()
+  const ext = Object.keys(STICKER_MIME).find((candidate) => STICKER_MIME[candidate] === mime)
+  if (ext === undefined) {
+    return json(res, 400, { ok: false, error: '只支持 png / jpeg / webp / gif（不收 svg，它能带脚本）' })
+  }
+
+  let buffer
+  try {
+    buffer = Buffer.from(parsedUrl[2].replace(/\s+/g, ''), 'base64')
+  } catch {
+    return json(res, 400, { ok: false, error: '图片内容无法解码' })
+  }
+  if (buffer.length === 0) return json(res, 400, { ok: false, error: '图片内容为空' })
+  if (buffer.length > STICKER_MAX_BYTES) {
+    return json(res, 413, { ok: false, error: `图片超过 ${Math.round(STICKER_MAX_BYTES / 1024 / 1024)} MiB` })
+  }
+
+  // 文件名：取原名的 basename，扩展名以 MIME 为准——名字叫 .png 而内容其实是 jpeg 时，
+  // 直接沿用原名会让浏览器按错的内容类型解码
+  const rawName = str(rawFile.name).trim()
+  const stem = rawName === '' ? label : basename(rawName).replace(/\.[^.]*$/, '')
+  // 去掉路径分隔符与 Windows 保留字符；控制字符一并清掉，免得文件名里藏换行
+  const safeStem = stem.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').trim().slice(0, STICKER_NAME_MAX)
+  const fileName = `${safeStem === '' ? 'sticker' : safeStem}${ext}`
+
+  const jsonPath = join(dir, 'stickers.json')
+  let doc
+  if (existsSync(jsonPath)) {
+    try {
+      doc = JSON.parse(readFileSync(jsonPath, 'utf8'))
+    } catch {
+      // 坏 JSON 不覆盖：里面可能是手写到一半的定义，吞掉等于把已有表情包删了
+      return json(res, 500, { ok: false, error: `${jsonPath} 不是合法 JSON，先修好再加` })
+    }
+    if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
+      return json(res, 500, { ok: false, error: `${jsonPath} 结构不对（需要对象），先修好再加` })
+    }
+  } else {
+    // 目录/清单都没有是常态（图片不进仓库），那就按默认起一个新清单
+    doc = {
+      version: 1,
+      maxPerTurn: Number.isFinite(stickers.maxPerTurn) ? stickers.maxPerTurn : 1,
+      items: [],
+    }
+  }
+  if (!Array.isArray(doc.items)) doc.items = []
+
+  if (existsSync(join(dir, fileName))) {
+    return json(res, 409, { ok: false, error: `同名文件已存在：${fileName}（换个名字再传，不覆盖已有的图）` })
+  }
+
+  try {
+    mkdirSync(dir, { recursive: true })
+    const tmpImage = join(dir, `.${fileName}.tmp-${process.pid}`)
+    writeFileSync(tmpImage, buffer)
+    renameSync(tmpImage, join(dir, fileName))
+  } catch (error) {
+    return json(res, 500, { ok: false, error: `图片保存失败：${String(error?.message ?? error)}` })
+  }
+
+  const item = { id: nextCustomStickerId(doc.items), label, file: fileName, when, ...(note === '' ? {} : { note }) }
+  doc.items.push(item)
+
+  try {
+    if (existsSync(jsonPath)) copyFileSync(jsonPath, `${jsonPath}.bak-${timestampSuffix()}`)
+    const tmpJson = `${jsonPath}.tmp-${process.pid}`
+    writeFileSync(tmpJson, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+    renameSync(tmpJson, jsonPath)
+  } catch (error) {
+    // 清单没写成：撤掉刚落的图，保持「目录里有什么」与「清单里有什么」一致
+    try {
+      unlinkSync(join(dir, fileName))
+    } catch {
+      // 删不掉就留下孤儿图，比留下一条指向不存在文件的清单好
+    }
+    return json(res, 500, { ok: false, error: `stickers.json 写入失败：${String(error?.message ?? error)}` })
+  }
+
+  return json(res, 200, {
+    ok: true,
+    value: { id: item.id, file: fileName, label, when, total: doc.items.length },
+  })
+}
+
 /**
  * 阶段 9.4：日记。
  *
@@ -2203,6 +2350,8 @@ async function handle(ctx, req, res) {
     }
     // ⚠️ POST 路由必须全部排在下面这条之前，否则会被 405 吞掉（identity/review 就踩过）
     if (path === '/identity/review' && req.method === 'POST') return await handleIdentityReview(ctx, res, req)
+    // 表情包新增：写宿主磁盘的唯一入口，校验全在 handleStickerAdd 里
+    if (path === '/stickers/add' && req.method === 'POST') return await handleStickerAdd(ctx, res, req)
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: '该接口只支持 GET' })
     if (path === '/overview') return await handleOverview(ctx, res)
     if (path === '/graph') return await handleGraph(ctx, res, url)
@@ -2574,6 +2723,7 @@ export {
   handleMemories,
   handleReviewAction,
   handleStickerImageGet,
+  handleStickerAdd,
   handleUsers,
   indexNames,
   mergeConfig,

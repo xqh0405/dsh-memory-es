@@ -82,6 +82,25 @@ window.__ModuleLoader__.load({
       personaStickerLimit: '单次最多',
       personaStickerMissing: '文件缺失',
       personaStickerNone: '这个目录里没有 stickers.json（图片不进仓库，要自己放）',
+      stickerAdd: '添加',
+      stickerAddFile: '图片',
+      stickerAddFileHint: 'PNG / JPEG / WebP / GIF，单张不超过 5 MiB',
+      stickerAddPick: '选择文件',
+      stickerAddNoFile: '还没选图片',
+      stickerAddLabel: '名称',
+      stickerAddLabelPlaceholder: '例：委屈巴巴',
+      stickerAddWhen: '什么时候用',
+      stickerAddWhenPlaceholder: '例：被否了方案、想撒娇但又不太服气',
+      stickerAddWhenHint: '必填。模型就是靠这一句决定贴不贴这张，写清楚使用场景',
+      stickerAddNote: '外观描述',
+      stickerAddNotePlaceholder: '可选。画面长什么样，帮模型认图',
+      stickerAddSave: '保存',
+      stickerAddCancel: '取消',
+      stickerAddErrFile: '先选一张图片',
+      stickerAddErrLabel: '名称不能为空',
+      stickerAddErrWhen: '「什么时候用」不能为空',
+      stickerAddDone: '已添加，下一轮就能用',
+      stickerAddHint: '加进来的图立刻生效，不用重启 dsh',
       personaDiary: '日记',
       diaryTabJournal: '每日回顾',
       diaryTabEvents: '变迁',
@@ -89,7 +108,9 @@ window.__ModuleLoader__.load({
       diaryJournalHint: '按天一段，直接生效、不进审核',
       personaDiaryHint: '这里只记「我怎么变成现在这样」：人格与自述条目何时被采纳、何时被拒绝',
       personaDiaryEmpty: '还没有记录。',
+      // 日记「变迁」那列才是时间；表情包那列是「什么时候贴」，共用一个键会让列名说谎
       colWhen: '时间',
+      colStickerWhen: '什么时候用',
       colKind: '类型',
       colState: '状态',
       colContent: '内容',
@@ -312,6 +333,25 @@ window.__ModuleLoader__.load({
       personaStickerLimit: 'Max per reply',
       personaStickerMissing: 'missing',
       personaStickerNone: 'No stickers.json in that directory (images are not shipped).',
+      stickerAdd: 'Add',
+      stickerAddFile: 'Image',
+      stickerAddFileHint: 'PNG / JPEG / WebP / GIF, up to 5 MiB each',
+      stickerAddPick: 'Choose file',
+      stickerAddNoFile: 'No image chosen',
+      stickerAddLabel: 'Label',
+      stickerAddLabelPlaceholder: 'e.g. Pouty',
+      stickerAddWhen: 'When to use',
+      stickerAddWhenPlaceholder: 'e.g. idea rejected, wants to sulk but not quite give up',
+      stickerAddWhenHint: 'Required. This line is how the model decides which sticker to attach.',
+      stickerAddNote: 'Appearance',
+      stickerAddNotePlaceholder: 'Optional. What the picture looks like.',
+      stickerAddSave: 'Save',
+      stickerAddCancel: 'Cancel',
+      stickerAddErrFile: 'Choose an image first',
+      stickerAddErrLabel: 'Label cannot be empty',
+      stickerAddErrWhen: '"When to use" cannot be empty',
+      stickerAddDone: 'Added; available from the next turn',
+      stickerAddHint: 'New stickers take effect immediately, no dsh restart',
       personaDiary: 'Diary',
       diaryTabJournal: 'Daily',
       diaryTabEvents: 'Changes',
@@ -319,7 +359,8 @@ window.__ModuleLoader__.load({
       diaryJournalHint: 'One entry per day; takes effect without review',
       personaDiaryHint: 'Only records how I became this: when persona/identity entries were approved or rejected',
       personaDiaryEmpty: 'No records yet.',
-      colWhen: 'When',
+      colWhen: 'Time',
+      colStickerWhen: 'When to use',
       colKind: 'Kind',
       colState: 'State',
       colContent: 'Content',
@@ -2043,6 +2084,11 @@ window.__ModuleLoader__.load({
       // 折叠状态：默认只收起表情包与日记
       const [openKeys, setOpenKeys] = React.useState({ stickers: false, diary: false })
       const toggle = (key) => setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }))
+      // 添加表情包：null = 表单收起，否则是草稿。浏览器读不了宿主目录，图只能 base64 交给宿主落盘
+      const [stickerDraft, setStickerDraft] = React.useState(null)
+      const [stickerBusy, setStickerBusy] = React.useState(false)
+      const [stickerMsg, setStickerMsg] = React.useState('')
+      const stickerFileRef = React.useRef(null)
 
       const load = React.useCallback(() => {
         setPersona((prev) => ({ ...prev, loading: true, error: '' }))
@@ -2064,6 +2110,42 @@ window.__ModuleLoader__.load({
       }, [])
 
       React.useEffect(() => { load() }, [load])
+
+      /**
+       * 添加表情包：读图 → base64 → 宿主落盘。
+       * 前端只做「早失败」的那几项（没选图 / 必填为空 / 超大），真正的大小、扩展名、
+       * 重名与 JSON 结构校验全在宿主侧再做一遍——浏览器这层随时可以被绕过。
+       */
+      const submitSticker = () => {
+        const draft = stickerDraft
+        if (!draft) return
+        if (!draft.file) return setStickerMsg(t('stickerAddErrFile'))
+        if (draft.label.trim() === '') return setStickerMsg(t('stickerAddErrLabel'))
+        if (draft.when.trim() === '') return setStickerMsg(t('stickerAddErrWhen'))
+        setStickerBusy(true)
+        setStickerMsg('')
+        const reader = new FileReader()
+        reader.onerror = () => {
+          setStickerBusy(false)
+          setStickerMsg(`${t('error')}: ${t('stickerAddErrFile')}`)
+        }
+        reader.onload = () => {
+          apiPost('/stickers/add', {
+            label: draft.label.trim(),
+            when: draft.when.trim(),
+            note: draft.note.trim(),
+            file: { name: draft.file.name, dataUrl: String(reader.result || '') },
+          })
+            .then(() => {
+              setStickerDraft(null)
+              setStickerMsg(t('stickerAddDone'))
+              load()
+            })
+            .catch((error) => setStickerMsg(`${t('error')}: ${String(error.message ?? error)}`))
+            .finally(() => setStickerBusy(false))
+        }
+        reader.readAsDataURL(draft.file)
+      }
 
       const saveSeed = () => {
         setSaving(true)
@@ -2226,43 +2308,170 @@ window.__ModuleLoader__.load({
       )
 
       // ── 表情包（默认收起）────────────────────────────────────────────
+      // 添加表单：宿主把图落到表情包目录并追加 stickers.json，下一轮提示词就能看到。
+      // 输入控件的点击要拦冒泡——卡片标题整行是折叠开关，不拦会「点保存顺便把卡片收起来」。
+      const stickerField = (label, control, hint) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+          h('span', { style: { ...S.muted, fontSize: 11.5 } }, label),
+          control,
+          hint ? h('span', { style: { ...S.muted, fontSize: 11, opacity: 0.75 } }, hint) : null)
+
+      const stickerForm = stickerDraft === null
+        ? null
+        : h('div', {
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              padding: 10,
+              marginBottom: 10,
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-border-l1)',
+              background: 'var(--dsw-alias-bg-l2)',
+            },
+          },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('input', {
+                type: 'file',
+                accept: 'image/png,image/jpeg,image/webp,image/gif',
+                ref: stickerFileRef,
+                style: { display: 'none' },
+                onChange: (event) => {
+                  const picked = event.target.files && event.target.files[0]
+                  // 前端先挡超大图：传上去也会被宿主退回，白等一次往返
+                  if (picked && picked.size > 5 * 1024 * 1024) {
+                    setStickerMsg(`${t('error')}: ${t('stickerAddFileHint')}`)
+                    return
+                  }
+                  setStickerDraft((prev) => (prev ? { ...prev, file: picked || null } : prev))
+                },
+              }),
+              h('button', {
+                type: 'button',
+                style: S.btn,
+                onClick: (event) => {
+                  event.stopPropagation()
+                  if (stickerFileRef.current) stickerFileRef.current.click()
+                },
+              }, t('stickerAddPick')),
+              h('span', {
+                style: { ...S.muted, fontSize: 11.5 },
+                children: stickerDraft.file ? stickerDraft.file.name : t('stickerAddNoFile'),
+              }),
+              h('span', {
+                style: { ...S.muted, fontSize: 11, opacity: 0.75 },
+                children: t('stickerAddFileHint'),
+              }),
+            ),
+            stickerField(t('stickerAddLabel'), h('input', {
+              value: stickerDraft.label,
+              placeholder: t('stickerAddLabelPlaceholder'),
+              onChange: (event) => {
+                const next = event.target.value
+                setStickerDraft((prev) => (prev ? { ...prev, label: next } : prev))
+              },
+              style: { ...S.input, fontSize: 12 },
+            })),
+            stickerField(t('stickerAddWhen'), h('input', {
+              value: stickerDraft.when,
+              placeholder: t('stickerAddWhenPlaceholder'),
+              onChange: (event) => {
+                const next = event.target.value
+                setStickerDraft((prev) => (prev ? { ...prev, when: next } : prev))
+              },
+              style: { ...S.input, fontSize: 12 },
+            }), t('stickerAddWhenHint')),
+            stickerField(t('stickerAddNote'), h('input', {
+              value: stickerDraft.note,
+              placeholder: t('stickerAddNotePlaceholder'),
+              onChange: (event) => {
+                const next = event.target.value
+                setStickerDraft((prev) => (prev ? { ...prev, note: next } : prev))
+              },
+              style: { ...S.input, fontSize: 12 },
+            })),
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button',
+                disabled: stickerBusy,
+                style: { ...S.btn, opacity: stickerBusy ? 0.6 : 1 },
+                onClick: (event) => {
+                  event.stopPropagation()
+                  submitSticker()
+                },
+              }, stickerBusy ? '…' : t('stickerAddSave')),
+              h('button', {
+                type: 'button',
+                style: S.btn,
+                onClick: (event) => {
+                  event.stopPropagation()
+                  setStickerDraft(null)
+                  setStickerMsg('')
+                },
+              }, t('stickerAddCancel')),
+              h('span', { style: { ...S.muted, fontSize: 11 }, children: t('stickerAddHint') }),
+            ),
+          )
+
       const missing = stickerRows.filter((item) => !item.exists).length
+      const stickerListBody = !stickers
+        ? h('div', { style: S.muted, children: t('personaStickerNone') })
+        : stickerRows.length === 0
+          ? h('div', { style: S.muted, children: stickers.error || t('personaStickerNone') })
+          : h('div', { style: { maxHeight: 260, overflow: 'auto' } },
+              h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+                h('thead', null, h('tr', null,
+                  h('th', { style: S.th }, t('colLabel')),
+                  h('th', { style: S.th }, t('colStickerWhen')),
+                  h('th', { style: S.th }, t('colPreview')),
+                  h('th', { style: S.th }, ''))),
+                h('tbody', null,
+                  stickerRows.map((item) => h('tr', { key: item.id || item.file },
+                    h('td', { style: S.td, children: item.label }),
+                    h('td', { style: S.td, children: item.when }),
+                    // 预览走宿主接口：浏览器读不了 ~/.dsh/stickers。
+                    // 文件名留在 title/alt 里，悬停仍能看到是哪个文件。
+                    h('td', { style: S.td },
+                      item.exists
+                        ? h('img', {
+                            src: `${API}/sticker?file=${encodeURIComponent(item.file)}`,
+                            alt: item.file,
+                            title: item.file,
+                            loading: 'lazy',
+                            style: S.stickerThumb,
+                          })
+                        : h('span', { style: { ...S.mono, opacity: 0.75 }, children: item.file })),
+                    h('td', { style: S.td },
+                      h('span', { style: S.pill(item.exists ? 'ok' : 'warn') },
+                        item.exists ? '✓' : t('personaStickerMissing'))))))))
       const stickersCard = card(
         t('personaStickers'),
         stickers
           ? `${t('personaStickerDir')} ${stickers.dir} · ${t('personaStickerLimit')} ${stickers.maxPerTurn}${missing > 0 ? ` · ${missing} 个${t('personaStickerMissing')}` : ''}`
           : t('personaStickerNone'),
-        !stickers
-          ? h('div', { style: S.muted, children: t('personaStickerNone') })
-          : stickerRows.length === 0
-            ? h('div', { style: S.muted, children: stickers.error || t('personaStickerNone') })
-            : h('div', { style: { maxHeight: 260, overflow: 'auto' } },
-                h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
-                  h('thead', null, h('tr', null,
-                    h('th', { style: S.th }, t('colLabel')),
-                    h('th', { style: S.th }, t('colWhen')),
-                    h('th', { style: S.th }, t('colPreview')),
-                    h('th', { style: S.th }, ''))),
-                  h('tbody', null,
-                    stickerRows.map((item) => h('tr', { key: item.id || item.file },
-                      h('td', { style: S.td, children: item.label }),
-                      h('td', { style: S.td, children: item.when }),
-                      // 预览走宿主接口：浏览器读不了 ~/.dsh/stickers。
-                      // 文件名留在 title/alt 里，悬停仍能看到是哪个文件。
-                      h('td', { style: S.td },
-                        item.exists
-                          ? h('img', {
-                              src: `${API}/sticker?file=${encodeURIComponent(item.file)}`,
-                              alt: item.file,
-                              title: item.file,
-                              loading: 'lazy',
-                              style: S.stickerThumb,
-                            })
-                          : h('span', { style: { ...S.mono, opacity: 0.75 }, children: item.file })),
-                      h('td', { style: S.td },
-                        h('span', { style: S.pill(item.exists ? 'ok' : 'warn') },
-                          item.exists ? '✓' : t('personaStickerMissing')))))))),
-        { key: 'stickers', expandable: true, open: openKeys.stickers, count: stickerRows.length },
+        h('div', null,
+          stickerForm,
+          stickerMsg === ''
+            ? null
+            : h('div', { style: { ...S.muted, fontSize: 11.5, marginBottom: 8 }, children: stickerMsg }),
+          stickerListBody),
+        {
+          key: 'stickers',
+          expandable: true,
+          open: openKeys.stickers,
+          count: stickerRows.length,
+          extra: h('button', {
+            type: 'button',
+            style: { ...S.btn, flexShrink: 0 },
+            onClick: (event) => {
+              // 拦冒泡：否则点「添加」会顺手触发标题行的折叠开关
+              event.stopPropagation()
+              setStickerMsg('')
+              setStickerDraft((prev) => (prev ? null : { file: null, label: '', when: '', note: '' }))
+              setOpenKeys((prev) => ({ ...prev, stickers: true }))
+            },
+          }, stickerDraft === null ? t('stickerAdd') : t('stickerAddCancel')),
+        },
       )
 
       // ── 日记（默认收起）──────────────────────────────────────────────

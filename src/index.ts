@@ -14,7 +14,7 @@ import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -534,18 +534,37 @@ export function apply(ctx: Context, config: ConfigType): void {
   }
 
   /**
-   * 阶段 9.2：表情包。
+   * 阶段 9.2 / 9.5：表情包。
    *
-   * 只读**一次**（apply 时）：图片与定义都在包外，改完要重启/重载才生效。
-   * 读不到就当作没有表情包——目录缺失是常态（图片不进仓库），不能因此报错或刷日志。
+   * **按 mtime + size 惰性读**，不再是 apply 时读一次：面板现在支持在线添加表情包，
+   * 若还是一次性读，加完必须重启 dsh 才认，那个功能就等于没做。
+   * 一次 stat 的成本远低于组装提示词本身；读不到就当作没有表情包——目录缺失是常态
+   * （图片不进仓库），不能因此报错或刷日志。
    */
-  const stickerPack: StickerPack | null = readStickerPack(config.stickers.dir)
+  let stickerCache: { stamp: string; pack: StickerPack | null } | null = null
+  const loadStickerPack = (): StickerPack | null => {
+    const jsonPath = join(expandHome(config.stickers.dir), 'stickers.json')
+    let stamp: string
+    try {
+      const stat = statSync(jsonPath)
+      stamp = `${stat.mtimeMs}:${stat.size}`
+    } catch {
+      // 清单被删掉时也要让缓存失效，否则会一直贴着一张已经不存在图的表情包
+      stickerCache = null
+      return null
+    }
+    if (stickerCache !== null && stickerCache.stamp === stamp) return stickerCache.pack
+    const pack = readStickerPack(config.stickers.dir)
+    stickerCache = { stamp, pack }
+    return pack
+  }
+
   ctx.effect(
     () =>
       ctx.systemPrompt.section({
         name: STICKERS_SECTION_NAME,
         order: STICKERS_SECTION_ORDER,
-        text: () => buildStickersSection(stickerPack, config.stickers.maxPerTurn, config.stickers.enabled),
+        text: () => buildStickersSection(loadStickerPack(), config.stickers.maxPerTurn, config.stickers.enabled),
       }),
     'dsh-memory-es.stickers',
   )

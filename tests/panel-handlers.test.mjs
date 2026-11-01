@@ -692,6 +692,102 @@ test('表情包预览：只读同目录图片，路径穿越与非图片一律 4
   assert.match(String(missing.body), /文件不存在/)
 })
 
+// ── 表情包新增：面板里唯一「写宿主磁盘」的接口，边界必须一条条钉住 ──────────────
+const PNG_HEAD = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02])
+const STICKER_PNG_URL = `data:image/png;base64,${PNG_HEAD.toString('base64')}`
+
+function stickerUpload(payload) {
+  return Object.assign(Readable.from([Buffer.from(JSON.stringify(payload))]), { method: 'POST' })
+}
+
+test('表情包新增：合法上传落盘并追加进 stickers.json，且保留原有其它字段', async () => {
+  const { handleStickerAdd } = await import('../panel/index.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-sticker-add-'))
+  // 已有的 maxPerTurn 必须原样保留：这是用户配的，不是本接口该管的字段
+  fs.writeFileSync(path.join(dir, 'stickers.json'), JSON.stringify({ version: 1, maxPerTurn: 2, items: [] }))
+
+  const res = fakeRes()
+  await handleStickerAdd(stickerCtx(dir), res, stickerUpload({
+    label: '委屈',
+    when: '被否了方案、想撒娇但又不太服气',
+    note: '低头撇嘴',
+    file: { name: 'pout-2.png', dataUrl: STICKER_PNG_URL },
+  }))
+  assert.equal(res.statusCode, 200, res.body)
+  const body = JSON.parse(res.body)
+  assert.equal(body.value.file, 'pout-2.png')
+  assert.equal(body.value.id, 'custom-1', '自定义表情按 custom-N 递增，不占用内置 id')
+  assert.equal(body.value.total, 1)
+  assert.ok(fs.existsSync(path.join(dir, 'pout-2.png')), '图片必须真的落到表情包目录')
+
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, 'stickers.json'), 'utf8'))
+  assert.equal(doc.items.length, 1)
+  assert.equal(doc.items[0].when, '被否了方案、想撒娇但又不太服气')
+  assert.equal(doc.items[0].note, '低头撇嘴')
+  assert.equal(doc.maxPerTurn, 2, 'maxPerTurn 不能被写丢')
+  assert.equal(
+    fs.readdirSync(dir).some((name) => name.startsWith('stickers.json.bak-')),
+    true,
+    '写清单前必须留一份备份',
+  )
+})
+
+test('表情包新增：缺 when / svg / 超大 / 重名 / 穿越文件名 / 坏 JSON 各自的处理', async () => {
+  const { handleStickerAdd } = await import('../panel/index.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-sticker-reject-'))
+  fs.writeFileSync(path.join(dir, 'dup.png'), PNG_HEAD)
+  fs.writeFileSync(path.join(dir, 'stickers.json'), JSON.stringify({ version: 1, items: [] }))
+  const ctx = stickerCtx(dir)
+  const call = async (payload) => {
+    const res = fakeRes()
+    await handleStickerAdd(ctx, res, stickerUpload(payload))
+    return res
+  }
+  const base = { label: 'x', when: 'y', file: { name: 'a.png', dataUrl: STICKER_PNG_URL } }
+
+  // 「什么时候用」是模型判断的唯一依据，空着等于这张图永远贴不出来
+  const noWhen = await call({ ...base, when: '   ' })
+  assert.equal(noWhen.statusCode, 400)
+  assert.match(JSON.parse(noWhen.body).error, /什么时候用/)
+
+  const svg = await call({
+    ...base,
+    file: { name: 'a.svg', dataUrl: `data:image/svg+xml;base64,${Buffer.from('<svg/>').toString('base64')}` },
+  })
+  assert.equal(svg.statusCode, 400, 'svg 能带脚本，与预览接口保持同一口径：一律拒')
+
+  const dup = await call({ ...base, file: { name: 'dup.png', dataUrl: STICKER_PNG_URL } })
+  assert.equal(dup.statusCode, 409, '同名文件是用户自己放的，不覆盖')
+
+  // 穿越：取 basename 后只落在本目录内，绝不能写到目录外
+  const traversal = await call({ ...base, file: { name: '../../evil.png', dataUrl: STICKER_PNG_URL } })
+  assert.equal(traversal.statusCode, 200, traversal.body)
+  assert.equal(fs.existsSync(path.join(dir, 'evil.png')), true)
+  assert.equal(fs.existsSync(path.join(dir, '..', '..', 'evil.png')), false, '不能写到表情包目录之外')
+
+  // 5.5 MiB 的图：过得了 8 MiB 的请求体上限，被单张 5 MiB 的上限挡住
+  const huge = await call({
+    ...base,
+    file: { name: 'big.png', dataUrl: `data:image/png;base64,${Buffer.alloc(5.5 * 1024 * 1024).toString('base64')}` },
+  })
+  assert.equal(huge.statusCode, 413)
+
+  // 坏 JSON：宁可报错，也不能把用户手写到一半的清单覆盖掉
+  fs.writeFileSync(path.join(dir, 'stickers.json'), '{ broken')
+  const broken = await call({ ...base, file: { name: 'b.png', dataUrl: STICKER_PNG_URL } })
+  assert.equal(broken.statusCode, 500)
+  assert.equal(fs.readFileSync(path.join(dir, 'stickers.json'), 'utf8'), '{ broken')
+})
+
+test('表情包新增：POST 路由必须排在 405 兜底之前（否则请求被吞成 405）', async () => {
+  const source = fs.readFileSync(new URL('../panel/index.js', import.meta.url), 'utf8')
+  const addAt = source.indexOf("'/stickers/add' && req.method === 'POST'")
+  const guardAt = source.indexOf("req.method !== 'GET'")
+  assert.ok(addAt > 0, '路由没注册：找不到 /stickers/add')
+  assert.ok(guardAt > 0, '找不到 405 兜底，测试的前提变了')
+  assert.ok(addAt < guardAt, 'POST /stickers/add 必须出现在 405 兜底之前')
+})
+
 // ── 星图构图：度数上限与节点上限决定了图是"能看"还是"一团毛球" ────────────
 const { buildGraph } = await import('../panel/index.js')
 
