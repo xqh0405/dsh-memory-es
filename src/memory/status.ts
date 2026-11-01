@@ -5,6 +5,10 @@
  *  · `supersede`：旧文档置 `status=superseded` + `superseded_by`，**并回填新文档的 `supersedes`**
  *    （§3.4 要求「新文档 supersedes = 旧 memory_id」，不双写就没有可追溯的链）；
  *  · `expire`：置 `status=expired`（时间到了，自然失效）；
+ *
+ * 阶段 13：`supersede` / `expire` 会把**原因**写进 `forget_reason`。
+ * 只打日志不留痕的话，半年后看到一条 superseded 的记忆，没人知道它为什么被换掉——
+ * 「删除/失效必须可解释」是这一层的底线。`archive` 不写：它是可 restore 的暂存，不是终态失效。
  *  · `archive`：置 `status=archived`（人工判定不再需要，但保留可查）；
  *  · `restore`：置回 `status=active`，并清除 `superseded_by`（撤回取代 / 恢复归档）；
  *  · `mark_private`：置 `privacy=private`（不参与整理任务）。
@@ -96,6 +100,9 @@ export async function updateStatus(
 
   const current = await loadOwnedDoc(deps, input.memory_id)
   const replacementId = (input.replacement_memory_id ?? '').trim()
+  // 阶段 13：没给原因就用动作名兜底，保证 `forget_reason` 永远有值可查
+  // （「没写原因」和「原因是 superseded」在语义上是一回事：都是被新版本取代）
+  const reason = (input.reason ?? '').trim()
 
   if (action === 'supersede') {
     if (replacementId === '') {
@@ -113,7 +120,7 @@ export async function updateStatus(
     const oldWrite = await deps.writer.update(
       index,
       current.id,
-      { status: 'superseded', superseded_by: replacementId, updated_at: now },
+      { status: 'superseded', superseded_by: replacementId, forget_reason: reason === '' ? 'superseded' : reason, updated_at: now },
       { refresh: 'wait_for', signal },
     )
     // ② 新文档回填 supersedes（可追溯的那一格）
@@ -169,7 +176,7 @@ export async function updateStatus(
     await deps.writer.update(
       index,
       current.id,
-      { status: 'active', superseded_by: null, quarantine_reason: null, updated_at: now },
+      { status: 'active', superseded_by: null, quarantine_reason: null, forget_reason: null, updated_at: now },
       { refresh: 'wait_for', signal: deps.signal },
     )
     return {
@@ -184,7 +191,9 @@ export async function updateStatus(
   }
 
   const patch: Record<string, unknown> =
-    action === 'expire' ? { status: 'expired', updated_at: now } : { privacy: 'private', updated_at: now }
+    action === 'expire'
+      ? { status: 'expired', forget_reason: reason === '' ? 'expired' : reason, updated_at: now }
+      : { privacy: 'private', updated_at: now }
   const written = await deps.writer.update(index, current.id, patch, {
     refresh: 'wait_for',
     signal: deps.signal,

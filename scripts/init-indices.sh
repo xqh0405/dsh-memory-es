@@ -97,6 +97,7 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "quarantine_reason": { "type": "keyword", "ignore_above": 256 },
         "supersedes":        { "type": "keyword" },
         "superseded_by":     { "type": "keyword" },
+        "forget_reason":     { "type": "keyword", "ignore_above": 256 },
         "content_sha256":    { "type": "keyword" },
 
         "created_at":        { "type": "date" },

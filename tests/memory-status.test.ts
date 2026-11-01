@@ -114,6 +114,8 @@ describe('updateStatus', () => {
       assert.deepEqual(h.state.updates[0].patch, {
         status: 'superseded',
         superseded_by: 'fresh',
+        // 阶段 13：失效原因留痕
+        forget_reason: '口径更新',
         updated_at: NOW.toISOString(),
       })
       assert.deepEqual(h.state.updates[1].patch, {
@@ -163,13 +165,17 @@ describe('updateStatus', () => {
     }
   })
 
-  test('expire：只改 status + updated_at', async () => {
+  test('expire：改 status + updated_at，并记下原因（阶段 13）', async () => {
     const h = await startStateFake({ a: doc('a') })
     try {
       const result = await updateStatus(h.deps, { memory_id: 'a', action: 'expire', reason: '过时了' })
       assert.equal(result.status, 'expired')
       assert.equal(result.superseded_by, '')
-      assert.deepEqual(h.state.updates[0].patch, { status: 'expired', updated_at: NOW.toISOString() })
+      assert.deepEqual(h.state.updates[0].patch, {
+        status: 'expired',
+        forget_reason: '过时了',
+        updated_at: NOW.toISOString(),
+      })
     } finally {
       await h.fake.close()
     }
@@ -197,6 +203,8 @@ describe('updateStatus', () => {
         status: 'active',
         superseded_by: null,
         quarantine_reason: null,
+        // 阶段 13：恢复时一并清失效原因
+        forget_reason: null,
         updated_at: NOW.toISOString(),
       })
     } finally {
@@ -385,6 +393,41 @@ describe('promoteMemory', () => {
       } as never)) as Record<string, unknown>
       assert.deepEqual(validateJsonSchemaValue(def.output.schema, value), [])
       assert.equal(value.promote_state, 'candidate')
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+describe('阶段 13：forget_reason 失效原因留痕', () => {
+  test('expire 带 reason → 原样落库；不带 → 用动作名兜底', async () => {
+    const h = await startStateFake({ a: doc('a'), b: doc('b') })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'expire', reason: '  已被新方案取代  ' })
+      await updateStatus(h.deps, { memory_id: 'b', action: 'expire' })
+      assert.equal(h.state.updates[0]?.patch.forget_reason, '已被新方案取代', '两端空白要裁掉')
+      assert.equal(h.state.updates[1]?.patch.forget_reason, 'expired', '没给原因时用动作名，保证字段总有值')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('supersede 不带 reason → 写 superseded（不是空串）', async () => {
+    const h = await startStateFake({ old: doc('old'), fresh: doc('fresh') })
+    try {
+      await updateStatus(h.deps, { memory_id: 'old', action: 'supersede', replacement_memory_id: 'fresh' })
+      assert.equal(h.state.updates[0]?.patch.forget_reason, 'superseded')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('restore 清掉 forget_reason（否则会挂着失效理由却已生效）', async () => {
+    const h = await startStateFake({ gone: { ...doc('gone'), status: 'expired', forget_reason: '过期了' } })
+    try {
+      await updateStatus(h.deps, { memory_id: 'gone', action: 'restore' })
+      assert.equal(h.state.updates[0]?.patch.forget_reason, null)
+      assert.equal(h.state.updates[0]?.patch.status, 'active')
     } finally {
       await h.fake.close()
     }
