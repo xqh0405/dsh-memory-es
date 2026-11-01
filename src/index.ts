@@ -28,7 +28,7 @@ import {
   maybeRunDailyJournal,
 } from './journal.ts'
 import { definePersonaTool, loadActivePersona, type PersonaDeps } from './memory/persona.ts'
-import { buildPersonaSection, buildStickersSection, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
+import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SECTION_NAME, CITATION_SECTION_ORDER, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { readMood, writeMood } from './memory/mood.ts'
@@ -462,6 +462,20 @@ export function apply(ctx: Context, config: ConfigType): void {
   }
 
   ctx.effect(() => ctx.systemPrompt.section(MEMORY_PROMPT_SECTION), 'dsh-memory-es.prompt')
+
+  // 阶段 12「命中后供给」：引用格式要求是可选段（默认关）。
+  // 条件在 apply 期间求值——改这个开关需要重启 dsh web 才生效，与检索参数一致。
+  if (config.prompt?.citation === true) {
+    ctx.effect(
+      () =>
+        ctx.systemPrompt.section({
+          name: CITATION_SECTION_NAME,
+          order: CITATION_SECTION_ORDER,
+          text: CITATION_PROMPT,
+        }),
+      'dsh-memory-es.prompt-citation',
+    )
+  }
 
   /**
    * 阶段 9.1 + 9.3：人格段 = 内核 seed + 已生效的表层条目。

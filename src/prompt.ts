@@ -51,6 +51,24 @@ export const MEMORY_PROMPT = [
 export const MOOD_SECTION_NAME = 'dsh-memory-es-mood'
 export const MOOD_SECTION_ORDER = 3201
 
+/**
+ * 阶段 12：「命中后供给」的引用格式要求（默认**不注入**）。
+ *
+ * 背景（deja-vu bench 的结论）：把检索结果整块给模型、并明确要求「引用时标明来自哪一条」，
+ * 比只丢一个 top-hit 更容易把答案带出来。但这是**改变模型回答风格**的变更：
+ * 一旦开启，回答里会多出记忆 id/来源，显得啰嗦。
+ *
+ * 所以它是个开关（`prompt.citation`，默认 false），而不是默认行为——
+ * 没有生成侧 A/B 证据之前，不擅自改变输出风格。
+ */
+export const CITATION_SECTION_NAME = 'dsh-memory-es-citation'
+export const CITATION_SECTION_ORDER = 3202
+export const CITATION_PROMPT = [
+  '**引用检索到的记忆时标明出处**：用到记忆库里的结论，就在那句话后面注明 `（记忆 <id 前 8 位>）`；',
+  '一条结论来自多条记忆时，按贡献从大到小列出。**没有用到记忆就不要写引用**——',
+  '宁可短，也不要为了显得有依据而编造 id。',
+].join('\n')
+
 /** 注册用的段对象（形状对齐宿主的 `PromptSection`） */
 export const MEMORY_PROMPT_SECTION = {
   name: PROMPT_SECTION_NAME,

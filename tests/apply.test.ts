@@ -119,6 +119,25 @@ describe('apply', () => {
     assert.match(harness.logs[0], /ready: v\d+\.\d+\.\d+ user=xqh index=personal_memory_xqh/)
   })
 
+  test('引用要求默认不注入；prompt.citation=true 才注入（阶段 12）', () => {
+    const off = fakeCtx()
+    apply(off.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
+    assert.equal(
+      off.sections.some((section) => section.name === 'dsh-memory-es-citation'),
+      false,
+      '默认不应注入引用要求（会改变回答风格）',
+    )
+
+    const on = fakeCtx()
+    apply(
+      on.ctx as never,
+      baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 }, prompt: { citation: true } }),
+    )
+    const section = on.sections.find((item) => item.name === 'dsh-memory-es-citation')
+    assert.ok(section !== undefined, '开启后应注入')
+    assert.match(String(section.text), /引用检索到的记忆时标明出处/)
+  })
+
   test('注册走 effect：disposer 一调，工具就注销（fiber 卸载能收干净）', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })

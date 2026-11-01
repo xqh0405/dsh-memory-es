@@ -56,6 +56,10 @@ export interface ConfigType {
     model: string
     dims: number
   }
+  prompt: {
+    /** 阶段 12：引用格式要求（默认关） */
+    citation: boolean
+  }
   retrieval: {
     topK: number
     rrfK: number
@@ -198,6 +202,10 @@ export const Config: z<ConfigType> = z.object({
       .description('embedding 模型；换模型必须重建索引（dims 不可原地改）。'),
     dims: z.number().step(1).default(1024)
       .description('向量维度，必须与索引 mapping 一致。'),
+  }),
+  prompt: z.object({
+    citation: z.boolean().default(false)
+      .description('阶段 12「命中后供给」：要求模型引用记忆时标明出处（默认关；会改变回答风格，未做生成侧 A/B 前不默认开）。'),
   }),
   retrieval: z.object({
     topK: z.number().step(1).default(20)
