@@ -344,11 +344,16 @@ describe('moodAffinity / 情绪一致召回（阶段 6.3）', () => {
 })
 
 describe('spreadActivation（阶段 5.3 扩散激活）', () => {
-  function scoped(id: string, fusedScore: number, related?: Array<{ id: string; weight: number }>): ScopedHit {
+  function scoped(
+    id: string,
+    fusedScore: number,
+    related?: Array<{ id: string; weight: number }>,
+    extra: Record<string, unknown> = {},
+  ): ScopedHit {
     return {
       id,
       score: fusedScore,
-      source: { memory_id: id, ...(related === undefined ? {} : { related }) },
+      source: { memory_id: id, ...(related === undefined ? {} : { related }), ...extra },
       routeRanks: [1],
       fusedScore,
       origin: 'personal',
@@ -382,6 +387,45 @@ describe('spreadActivation（阶段 5.3 扩散激活）', () => {
     const hits = [scoped('a', 0.02), scoped('b', 0.03)]
     const out = spreadActivation(hits, 0.5)
     assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
+  })
+
+  test('邻居的 activation 会放大它的贡献（新鲜命中 > 陈年命中）', () => {
+    const edge = [{ id: 'b', weight: 0.8 }]
+    const now = new Date('2026-11-01T12:00:00.000Z')
+    const fresh = spreadActivation(
+      [
+        scoped('a', 0.02, edge),
+        scoped('b', 0.03, undefined, { activation: 4, last_hit_at: now.toISOString() }),
+      ],
+      0.5,
+      { now },
+    )
+    const stale = spreadActivation(
+      [
+        scoped('a', 0.02, edge),
+        scoped('b', 0.03, undefined, {
+          activation: 4,
+          last_hit_at: new Date(now.getTime() - 365 * 86_400_000).toISOString(),
+        }),
+      ],
+      0.5,
+      { now },
+    )
+    const plain = spreadActivation([scoped('a', 0.02, edge), scoped('b', 0.03)], 0.5, { now })
+
+    const score = (out: ScopedHit[]) => out.find((h) => h.id === 'a')!.fusedScore
+    assert.ok(score(fresh) > score(plain), '新鲜命中过的邻居应当借出更多')
+    // 陈年命中衰减到几乎等于没有：4 * exp(-365/30) ≈ 2e-5
+    assert.ok(Math.abs(score(stale) - score(plain)) < 1e-6, '一年前命中的强度应衰减到可忽略')
+    // 加权上限：1 + log1p(4)/10 ≈ 1.16，不会被一个热点邻居翻倍
+    assert.ok(score(fresh) < score(plain) * 1.2)
+  })
+
+  test('activation 缺失或为 0 → 与旧行为逐条一致（默认开关关着也不该漂移）', () => {
+    const hits = [scoped('a', 0.02, [{ id: 'b', weight: 0.8 }]), scoped('b', 0.03)]
+    const out = spreadActivation(hits, 0.5, { now: new Date('2026-11-01T12:00:00.000Z') })
+    const a = out.find((h) => h.id === 'a')!
+    assert.ok(Math.abs(a.fusedScore - 0.032) < 1e-12)
   })
 
   test('多条邻居累加', () => {

@@ -196,8 +196,23 @@ describe('updateStatus', () => {
       assert.deepEqual(h.state.updates[0].patch, {
         status: 'active',
         superseded_by: null,
+        quarantine_reason: null,
         updated_at: NOW.toISOString(),
       })
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('restore 一条被隔离的记忆：原因必须一起清掉（否则面板还显示「隔离原因」）', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'quarantine', quarantine_reason: '疑似凭据（命中赋值式口令），已隔离待审' }),
+    })
+    try {
+      const result = await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(result.status, 'active')
+      // 只改 status 不改原因 → 「已恢复但还挂着隔离理由」，审的人分不清是否恢复干净
+      assert.equal(h.state.updates[0].patch.quarantine_reason, null)
     } finally {
       await h.fake.close()
     }

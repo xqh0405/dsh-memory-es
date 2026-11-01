@@ -172,6 +172,21 @@ export interface SearchDeps {
   recallCache?: RecallCache | null
 }
 
+/**
+ * 命中回写的 painless 脚本（阶段 2 的热度信号 + 阶段 9 的 activation）。
+ *
+ * 抽成常量是为了**能被单测钉住**：这段字符串没有任何类型保护，
+ * 删掉一行 `activation += 1` 编译不会报错、运行时只会静默降级，
+ * 而扩散激活的强度加权就永远拿不到数据（阶段 9 修复的正是这个坑）。
+ *
+ * 注意这里**不做时间衰减**：衰减放在读取侧（fragment.ts 的 spreadActivation），
+ * 因为那边有 `last_hit_at` 与 `now`，用 JS 算既可测又不会因 painless 解析日期而静默失败。
+ */
+export const HIT_UPDATE_SCRIPT =
+  'if (ctx._source.hit_count == null) { ctx._source.hit_count = 0 } ctx._source.hit_count += 1; ' +
+  'if (ctx._source.activation == null) { ctx._source.activation = 0 } ctx._source.activation += 1; ' +
+  'ctx._source.last_hit_at = params.now'
+
 /** `note` 用固定枚举而不是可选字段：空对象/缺字段会被模型误判成“没有记忆” */
 export type SearchNote = 'ok' | 'no_match' | 'low_confidence'
 
@@ -339,7 +354,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   // 阶段 5.3：扩散激活（默认 alpha=0，原样返回）。放在乘子之前——
   // 它属于「相关性」，乘子是后验信号。
   const rankingCfg = deps.ranking ?? DEFAULT_RANKING
-  const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha)
+  const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha, { now })
   // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
   // 系数默认温和（±10% 量级），归零即完全关闭。
   const merged = applyRanking(spread, rankingCfg, now, deps.mood?.() ?? null)
@@ -420,6 +435,9 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   }
 
   // 命中回写：fire-and-forget，失败只记日志——观测通道的可用性不该拖累检索。
+  // 三个信号一起写：hit_count（累计次数，永不衰减）、activation（累计强度，消费时衰减）、
+  // last_hit_at（衰减的基准时刻）。阶段 9 之前 activation 只在写入时置 0、从没有人更新，
+  // 于是扩散激活里的「强度加权」永远拿不到数据——现在在这里接上。
   if (deps.hitRecorder !== null && deps.hitRecorder !== undefined && topMerged.length > 0) {
     const stamp = now.toISOString()
     const recorder = deps.hitRecorder
@@ -428,8 +446,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
         const index = hit.origin === 'team' ? deps.teamIndex : personalIndex
         return recorder
           .updateScript(index, hit.id, {
-            source:
-              'if (ctx._source.hit_count == null) { ctx._source.hit_count = 0 } ctx._source.hit_count += 1; ctx._source.last_hit_at = params.now',
+            source: HIT_UPDATE_SCRIPT,
             params: { now: stamp },
           })
           .catch((err: unknown) => {

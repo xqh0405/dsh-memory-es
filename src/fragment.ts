@@ -237,6 +237,22 @@ export const IMPORTANCE_FACTORS: Readonly<Record<string, number>> = {
 }
 
 /**
+ * `activation` 的时间半衰期（天）：命中会累加它，扩散激活在消费时按这个半衰期衰减。
+ *
+ * 为什么在消费时衰减、写入时不衰减：写入侧是 fire-and-forget 的脚本更新，
+ * 在 painless 里解析日期、算指数再来回比较，出错只会静默降级；而读取侧本来就有
+ * `last_hit_at` 与 `now`，一行 JS 就能算，且口径可单测。
+ */
+export const ACTIVATION_HALF_LIFE_DAYS = 30
+
+export interface ActivationOptions {
+  /** 现在（用来把 activation 衰减成「当前强度」）；缺省取当前时刻 */
+  now?: Date
+  /** 半衰期（天）；缺省 {@link ACTIVATION_HALF_LIFE_DAYS} */
+  halfLifeDays?: number
+}
+
+/**
  * 阶段 5.3：扩散激活。
  *
  * 语义：一条记忆的邻居如果**也在本次结果集里**，就把它的一部分分借给这条记忆。
@@ -245,14 +261,43 @@ export const IMPORTANCE_FACTORS: Readonly<Record<string, number>> = {
  * 为什么不做二次召回：那会让「一条相关」变成「一条相关拖出一串」，候选池失控，
  * 而且评测集是固定的，扩池会同时抬高 hit 和噪声，掩盖真实收益。
  *
- * `alpha = 0` 时逐条返回原对象（评测里要求「与基线逐条一致」）。
+ * 阶段 9 补：邻居的贡献按它的 `activation` 加权（`1 + log1p(衰减后强度)/10`）。
+ * `activation` 由命中回写累加（search.ts），这里按 `last_hit_at` 做时间衰减——
+ * 「一周前被命中 100 次」和「昨天被命中 1 次」靠 hit_count 分不出来，靠衰减后的强度能。
+ * 加权上限约 +20%（log1p(7)/10 ≈ 0.2），不会让一个热点邻居包办整张图。
+ *
+ * `alpha = 0` 时逐条返回原对象（评测里要求「与基线逐条一致」），
+ * 这也是默认值：**能力接上了，但开关仍默认关着**。
  */
-export function spreadActivation(hits: readonly ScopedHit[], alpha: number): ScopedHit[] {
+export function spreadActivation(
+  hits: readonly ScopedHit[],
+  alpha: number,
+  options: ActivationOptions = {},
+): ScopedHit[] {
   if (!Number.isFinite(alpha) || alpha === 0 || hits.length < 2) return [...hits]
 
   // 只认本次结果集里的邻居：没有出场的不算，避免「扩池」带来的假提升
   const scores = new Map<string, number>()
-  for (const hit of hits) scores.set(hit.id, hit.fusedScore)
+  const sources = new Map<string, Record<string, unknown>>()
+  for (const hit of hits) {
+    scores.set(hit.id, hit.fusedScore)
+    sources.set(hit.id, hit.source)
+  }
+
+  const nowMs = (options.now ?? new Date()).getTime()
+  const halfLifeDays = Math.max(0.1, options.halfLifeDays ?? ACTIVATION_HALF_LIFE_DAYS)
+
+  /** 邻居的「当前强度」乘子：从没被命中过返回 1（完全等价于旧行为） */
+  const strengthOf = (id: string): number => {
+    const source = sources.get(id)
+    if (source === undefined) return 1
+    const raw = typeof source.activation === 'number' ? source.activation : 0
+    if (!(raw > 0)) return 1
+    const lastHit = typeof source.last_hit_at === 'string' ? Date.parse(source.last_hit_at) : Number.NaN
+    const ageDays = Number.isFinite(lastHit) ? Math.max(0, (nowMs - lastHit) / 86_400_000) : 0
+    const decayed = raw * Math.exp(-ageDays / halfLifeDays)
+    return 1 + Math.log1p(decayed) / 10
+  }
 
   const boosted = hits.map((hit) => {
     const edges = readEdges(hit.source.related)
@@ -262,7 +307,7 @@ export function spreadActivation(hits: readonly ScopedHit[], alpha: number): Sco
     for (const edge of edges) {
       const neighbor = scores.get(edge.id)
       if (neighbor === undefined) continue
-      spread += neighbor * edge.weight
+      spread += neighbor * edge.weight * strengthOf(edge.id)
       used += 1
     }
     if (used === 0) return hit

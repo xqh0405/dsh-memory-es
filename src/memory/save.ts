@@ -281,7 +281,8 @@ export function buildMemoryDoc(
     distill_state: 'pending',
     status: 'active',
     // 阶段 5：联结与激活。写入时给初值，让字段语义明确（老文档缺失按同值处理）：
-    // related 由建边步骤补，activation 由命中回写（5.4）提升。
+    // related 由建边步骤补；activation 由检索命中回写累加（search.ts 的 HIT_UPDATE_SCRIPT），
+    // 扩散激活消费时按 last_hit_at 做时间衰减（fragment.ts 的 spreadActivation，默认 alpha=0 关着）。
     related: [],
     activation: 0,
     content_sha256: sha256Hex(normalized),

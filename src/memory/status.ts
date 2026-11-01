@@ -27,8 +27,19 @@ import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
 export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private'] as const
 export type StatusAction = (typeof STATUS_ACTIONS)[number]
 
-export const MEMORY_STATUSES = ['active', 'superseded', 'expired', 'archived'] as const
+/**
+ * 记忆状态机：`active` 参与检索，其余都只是「移出检索」的不同理由。
+ *
+ * `mood` 不是记忆状态，而是**心情文档的专用标记**（`__mood__`，见 memory/mood.ts）：
+ * 情绪状态存在同一个个人索引里，靠一个永不等于 `active` 的 status 让它天然不进检索、
+ * 不进提炼素材。2026-11-01 之前它不在这个枚举里，面板会把它当未知值原样显示成 `mood`，
+ * 统计与清理脚本也没有依据判断「这不是一条记忆」。**在这里显式承认它，并钉住它不属于记忆**。
+ */
+export const MEMORY_STATUSES = ['active', 'superseded', 'expired', 'archived', 'mood'] as const
 export type MemoryStatus = (typeof MEMORY_STATUSES)[number]
+
+/** `status=mood` 的文档不是记忆（心情状态），任何记忆口径的统计都要排除它 */
+export const NON_MEMORY_STATUS = 'mood' as const
 
 export interface UpdateStatusInput {
   memory_id: string
@@ -150,10 +161,15 @@ export async function updateStatus(
   if (action === 'restore') {
     // 必须清掉 superseded_by：否则检索的 `must_not exists superseded_by` 仍会挡住它。
     // 置 null 而不是删字段——ES 的 `exists` 对 null 返回 false，效果等价且不需要脚本权限。
+    //
+    // 同时清 `quarantine_reason`：恢复一条被隔离（status=quarantine）的记忆时，
+    // 只把 status 改回 active 会让原因残留，面板详情看起来像「已生效但还挂着隔离理由」，
+    // 审的人分不清它到底恢复干净了没有。（面板的 /memories/restore 早就清了，工具侧漏了。）
+    // 其它状态被误写这个字段时也一并无害——它只在 status=quarantine 时有语义。
     await deps.writer.update(
       index,
       current.id,
-      { status: 'active', superseded_by: null, updated_at: now },
+      { status: 'active', superseded_by: null, quarantine_reason: null, updated_at: now },
       { refresh: 'wait_for', signal: deps.signal },
     )
     return {

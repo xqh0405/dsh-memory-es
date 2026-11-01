@@ -259,6 +259,7 @@ window.__ModuleLoader__.load({
       stAuto: '自动',
       stExpired: '已过期',
       stQuarantine: '已隔离',
+      stMood: '心情',
       maintCliMissing: '面板未随带 CLI 源码，整理与导出不可用（部署时缺 panel/cli）',
       configTitle: '配置',
       configSave: '保存',
@@ -504,6 +505,7 @@ window.__ModuleLoader__.load({
       stAuto: 'auto',
       stExpired: 'expired',
       stQuarantine: 'quarantined',
+      stMood: 'mood',
       maintCliMissing: 'CLI sources were not shipped with the panel',
       configTitle: 'Configuration',
       configSave: 'Save',
@@ -813,6 +815,7 @@ window.__ModuleLoader__.load({
       auto: 'stAuto',
       expired: 'stExpired',
       quarantine: 'stQuarantine',
+      mood: 'stMood',
     }
 
     // 记忆类型中文化：只翻语义明确的枚举值，认不出的原样露出
