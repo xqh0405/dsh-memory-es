@@ -51,7 +51,12 @@ for dest in "${DESTS[@]}"; do
   dest_panel=$(sum "$dest/panel/index.js")
   if [ "$CHECK_ONLY" = "1" ]; then
     if [ "$dest_lib" = "$src_lib" ] && [ "$dest_panel" = "$src_panel" ]; then
-      echo "  [ok]   $dest（一致）"
+      if [ -f "$dest/panel/cli/consolidate/cli.ts" ]; then
+        echo "  [ok]   $dest（一致）"
+      else
+        echo "  [diff] $dest（缺 panel/cli）"
+        pending=1
+      fi
     else
       echo "  [diff] $dest（lib=$dest_lib panel=$dest_panel）"
       pending=1
@@ -61,6 +66,10 @@ for dest in "${DESTS[@]}"; do
   rm -rf "$dest/lib" "$dest/panel"
   cp -a "$SRC_LIB" "$dest/lib"
   cp -a "$SRC_PANEL" "$dest/panel"
+  # 仓库 panel/ 里不存 CLI 源码副本（打包时才生成）；本地同步也必须补上，
+  # 否则面板「维护」页会报「未随带 CLI 源码，整理与导出不可用」
+  mkdir -p "$dest/panel/cli"
+  cp -a "$ROOT/consolidate" "$ROOT/src" "$dest/panel/cli/"
   cp -f "$ROOT/package.json" "$ROOT/cordis.patch.yml" "$dest"/
   echo "  [sync] $dest（lib + panel + package.json + cordis.patch.yml）"
 done
