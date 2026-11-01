@@ -32,6 +32,11 @@ window.__ModuleLoader__.load({
       graphUnresolved: '端点缺失',
       graphZoomHint: '滚轮缩放 · 拖动平移',
       graphReset: '复位',
+      graphFocus: '聚焦',
+      graphBack: '返回全图',
+      graphGlobalHint: '点击节点看两跳',
+      graphFocusHint: '点击空白返回全图',
+      graphDegree: '度数',
       tabReview: '审核台',
       tabIdentity: '自述',
       idTitle: '待采纳的候选（自述 / 人格）',
@@ -252,6 +257,11 @@ window.__ModuleLoader__.load({
       graphUnresolved: 'unresolved',
       graphZoomHint: 'wheel to zoom · drag to pan',
       graphReset: 'Reset',
+      graphFocus: 'Focus',
+      graphBack: 'Back to full graph',
+      graphGlobalHint: 'click a node to see two hops',
+      graphFocusHint: 'click empty space to go back',
+      graphDegree: 'degree',
       tabReview: 'Review',
       tabIdentity: 'Identity',
       idTitle: 'Draft identity traits',
@@ -1150,6 +1160,79 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 取以 `centerId` 为中心、`depth` 跳以内的子图。
+     *
+     * 用已取到的全局图算，不再打接口：图里已经有 300 个节点和它们的边，
+     * 两跳足够看清「这条记忆挨着谁」。缺点是邻居若不在 top-300 里会缺——
+     * 所以界面上会标明这是「当前视图内的两跳」。
+     */
+    function subgraphOf(graph, centerId, depth) {
+      const adj = new Map()
+      for (const node of graph.nodes) adj.set(node.id, [])
+      for (const edge of graph.edges) {
+        adj.get(edge.source)?.push(edge.target)
+        adj.get(edge.target)?.push(edge.source)
+      }
+      const level = new Map([[centerId, 0]])
+      const queue = [centerId]
+      while (queue.length > 0) {
+        const id = queue.shift()
+        const d = level.get(id)
+        if (d >= depth) continue
+        for (const next of adj.get(id) ?? []) {
+          if (level.has(next)) continue
+          level.set(next, d + 1)
+          queue.push(next)
+        }
+      }
+      const nodes = graph.nodes.filter((node) => level.has(node.id))
+      const edges = graph.edges.filter((edge) => level.has(edge.source) && level.has(edge.target))
+      return {
+        nodes,
+        edges,
+        clusters: graph.clusters.filter((cluster) => nodes.some((node) => node.domain === cluster.domain)),
+        stats: graph.stats,
+        level,
+      }
+    }
+
+    /**
+     * 聚焦布局：中心节点在画布正中，1 跳、2 跳各一圈。
+     *
+     * 和全局图一样是确定性布局（同数据同位置），只是分层依据从「连通分量」
+     * 换成了「到中心的跳数」——这正是「局部图当体检器」的用法。
+     */
+    function layoutFocus(subgraph, centerId, width, height) {
+      const positions = new Map()
+      const cx = width / 2
+      const cy = height / 2
+      const rings = new Map()
+      for (const node of subgraph.nodes) {
+        const d = subgraph.level.get(node.id) ?? 0
+        if (!rings.has(d)) rings.set(d, [])
+        rings.get(d).push(node.id)
+      }
+      const maxDepth = Math.max(1, ...[...rings.keys()])
+      const usable = Math.min(width, height) / 2 - 56
+      for (const [d, ids] of rings) {
+        ids.sort()
+        // 中心单独一个点；其余层按 sqrt(d) 归一化到可用半径
+        const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * usable
+        ids.forEach((id, i) => {
+          if (d === 0) {
+            positions.set(id, { x: cx, y: cy })
+            return
+          }
+          const base = (Math.PI * 2 * i) / ids.length + d * 0.4
+          const jitter = (hashUnit(id) - 0.5) * (ids.length > 4 ? 0.7 : 0.2)
+          const r = ringRadius * (0.9 + hashUnit(id + '#r') * 0.2)
+          positions.set(id, { x: cx + Math.cos(base + jitter) * r, y: cy + Math.sin(base + jitter) * r })
+        })
+      }
+      return { positions, bounds: { minX: 0, minY: 0, maxX: width, maxY: height }, focusedCenter: centerId }
+    }
+
+    /**
      * 星图页：Canvas 2D + 确定性布局。
      *
      * 视觉编码（文档 8.4 的约定）：
@@ -1193,18 +1276,25 @@ window.__ModuleLoader__.load({
         return () => observer.disconnect()
       }, [])
 
-      const layout = React.useMemo(() => {
+      // 聚焦：null = 全局图；否则看这个节点的两跳子图
+      const [focusId, setFocusId] = React.useState(null)
+      const model = React.useMemo(() => {
         if (state.data === null) return null
-        return layoutGraph(state.data, size.width, size.height)
-      }, [state.data, size.width, size.height])
+        if (focusId === null) {
+          return { graph: state.data, layout: layoutGraph(state.data, size.width, size.height), focused: null }
+        }
+        const sub = subgraphOf(state.data, focusId, 2)
+        return { graph: sub, layout: layoutFocus(sub, focusId, size.width, size.height), focused: focusId }
+      }, [state.data, focusId, size.width, size.height])
+      const layout = model?.layout ?? null
 
       // 颜色按团序号：同一个领域同一个色，图标里 Fig. 用 clusters 顺序
       const colorMap = React.useMemo(() => {
         const map = new Map()
-        const clusters = state.data?.clusters ?? []
-        for (const node of state.data?.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters))
+        const clusters = model?.graph.clusters ?? []
+        for (const node of model?.graph.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters))
         return map
-      }, [state.data])
+      }, [model])
 
       React.useEffect(() => {
         const canvas = canvasRef.current
@@ -1219,7 +1309,7 @@ window.__ModuleLoader__.load({
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, size.width, size.height)
 
-        const graph = state.data
+        const graph = model.graph
         const now = Date.now()
         const posOf = (id) => {
           const point = layout.positions.get(id)
@@ -1262,16 +1352,13 @@ window.__ModuleLoader__.load({
           }
         }
         ctx.globalAlpha = 1
-      }, [layout, view, hover, state.data, size, colorMap])
+      }, [layout, view, hover, model, size, colorMap])
 
-      const hitTest = (event) => {
-        if (layout === null) return null
-        const rect = event.currentTarget.getBoundingClientRect()
-        const px = event.clientX - rect.left
-        const py = event.clientY - rect.top
+      const hitTestAt = (px, py) => {
+        if (layout === null || model === null) return null
         let best = null
         let bestDist = 14
-        for (const node of state.data.nodes) {
+        for (const node of model.graph.nodes) {
           const point = layout.positions.get(node.id)
           if (point === undefined) continue
           const x = point.x * view.k + view.x
@@ -1287,16 +1374,36 @@ window.__ModuleLoader__.load({
 
       if (state.loading) return h('p', { style: S.muted }, t('loading'))
       if (state.error) return h('p', { style: S.err }, `${t('error')}: ${state.error}`)
-      const stats = state.data.stats
+      if (model === null) return h('p', { style: S.muted }, t('empty'))
+      const graph = model.graph
+      const stats = graph.stats
+      const focusNode = model.focused === null ? null : graph.nodes.find((node) => node.id === model.focused) ?? null
+      const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
+      const inFocus = model.focused !== null
+
       return h('div', null,
         h('div', { style: S.toolbar },
-          h('span', { style: S.muted, fontSize: 12 },
-            `${state.data.nodes.length} ${t('graphNodes')} · ${state.data.edges.length} ${t('graphEdges')} · ` +
-              `${state.data.clusters.length} ${t('graphClusters')}` +
-              (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
-              (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
+          inFocus
+            ? h('span', { style: { ...S.muted, fontSize: 12 } },
+                `${t('graphFocus')}：${String(focusNode?.label ?? '').slice(0, 36)} · ` +
+                  `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')}`)
+            : h('span', { style: S.muted, fontSize: 12 },
+                `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')} · ` +
+                  `${graph.clusters.length} ${t('graphClusters')}` +
+                  (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
+                  (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
           h('span', { style: { flex: 1 } }),
-          h('span', { style: S.muted, fontSize: 12 }, t('graphZoomHint')),
+          h('span', { style: S.muted, fontSize: 12 }, inFocus ? t('graphFocusHint') : t('graphGlobalHint')),
+          inFocus
+            ? h('button', {
+                type: 'button',
+                style: S.btn,
+                onClick: () => {
+                  setFocusId(null)
+                  setView({ k: 1, x: 0, y: 0 })
+                },
+              }, t('graphBack'))
+            : null,
           h('button', {
             type: 'button',
             style: S.btn,
@@ -1305,19 +1412,39 @@ window.__ModuleLoader__.load({
         ),
         h('div', {
           ref: wrapRef,
-          style: { ...S.card, padding: 0, overflow: 'hidden', height: 560, position: 'relative' },
+          style: { ...S.card, padding: 0, overflow: 'hidden', height: 560, position: 'relative', cursor: hover === null ? 'default' : 'pointer' },
           onMouseMove: (event) => {
-            const hit = hitTest(event)
+            const rect = event.currentTarget.getBoundingClientRect()
+            const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
             setHover(hit === null ? null : hit.id)
             const drag = dragRef.current
-            if (drag !== null) setView((prev) => ({ ...prev, x: prev.x + event.clientX - drag.x, y: prev.y + event.clientY - drag.y }))
-            dragRef.current = drag === null ? null : { x: event.clientX, y: event.clientY }
+            if (drag === null) return
+            // 超过 3px 才算拖动：否则点节点会被当成微小平移，聚焦点不中
+            if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) drag.moved = true
+            if (!drag.moved) return
+            setView((prev) => ({ ...prev, x: prev.x + (event.clientX - drag.lastX), y: prev.y + (event.clientY - drag.lastY) }))
+            drag.lastX = event.clientX
+            drag.lastY = event.clientY
           },
           onMouseDown: (event) => {
-            dragRef.current = { x: event.clientX, y: event.clientY }
+            dragRef.current = {
+              startX: event.clientX, startY: event.clientY,
+              lastX: event.clientX, lastY: event.clientY,
+              moved: false,
+            }
           },
-          onMouseUp: () => {
+          onMouseUp: (event) => {
+            const drag = dragRef.current
             dragRef.current = null
+            if (drag === null || drag.moved) return
+            const rect = event.currentTarget.getBoundingClientRect()
+            const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
+            if (hit === null) {
+              if (inFocus) setFocusId(null)
+              return
+            }
+            setFocusId(hit.id)
+            setView({ k: 1, x: 0, y: 0 })
           },
           onMouseLeave: () => {
             dragRef.current = null
@@ -1336,7 +1463,7 @@ window.__ModuleLoader__.load({
           },
         },
           h('canvas', { ref: canvasRef, style: { display: 'block' } }),
-          hover === null
+          hoverNode === null
             ? null
             : h('div', {
                 style: {
@@ -1346,12 +1473,14 @@ window.__ModuleLoader__.load({
                   padding: '8px 10px', fontSize: 12, lineHeight: 1.6,
                 },
               },
-                h('div', { style: { ...S.muted, fontSize: 11 } }, `${state.data.nodes.find((n) => n.id === hover)?.domain ?? ''} · ${state.data.nodes.find((n) => n.id === hover)?.type ?? ''}`),
+                h('div', { style: { ...S.muted, fontSize: 11 } },
+                  `${hoverNode.domain} · ${hoverNode.type} · ${t('graphDegree')} ${hoverNode.degree}`),
                 h('div', { style: { color: 'var(--dsw-alias-label-primary)' } },
-                  String(state.data.nodes.find((n) => n.id === hover)?.label ?? '').slice(0, 120)),
+                  String(hoverNode.label).slice(0, 120)),
               ),
         ),
       )
+
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
