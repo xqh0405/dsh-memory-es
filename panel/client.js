@@ -221,6 +221,10 @@ window.__ModuleLoader__.load({
       configNoChange: '没有改动',
       configChanged: '有未保存改动',
       indexNames: '索引',
+      backendTitle: '记忆后端',
+      backendUrl: '地址',
+      backendScope: '全局',
+      storageTitle: '存储域',
       embedding: '嵌入',
       auditNote: '审计索引不在插件配置里，且只读身份没有它的读权限，P3 再补。',
     }
@@ -415,6 +419,10 @@ window.__ModuleLoader__.load({
       configNoChange: 'No changes',
       configChanged: 'Unsaved changes',
       indexNames: 'Indexes',
+      backendTitle: 'Memory backend',
+      backendUrl: 'Endpoint',
+      backendScope: 'Global',
+      storageTitle: 'Storage',
       embedding: 'Embedding',
       auditNote: 'The audit index is not in the plugin config and the reader identity cannot read it; P3 will add it.',
       maintConsolidate: 'Consolidation',
@@ -436,20 +444,43 @@ window.__ModuleLoader__.load({
     // ── 样式（全部走主题 token，不写死颜色）─────────────────────────────
     const S = {
       wrap: { padding: '4px 2px 12px' },
-      // 主区全局面板的骨架：照 DSH 官方页面（插件管理 / 计划任务）的尺寸——
-      // 内容宽 960px、全高滚动、页头左标题右动作。不自己做全屏 workshop：
-      // 那种外壳是给要盖住会话的页面用的，我们只是主区里的一个页面。
+      wrapMain: { padding: 0 },
+      // 主区全局面板的骨架：照 DSH 官方页面（插件管理 / 计划任务）的尺寸。
       //
       // 注意这里**不写 background**：底色由注入的 WORKSPACE_CSS 按主题给实色。
       // 原因见 WORKSPACE_CSS 上方的注释（皮肤会把这个 token 改成透明或 initial）。
       workspace: {
         width: '100%', minWidth: 0, height: '100%', minHeight: 0,
-        display: 'flex', overflow: 'hidden',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
         color: 'var(--dsw-alias-label-primary)',
         fontSize: 14, lineHeight: 1.6,
       },
+      // 顶部工具条：← 返回会话 | 记忆库 | ……… | ES 状态 · 版本
+      // 照 dsh-mnemon 的「记忆系统」页：返回在左、标题紧随，状态靠右，一条 44px 的带子。
+      topbar: {
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'nowrap',
+        height: 44, flex: 'none', minWidth: 0,
+        padding: '0 clamp(20px, 2.5vw, 32px)',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      },
+      backLink: {
+        appearance: 'none', background: 'transparent', border: 'none', cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', gap: 4, flex: 'none',
+        padding: '4px 6px 4px 0', marginLeft: -4,
+        color: 'var(--dsw-alias-label-secondary)', fontSize: 13,
+      },
+      backChevron: { fontSize: 17, lineHeight: 1, marginTop: -1 },
+      topbarDivider: { width: 1, height: 16, background: 'var(--dsw-alias-border-l2)', flex: 'none' },
+      topbarTitle: { margin: 0, fontSize: 15, fontWeight: 600, lineHeight: '44px', whiteSpace: 'nowrap' },
+      topbarSpacer: { flex: 1, minWidth: 0 },
+      topbarMeta: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'nowrap' },
       workspaceScroll: { scrollbarGutter: 'stable', flex: 1, minHeight: 0, overflow: 'auto' },
-      workspaceContent: { maxWidth: 960, margin: '0 auto', padding: '0 clamp(24px, 4vw, 48px) 48px' },
+      // 铺满：主区现在是"外面的空间"，960 居中会显得像设置页。
+      // 与 mnemon 一致——全宽、左右 20~32px，宽屏靠 maxWidth 兜住阅读行长。
+      workspaceContent: {
+        maxWidth: 1280, margin: '0 auto',
+        padding: '18px clamp(20px, 2.5vw, 32px) 48px',
+      },
       workspaceHeading: {
         display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
         gap: 16, marginBottom: 20,
@@ -477,10 +508,61 @@ window.__ModuleLoader__.load({
         background: 'var(--dsw-alias-bg-layer-1)',
         padding: '12px 14px',
       },
-      statGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10, marginBottom: 12 },
+      // 概览的状态卡：一行五列（个人/团队/文档/待裁决/审计），照「记忆系统」页那排状态卡。
+      // 不用 auto-fit：五张要等宽对齐，窗口窄了整体收缩比折行好看。
+      statGrid: {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+        gap: 10,
+        marginBottom: 12,
+      },
+      statCard: {
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: 10,
+        background: 'var(--dsw-alias-bg-layer-1)',
+        padding: '12px 14px',
+        minWidth: 0,
+      },
+      statHead: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, minWidth: 0 },
       statValue: { fontSize: 22, fontWeight: 600, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.2 },
-      statLabel: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
-      statHint: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85, marginTop: 2 },
+      statLabel: {
+        fontSize: 12, color: 'var(--dsw-alias-label-secondary)',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      },
+      statHint: {
+        fontSize: 11, color: 'var(--dsw-alias-label-secondary)', opacity: 0.85, marginTop: 3,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      },
+      // 卡片左上角那颗小圆点：健康=绿、需要注意=橙。与「记忆系统」页的状态灯同一个记号。
+      dot: (tone) => ({
+        width: 6, height: 6, borderRadius: 999, flex: 'none',
+        background: tone === 'warn' ? '#c98a3f' : '#4c9a6a',
+      }),
+      // 卡片区块头：左标题 + 右动作（对应 mnemon 每张卡右上角的计数/链接）
+      sectionHead: {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        gap: 10, marginBottom: 10, flexWrap: 'wrap',
+      },
+      sectionTitle: { fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+      // 概览第二排：左边「记忆后端」占主位，右边心情小卡（用户 2026-11-01 定：
+      // 心情原来独占一行太占地方，收成右栏小卡）
+      splitRow: { display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12, alignItems: 'stretch' },
+      splitMain: { flex: '1 1 420px', minWidth: 0, display: 'flex' },
+      splitSide: { flex: '0 1 300px', minWidth: 240, display: 'flex' },
+      // 存储域：三个索引并列
+      storeGrid: {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+        gap: 10,
+      },
+      storeCell: {
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: 8,
+        padding: '10px 12px',
+        minWidth: 0,
+      },
+      storeHead: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, minWidth: 0 },
+      storeName: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginBottom: 6 },
       toolbar: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 },
       seg: { display: 'flex', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, overflow: 'hidden' },
       segBtn: (active) => ({
@@ -680,10 +762,17 @@ window.__ModuleLoader__.load({
       return typeof value === 'string' && value.length >= 16 ? `${value.slice(0, 10)} ${value.slice(11, 16)}` : value || '-'
     }
 
-    function StatCard({ label, value, hint }) {
-      return h('div', { style: S.card },
+    /**
+     * 状态卡：绿点 + 小标题在上，大数值在中，副说明在下。
+     * `tone='warn'` 用来让「待裁决」在非零时亮橙——不是错误，只是提醒该去看一眼。
+     */
+    function StatCard({ label, value, hint, tone }) {
+      return h('div', { style: S.statCard },
+        h('div', { style: S.statHead },
+          h('span', { style: S.dot(tone) }),
+          h('span', { style: S.statLabel }, label),
+        ),
         h('div', { style: S.statValue }, value),
-        h('div', { style: S.statLabel }, label),
         hint ? h('div', { style: S.statHint }, hint) : null,
       )
     }
@@ -731,42 +820,47 @@ window.__ModuleLoader__.load({
       return t('moodLow')
     }
 
+    /**
+     * 心情小卡：放在概览右栏。
+     *
+     * 原来它独占一整行，内容只有个位数事件，右边大片空白——用户 2026-11-01 定：
+     * 收成小卡并到「状态」区右侧，概览的横向空间让给「记忆后端」和「存储域」。
+     */
     function MoodCard({ mood, t }) {
-      const exists = mood && mood.exists
+      const exists = Boolean(mood && mood.exists)
       const valence = exists ? Number(mood.valence) || 0 : 0
       const events = exists && Array.isArray(mood.events) ? mood.events : []
-      if (!exists) {
-        const why = mood && mood.note ? ` · ${String(mood.note).slice(0, 160)}` : ''
-        return h('div', { style: { ...S.card, marginBottom: 12 } },
-          h('div', { style: S.muted }, `${t('moodTitle')} · ${t('moodNeutral')}${why}`),
-          h('p', { style: { ...S.muted, marginTop: 6, fontSize: 12 } }, t('moodNote')),
-        )
-      }
       // -1..1 映射成 0..100% 的填充：左负右正，视觉上"往哪边偏"一眼能看出
       const pct = Math.round(((valence + 1) / 2) * 100)
       const strong = Math.abs(valence) >= 0.12
-      return h('div', { style: { ...S.card, marginBottom: 12 } },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
-          h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } },
-            `${t('moodTitle')} · ${strong ? moodLabelOf(valence, t) : t('moodCalm')}`),
-          h('span', { style: S.muted },
-            `${valence >= 0 ? '+' : ''}${valence.toFixed(2)} · ${t('moodUpdated')} ${String(mood.updatedAt || '').replace('T', ' ').slice(0, 16)}`),
+      const tone = !exists ? t('moodNeutral') : strong ? moodLabelOf(valence, t) : t('moodCalm')
+      return h('div', { style: { ...S.card, flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
+        h('div', { style: S.sectionHead },
+          h('span', { style: S.sectionTitle }, t('moodTitle')),
+          h('span', { style: { ...S.mono, ...S.muted } },
+            exists ? `${valence >= 0 ? '+' : ''}${valence.toFixed(2)}` : '—'),
         ),
+        h('div', { style: { fontSize: 15, fontWeight: 600, marginBottom: 8 } }, tone),
         h('div', {
-          style: { marginTop: 8, height: 6, borderRadius: 999, background: 'var(--dsw-alias-fill-2, rgba(127,127,127,.18))', overflow: 'hidden' },
+          style: { height: 5, borderRadius: 999, background: 'var(--dsw-alias-fill-2, rgba(127,127,127,.18))', overflow: 'hidden' },
         }, h('div', {
-          style: { width: `${pct}%`, height: '100%', borderRadius: 999, background: valence >= 0 ? '#4c9a6a' : '#b8623f' },
+          style: {
+            width: `${exists ? pct : 50}%`,
+            height: '100%',
+            borderRadius: 999,
+            background: !exists ? 'var(--dsw-alias-border-l3)' : valence >= 0 ? '#4c9a6a' : '#b8623f',
+          },
         })),
         events.length === 0
-          ? null
-          : h('div', { style: { marginTop: 10 } },
-              h('div', { style: { ...S.muted, fontSize: 12, marginBottom: 4 } }, `${t('moodEvents')}（${events.length}）`),
-              events.slice(0, 5).map((event, index) =>
-                h('div', { key: `${index}:${event.at ?? ''}`, style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.7 } },
+          ? h('p', { style: { ...S.muted, marginTop: 10, fontSize: 11.5, lineHeight: 1.7 } },
+              exists ? t('moodNote') : `${mood && mood.note ? String(mood.note).slice(0, 120) : t('moodNeutral')}`)
+          : h('div', { style: { marginTop: 10, minWidth: 0 } },
+              h('div', { style: { ...S.muted, fontSize: 11.5, marginBottom: 3 } }, `${t('moodEvents')}（${events.length}）`),
+              events.slice(0, 3).map((event, index) =>
+                h('div', { key: `${index}:${event.at ?? ''}`, style: { fontSize: 11.5, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.65, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                   `· ${String(event.kind ?? '?')}${event.note ? `（${event.note}）` : ''} · ${String(event.at ?? '').replace('T', ' ').slice(5, 16)}`),
               ),
             ),
-        h('p', { style: { ...S.muted, marginTop: 8, fontSize: 12 } }, t('moodNote')),
       )
     }
 
@@ -781,22 +875,28 @@ window.__ModuleLoader__.load({
       }
       const counts = data.counts
       const show = (value) => (value === -1 ? '—' : String(value))
+      const chunkHint =
+        counts.docChunks === undefined || counts.docChunks === null || counts.docChunks <= 0
+          ? ''
+          : `${counts.docChunks} ${t('cardDocChunks')}`
+      // 存储域三列：个人库 / 团队库 / 文档库。名字都从 overview 的 config.indexes 来，
+      // 不在这里拼——索引名跟着 identity.userId 走，拼错就是"看着像"而不是"真的"。
+      const storeCells = [
+        { name: t('cardPersonal'), value: show(counts.personal), index: data.config.indexes.personal },
+        { name: t('cardTeam'), value: show(counts.team), index: data.config.indexes.team },
+        { name: t('cardDocs'), value: show(counts.docs), index: data.config.indexes.docs, hint: chunkHint },
+      ]
       return h('div', null,
+        // 一行五张状态卡（照「记忆系统」页那排）：个人 / 团队 / 文档 / 待裁决 / 审计
         h('div', { style: S.statGrid },
           h(StatCard, { label: t('cardPersonal'), value: show(counts.personal) }),
           h(StatCard, { label: t('cardTeam'), value: show(counts.team) }),
-          h(StatCard, {
-            label: t('cardDocs'),
-            value: show(counts.docs),
-            hint:
-              counts.docChunks === undefined || counts.docChunks === null || counts.docChunks <= 0
-                ? ''
-                : `${counts.docChunks} ${t('cardDocChunks')}`,
-          }),
+          h(StatCard, { label: t('cardDocs'), value: show(counts.docs), hint: chunkHint }),
           h(StatCard, {
             label: t('cardPending'),
             value: show(counts.pending),
             hint: counts.pending > 0 ? '→ ' + t('tabBrowse') : '',
+            tone: counts.pending > 0 ? 'warn' : undefined,
           }),
           h(StatCard, {
             label: t('cardAudit'),
@@ -808,23 +908,69 @@ window.__ModuleLoader__.load({
           }),
         ),
 
-        MoodCard({ mood, t }),
-
-        h('div', { style: { ...S.card, marginBottom: 12 } },
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
-            h('span', { style: S.pill(data.es.reachable ? 'ok' : 'warn') },
-              data.es.reachable ? t('esOk') : t('esDown')),
-            h('span', { style: S.mono }, data.config.url),
-            h('span', { style: S.muted }, `· ${data.es.status || '-'}`),
-            h('span', { style: S.muted }, `· ${t('indexNames')}: ${data.config.indexes.personal} / ${data.config.indexes.team}`),
+        // 第二排：记忆后端（主位）+ 心情（右栏小卡）
+        h('div', { style: S.splitRow },
+          h('div', { style: S.splitMain },
+            h('div', { style: { ...S.card, flex: 1, minWidth: 0 } },
+              h('div', { style: S.sectionHead },
+                h('span', { style: S.sectionTitle }, t('backendTitle')),
+                h('span', { style: S.pill(data.es.reachable ? 'ok' : 'warn') },
+                  data.es.reachable ? t('esOk') : t('esDown')),
+              ),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                // 三个索引各占一行：挤成「a / b / c」一条长串既读不出归属，也把卡片撑得很空
+                h('div', { style: { display: 'flex', gap: 10, alignItems: 'flex-start' } },
+                  h('span', { style: { ...S.muted, fontSize: 12, width: 56, flex: 'none', lineHeight: '20px' } }, t('indexNames')),
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+                    [
+                      [t('cardPersonal'), data.config.indexes.personal],
+                      [t('cardTeam'), data.config.indexes.team],
+                      [t('cardDocs'), data.config.indexes.docs],
+                    ].map(([scope, name]) =>
+                      h('div', { key: name, style: { display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 } },
+                        h('span', { style: { ...S.muted, fontSize: 11.5, width: 56, flex: 'none' } }, scope),
+                        h('span', { style: { ...S.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, name),
+                      ),
+                    ),
+                  ),
+                ),
+                h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
+                  h('span', { style: { ...S.muted, fontSize: 12, width: 56, flex: 'none' } }, t('backendUrl')),
+                  h('span', { style: S.mono, children: data.config.url }),
+                ),
+              ),
+              data.es.reachable ? null : h('p', { style: { ...S.err, marginTop: 8 } }, data.es.error),
+            ),
           ),
-          data.es.reachable ? null : h('p', { style: S.err }, data.es.error),
+          h('div', { style: S.splitSide }, MoodCard({ mood, t })),
         ),
 
+        // 存储域：三个索引并列
+        h('div', { style: { ...S.card, marginBottom: 12 } },
+          h('div', { style: S.sectionHead },
+            h('span', { style: S.sectionTitle }, t('storageTitle')),
+            h('span', { style: { ...S.muted, fontSize: 12 } }, t('backendScope')),
+          ),
+          h('div', { style: S.storeGrid },
+            storeCells.map((cell) =>
+              h('div', { key: cell.index, style: S.storeCell },
+                h('div', { style: S.storeHead },
+                  h('span', { style: S.dot() }),
+                  h('span', { style: { ...S.muted, fontSize: 12 } }, cell.name),
+                ),
+                h('div', { style: { fontSize: 18, fontWeight: 600, lineHeight: 1.3 } }, cell.value),
+                cell.hint ? h('div', { style: { ...S.muted, fontSize: 11 } }, cell.hint) : null,
+                h('div', { style: { ...S.mono, ...S.muted, marginTop: 6, fontSize: 11 } }, cell.index),
+              ),
+            ),
+          ),
+        ),
+
+        // 最近更新
         h('div', { style: S.card },
-          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
-            h('strong', { style: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' } }, t('recent')),
-            h('button', { type: 'button', style: S.btn, onClick: onOpenBrowse }, t('tabBrowse')),
+          h('div', { style: S.sectionHead },
+            h('span', { style: S.sectionTitle }, t('recent')),
+            h('button', { type: 'button', style: S.btn, onClick: onOpenBrowse }, `${t('tabBrowse')} →`),
           ),
           data.recent.length === 0
             ? h('p', { style: S.muted }, t('empty'))
@@ -840,13 +986,14 @@ window.__ModuleLoader__.load({
                   },
                 },
                   h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
-                  h('span', { style: { flex: 1, fontSize: 12.5, color: 'var(--dsw-alias-label-primary)' } },
-                    row.content.length > 64 ? `${row.content.slice(0, 64)}…` : row.content),
-                  h('span', { style: { ...S.mono, ...S.muted } }, shortTime(row.updatedAt)),
+                  h('span', { style: { flex: 1, minWidth: 0, fontSize: 12.5, color: 'var(--dsw-alias-label-primary)' } },
+                    row.content.length > 96 ? `${row.content.slice(0, 96)}…` : row.content),
+                  h('span', { style: { ...S.mono, ...S.muted, flex: 'none' } }, shortTime(row.updatedAt)),
                 ),
               ),
         ),
       )
+
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
@@ -2239,8 +2386,12 @@ window.__ModuleLoader__.load({
      *  - `settings`（设置里的「记忆库」节）：改东西的地方——配置 / 维护。
      * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
      */
-    function MemoryPanel({ t, mode = 'settings' }) {
+    function MemoryPanel({ t, mode = 'settings', onStatus }) {
       const [tab, setTab] = React.useState(mode === 'main' ? 'overview' : 'config')
+      // 工具条要显示 ES 状态与版本：由这里回报（它本来就要拉 overview），
+      // 用 ref 存回调，免得把 onStatus 塞进 loadOverview 的依赖里导致重复请求。
+      const statusRef = React.useRef(onStatus)
+      statusRef.current = onStatus
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
       const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, userId: '' })
 
@@ -2267,8 +2418,14 @@ window.__ModuleLoader__.load({
       const loadOverview = React.useCallback(() => {
         setOverview((prev) => ({ ...prev, loading: true, error: '' }))
         apiGet('/overview')
-          .then((data) => setOverview({ loading: false, error: '', data }))
-          .catch((error) => setOverview({ loading: false, error: String(error.message ?? error), data: null }))
+          .then((data) => {
+            setOverview({ loading: false, error: '', data })
+            statusRef.current?.({ reachable: Boolean(data.es?.reachable), version: data.version })
+          })
+          .catch((error) => {
+            setOverview({ loading: false, error: String(error.message ?? error), data: null })
+            statusRef.current?.({ reachable: false, version: '' })
+          })
         // 心情单独拉：它失败不该让整页报错（老库没有这个文档是正常的）
         apiGet('/mood')
           .then((value) => setMood(value))
@@ -2282,11 +2439,13 @@ window.__ModuleLoader__.load({
         firstLoad.current = false
       }, [tab, loadOverview])
 
-      return h('div', { style: S.wrap },
+      return h('div', { style: mode === 'main' ? S.wrapMain : S.wrap },
         mode === 'main' ? null : h('h2', { style: S.h2 }, t('title')),
-        h('p', { style: S.sub },
-          `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'}`),
-        h('div', { style: S.tabs },
+        mode === 'main'
+          ? null
+          : h('p', { style: S.sub },
+              `${t('subtitle')} · ${t('versionLabel')} ${overview.data?.version ?? '—'}`),
+        h('div', { style: S.tabs, [TABS_ATTR]: '' },
           (mode === 'main'
             ? [
                 ['overview', t('tabOverview')],
@@ -2342,6 +2501,8 @@ window.__ModuleLoader__.load({
 
     /** 主区外壳上的标记属性：样式钩子，也方便排查时在 DOM 里认出来。 */
     const WORKSPACE_ATTR = 'data-memory-workspace'
+    /** 页签条的标记属性：主区里让它滚动时粘住顶部（设置在设置页里不粘）。 */
+    const TABS_ATTR = 'data-memory-tabs'
     const WORKSPACE_STYLE_ID = 'dsh-memory-es-workspace-style'
 
     /**
@@ -2359,6 +2520,9 @@ window.__ModuleLoader__.load({
     const WORKSPACE_CSS = [
       `[${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
       `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
+      // 页签在主区滚动时粘顶：底色必须与画布同色，否则内容会从下面透上来。
+      `[${WORKSPACE_ATTR}] [${TABS_ATTR}] { position: sticky; top: 0; z-index: 2; background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
+      `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] [${TABS_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
     ].join('\n')
 
     /**
@@ -2367,16 +2531,29 @@ window.__ModuleLoader__.load({
      * 回滚方式：摘掉 `main` 那一组注册即可，设置里的「记忆库」节一行没动、照旧可用。
      */
     function MemoryWorkspace({ t, close }) {
+      // 工具条上的状态徽标：由 MemoryPanel 在 overview 拉回来后回报。
+      // 不在这里自己再拉一次——overview 是重查询，重复发一遍只为了让标题栏显示两个字段不划算。
+      const [status, setStatus] = React.useState(null)
       return h('div', { style: S.workspace, [WORKSPACE_ATTR]: '' },
+        h('div', { style: S.topbar },
+          typeof close === 'function'
+            ? h('button', { type: 'button', style: S.backLink, onClick: close },
+                h('span', { style: { ...S.backChevron, 'aria-hidden': 'true' } }, '‹'),
+                t('backToConversation'),
+              )
+            : null,
+          typeof close === 'function' ? h('span', { style: S.topbarDivider }) : null,
+          h('h1', { style: S.topbarTitle }, t('sectionLabel')),
+          h('span', { style: S.topbarSpacer }),
+          status
+            ? h('span', { style: S.pill(status.reachable ? 'ok' : 'warn') },
+                status.reachable ? t('esOk') : t('esDown'))
+            : null,
+          status && status.version ? h('span', { style: S.topbarMeta }, `v${status.version}`) : null,
+        ),
         h('div', { style: S.workspaceScroll },
           h('div', { style: S.workspaceContent },
-            h('div', { style: S.workspaceHeading },
-              h('h1', { style: S.workspaceTitle }, t('sectionLabel')),
-              typeof close === 'function'
-                ? h('button', { type: 'button', style: S.btn, onClick: close }, t('backToConversation'))
-                : null,
-            ),
-            h(MemoryPanel, { t, mode: 'main' }),
+            h(MemoryPanel, { t, mode: 'main', onStatus: setStatus }),
           ),
         ),
       )
