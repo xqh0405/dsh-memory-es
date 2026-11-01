@@ -275,5 +275,21 @@ function defineConsolidateIntegration(e: EsTestEnv): void {
       })
       assert.equal(found.hits.some((hit) => hit.source.source_memory_id === cleanBId), true)
     })
+
+    test('阶段 13：onlyIds 只处理点名的条目（提案-确认的「确认」这一步）', async () => {
+      const a = await saveMemory(saveDeps, { content: `阶段13 onlyIds 样本 A ${Date.now()}`, domain: MARKER_DOMAIN })
+      const b = await saveMemory(saveDeps, { content: `阶段13 onlyIds 样本 B ${Date.now()}`, domain: MARKER_DOMAIN })
+      createdMemoryIds.push(a.memory_id, b.memory_id)
+      const report = await runConsolidation(deps, {
+        apply: false,
+        batchSize: 50,
+        state: emptyState(),
+        onlyIds: [a.memory_id],
+      })
+      const ids = report.results.map((item) => item.memory_id)
+      assert.ok(ids.includes(a.memory_id), '被点名的条目应被处理')
+      assert.equal(ids.includes(b.memory_id), false, '没点名的条目不该出现在结果里')
+      assert.equal(report.applied, false)
+    })
   })
 }

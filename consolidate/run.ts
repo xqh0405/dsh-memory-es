@@ -58,6 +58,14 @@ export interface RunOptions {
   manual?: boolean
   /** 只看该时间之后创建的记忆（CLI `--since`）；不传则不限 */
   createdAfter?: Date | null
+  /**
+   * 阶段 13「提案-确认」：只处理这些 memory_id。
+   *
+   * 用法是两段式：先 dry-run 拿提案清单（`RunReport.proposals`），
+   * 人看过之后再用 `--apply --only-ids a,b,c` 只落确认过的那几条。
+   * 不做「一次 --apply 全量写」——无人值守的批量删除/合并是不可接受的风险。
+   */
+  onlyIds?: string[] | null
 }
 
 export interface StepResult {
@@ -74,15 +82,57 @@ export interface StepResult {
   sensitiveKinds?: string
 }
 
+/**
+ * 提案（阶段 13）：dry-run 时给出的「准备做什么」清单。
+ *
+ * 只收会**改变库内容**的三类结论：duplicate（判重）、merge_candidate（合并候选）、
+ * pending（判不了，等人工）。`new` 是正常入库，`blocked`/`personal_only` 是跳过，都不算提案。
+ */
+export interface Proposal {
+  memory_id: string
+  action: 'duplicate' | 'merge_candidate' | 'pending'
+  reason: string
+  /** 相关的那一条（合并对象 / 冲突对手） */
+  neighborId?: string
+  topScore?: number | null
+  confidence: number
+}
+
 export interface RunReport {
   applied: boolean
   candidates: number
   skippedProcessed: number
   results: StepResult[]
   counts: { promoted: number; duplicate: number; mergeCandidate: number; pending: number; blocked: number; personalOnly: number }
+  /** 阶段 13：提案清单（dry-run 时就是「要不要做」的依据；apply 时是可复核的落地清单） */
+  proposals: Proposal[]
   /** 模糊输入（embedding 不可用 → 该条没做 kNN 去重，只做了 sha 精确判定） */
   degraded: boolean
   state: ConsolidateState
+}
+
+/**
+ * 阶段 13：把「会改变库内容」的结论汇成提案清单。
+ *
+ * 只收 duplicate / merge_candidate / pending 三类——`new` 是正常入库、
+ * `blocked` / `personal_only` 是跳过，都不该进提案，否则清单会被跳过项淹没。
+ *
+ * 抽成纯函数是为了可测：提案就是「人要不要动手」的依据，它的筛选条件错了，
+ * 要么漏掉该审的、要么把无事发生的条目堆到人面前。
+ */
+export function buildProposals(results: readonly StepResult[]): Proposal[] {
+  return results
+    .filter((item): item is StepResult & { verdict: Proposal['action'] } =>
+      item.verdict === 'duplicate' || item.verdict === 'merge_candidate' || item.verdict === 'pending',
+    )
+    .map((item) => ({
+      memory_id: item.memory_id,
+      action: item.verdict,
+      reason: item.reason,
+      ...(item.neighborId === undefined ? {} : { neighborId: item.neighborId }),
+      ...(item.topScore === undefined ? {} : { topScore: item.topScore }),
+      confidence: item.confidence,
+    }))
 }
 
 /** 一轮整理。默认 dry-run：`apply=false` 时**只读不写**。 */
@@ -105,7 +155,13 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
   )
   const candidates = found.hits.map((hit) => toCandidate(hit.source, hit.id))
 
+  // 阶段 13：只处理被点名的条目（提案-确认的「确认」这一步）
+  const onlyIds = options.onlyIds === undefined || options.onlyIds === null
+    ? null
+    : new Set(options.onlyIds.map((id) => id.trim()).filter((id) => id !== ''))
+
   for (const candidate of candidates) {
+    if (onlyIds !== null && !onlyIds.has(candidate.memory_id)) continue
     if (!options.manual && alreadyProcessed(state, candidate.memory_id)) {
       skippedProcessed += 1
       continue
@@ -424,12 +480,15 @@ export async function runConsolidation(deps: ConsolidateDeps, options: RunOption
 
   if (options.apply) state = { ...state, lastRunAt: now.toISOString() }
 
+  const proposals = buildProposals(results)
+
   return {
     applied: options.apply,
     candidates: candidates.length,
     skippedProcessed,
     results,
     counts,
+    proposals,
     degraded,
     state,
   }

@@ -14,6 +14,7 @@ import { detectContradiction } from '../consolidate/conflict.ts'
 import { decideDedupe } from '../consolidate/dedupe.ts'
 import { classifyValue, distillBatch, normalizeHomePath, stripPersonalContext, topicKey } from '../consolidate/distill.ts'
 import { buildCandidateQuery, shouldRun } from '../consolidate/scan.ts'
+import { buildProposals, type StepResult } from '../consolidate/run.ts'
 import { scanSensitive, summarizeHits } from '../consolidate/sensitive.ts'
 import {
   alreadyProcessed,
@@ -366,5 +367,47 @@ describe('normalizeHomePath · macOS 家目录', () => {
 
   test('共享目录形态的 /home/<name> 仍保留', () => {
     assert.equal(normalizeHomePath('/home/docker-data/lottery', 'zhongjinqi'), '/home/docker-data/lottery')
+  })
+})
+
+describe('阶段 13：提案清单（buildProposals）', () => {
+  const step = (over: Partial<StepResult>): StepResult => ({
+    memory_id: 'm1',
+    verdict: 'new',
+    reason: 'r',
+    distilledBy: 'rule',
+    confidence: 0.9,
+    ...over,
+  })
+
+  test('只收 duplicate / merge_candidate / pending', () => {
+    const out = buildProposals([
+      step({ memory_id: 'a', verdict: 'duplicate' }),
+      step({ memory_id: 'b', verdict: 'merge_candidate', neighborId: 'x', topScore: 0.93 }),
+      step({ memory_id: 'c', verdict: 'pending', neighborId: 'y' }),
+      // 下面三种都不该进提案
+      step({ memory_id: 'd', verdict: 'new' }),
+      step({ memory_id: 'e', verdict: 'blocked' }),
+      step({ memory_id: 'f', verdict: 'personal_only' }),
+    ])
+    assert.deepEqual(out.map((item) => item.memory_id), ['a', 'b', 'c'])
+    assert.deepEqual(out.map((item) => item.action), ['duplicate', 'merge_candidate', 'pending'])
+  })
+
+  test('带上相邻条目与分数（人要看得出「和谁重复了」）', () => {
+    const [item] = buildProposals([step({ verdict: 'merge_candidate', neighborId: 'x', topScore: 0.93, confidence: 0.8 })])
+    assert.equal(item?.neighborId, 'x')
+    assert.equal(item?.topScore, 0.93)
+    assert.equal(item?.confidence, 0.8)
+  })
+
+  test('没有相邻条目时不留空字段（避免下游把 undefined 当值用）', () => {
+    const [item] = buildProposals([step({ verdict: 'duplicate' })])
+    assert.equal('neighborId' in (item ?? {}), false)
+    assert.equal('topScore' in (item ?? {}), false)
+  })
+
+  test('空输入 → 空清单', () => {
+    assert.deepEqual(buildProposals([]), [])
   })
 })

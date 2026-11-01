@@ -5,7 +5,9 @@
  *
  * 用法：
  *   node consolidate/cli.ts                        # dry-run：只出候选报告
- *   node consolidate/cli.ts --apply                # 真写团队库 + 回写个人库状态
+ *   node consolidate/cli.ts --proposals p.json     # 同上 + 提案清单落文件（阶段 13）
+ *   node consolidate/cli.ts --apply --only-ids a,b # 只落确认过的那几条（提案-确认）
+ *   node consolidate/cli.ts --apply                # 真写团队库 + 回写个人库状态（全量，慎用）
  *   node consolidate/cli.ts --review list          # 看待裁决队列（pending，不进检索）
  *   node consolidate/cli.ts --approve <doc_id>     # 通过 → 进入检索
  *   node consolidate/cli.ts --reject <doc_id> --reason "结论与线上不符"
@@ -18,6 +20,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 import { createEmbedder } from '../src/embedding.ts'
@@ -60,6 +63,10 @@ interface CliArgs {
   status: string
   /** --ls 是否把团队库的 pending 也列出来（默认不列，和检索口径一致） */
   showPending: boolean
+  /** 阶段 13：把提案清单写成 JSON 文件（不传则只打印摘要） */
+  proposalsPath: string | null
+  /** 阶段 13：只处理这些 memory_id（提案-确认的「确认」） */
+  onlyIds: string[] | null
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -84,10 +91,24 @@ function parseArgs(argv: string[]): CliArgs {
     domain: [],
     status: 'active',
     showPending: false,
+    proposalsPath: null,
+    onlyIds: null,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     switch (arg) {
+      case '--proposals': {
+        const next = argv[++i]
+        if (next === undefined || next === '') throw new Error('--proposals 需要一个输出路径')
+        args.proposalsPath = next
+        break
+      }
+      case '--only-ids': {
+        const next = argv[++i]
+        if (next === undefined || next === '') throw new Error('--only-ids 需要至少一个 memory_id（逗号分隔）')
+        args.onlyIds = next.split(',').map((id) => id.trim()).filter((id) => id !== '')
+        break
+      }
       case '--apply':
         args.apply = true
         break
@@ -198,6 +219,8 @@ function printHelp(): void {
 
 选项:
   --apply              真的写入团队库并回写个人库状态（默认只报告）
+  --proposals <path>   把提案清单（duplicate/merge_candidate/pending）写成 JSON 文件
+  --only-ids <ids>     只处理这些 memory_id（逗号分隔）：配合 --apply 做「确认后才落库」
   --dry-run            显式 dry-run（默认行为）
   --limit <N>          本批最多处理多少条（默认 ${DEFAULT_BATCH_SIZE}）
   --user <id>          目标用户（默认取 .env 的 MEM_USER_ID）
@@ -381,10 +404,24 @@ async function main(): Promise<void> {
       state,
       manual: args.manual,
       ...(args.since === null ? {} : { createdAfter: args.since }),
+      ...(args.onlyIds === null ? {} : { onlyIds: args.onlyIds }),
     },
   )
 
   printReport(report, args.apply)
+
+  // 阶段 13：提案清单落成文件，供人逐条确认后再 `--apply --only-ids`
+  if (args.proposalsPath !== null) {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      applied: report.applied,
+      counts: report.counts,
+      proposals: report.proposals,
+    }
+    await writeFile(args.proposalsPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    console.log(`提案清单：${args.proposalsPath}（${report.proposals.length} 条）`)
+    console.log('确认后执行：node consolidate/cli.ts --apply --only-ids <逗号分隔的 memory_id>')
+  }
 
   if (args.apply) {
     saveState(args.statePath, report.state)
