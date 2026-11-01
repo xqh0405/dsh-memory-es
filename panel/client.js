@@ -1126,7 +1126,10 @@ window.__ModuleLoader__.load({
       const gap = 26
       let cursorX = 0
       let maxRadius = 1
-      for (const members of components) {
+      for (const [clusterIndex, members] of components.entries()) {
+        // 伪 3D 的 z：整簇一个基准深度，簇内再小幅抖动。
+        // 纯按节点哈希会让相邻两点的深度乱跳，看着像噪点；先给簇定层才有"体积"。
+        const baseZ = (hashUnit(`cluster:${clusterIndex}:${members[0]}`) - 0.5) * 1.1
         // 分量半径按节点数开方（面积正比于节点数），单点分量给一个最小半径
         const spread = Math.sqrt(members.length) * 22
         const radius = Math.max(26, spread)
@@ -1169,7 +1172,8 @@ window.__ModuleLoader__.load({
             const j2 = hashUnit(id + '#r')
             const angle = base + (j1 - 0.5) * (ids.length > 3 ? 0.9 : 0.25)
             const r = d === 0 ? 0 : ringRadius * (0.82 + j2 * 0.36)
-            positions.set(id, { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r })
+            const z = baseZ + (hashUnit(`${id}#z`) - 0.5) * 0.55
+            positions.set(id, { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, z })
           })
         }
         maxRadius = Math.max(maxRadius, radius)
@@ -1194,7 +1198,8 @@ window.__ModuleLoader__.load({
       const offsetX = (width - spanX * scale) / 2 - minX * scale
       const offsetY = (height - spanY * scale) / 2 - minY * scale
       for (const [id, point] of positions) {
-        positions.set(id, { x: point.x * scale + offsetX, y: point.y * scale + offsetY })
+        // z 不参与缩放：它表示的是深度，量纲和画布不同
+        positions.set(id, { x: point.x * scale + offsetX, y: point.y * scale + offsetY, z: point.z })
       }
       return { positions, bounds: { minX, minY, maxX, maxY } }
     }
@@ -1260,13 +1265,15 @@ window.__ModuleLoader__.load({
         const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * usable
         ids.forEach((id, i) => {
           if (d === 0) {
-            positions.set(id, { x: cx, y: cy })
+            positions.set(id, { x: cx, y: cy, z: -0.2 })
             return
           }
           const base = (Math.PI * 2 * i) / ids.length + d * 0.4
           const jitter = (hashUnit(id) - 0.5) * (ids.length > 4 ? 0.7 : 0.2)
           const r = ringRadius * (0.9 + hashUnit(id + '#r') * 0.2)
-          positions.set(id, { x: cx + Math.cos(base + jitter) * r, y: cy + Math.sin(base + jitter) * r })
+          // 越外圈越靠后：聚焦时中心节点要"跳出来"
+          const z = (d / maxDepth) * 0.9 + (hashUnit(`${id}#z`) - 0.5) * 0.3
+          positions.set(id, { x: cx + Math.cos(base + jitter) * r, y: cy + Math.sin(base + jitter) * r, z })
         })
       }
       return { positions, bounds: { minX: 0, minY: 0, maxX: width, maxY: height }, focusedCenter: centerId }
@@ -1356,34 +1363,69 @@ window.__ModuleLoader__.load({
           if (point === undefined) return undefined
           return { x: point.x * view.k + view.x, y: point.y * view.k + view.y }
         }
+        const depthOf = (id) => layout.positions.get(id)?.z ?? 0
+        // 伪 3D 的三件套：透视缩放、深度雾、由远及近的绘制顺序。
+        // 不引入 three.js —— 300 个点用不着相机，这三样就够撑出体积感。
+        const persp = (z) => 1 / (1 + Math.max(-0.85, Math.min(0.85, z)) * 0.26)
+        const fog = (z) => Math.max(0.2, Math.min(1, 0.9 - z * 0.36))
 
-        // 边：权重即透明度，弱边不抢注意力
-        for (const edge of graph.edges) {
+        // 深空底：中心亮、四周暗，给图一个"远近"的参照
+        const bg = ctx.createRadialGradient(size.width / 2, size.height / 2, 0, size.width / 2, size.height / 2, Math.max(size.width, size.height) * 0.72)
+        bg.addColorStop(0, 'rgba(52,70,112,.42)')
+        bg.addColorStop(0.55, 'rgba(24,30,48,.22)')
+        bg.addColorStop(1, 'rgba(10,12,18,0)')
+        ctx.fillStyle = bg
+        ctx.fillRect(0, 0, size.width, size.height)
+
+        // 边：按两端平均深度由远及近画，弱边不抢注意力
+        const edgeOrder = [...graph.edges].sort(
+          (a, b) => (depthOf(a.source) + depthOf(a.target)) / 2 - (depthOf(b.source) + depthOf(b.target)) / 2,
+        )
+        for (const edge of edgeOrder) {
           const a = posOf(edge.source)
           const b = posOf(edge.target)
           if (a === undefined || b === undefined) continue
+          const depth = persp((depthOf(edge.source) + depthOf(edge.target)) / 2)
           const active = hover !== null && (hover === edge.source || hover === edge.target)
-          ctx.strokeStyle = active ? 'rgba(150,180,255,.95)' : `rgba(140,165,210,${0.14 + edge.weight * 0.22})`
-          ctx.lineWidth = active ? 1.6 : 0.8
+          ctx.strokeStyle = active
+            ? 'rgba(150,180,255,.95)'
+            : `rgba(140,165,210,${(0.12 + edge.weight * 0.2) * fog((depthOf(edge.source) + depthOf(edge.target)) / 2)})`
+          ctx.lineWidth = (active ? 1.8 : 0.8) * Math.min(1.3, depth)
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
           ctx.lineTo(b.x, b.y)
           ctx.stroke()
         }
 
-        // 节点
-        for (const node of graph.nodes) {
+        // 节点：远的先画，近的盖上去；近处多一圈光晕
+        const nodeOrder = [...graph.nodes].sort((a, b) => depthOf(b.id) - depthOf(a.id))
+        for (const node of nodeOrder) {
           const point = posOf(node.id)
           if (point === undefined) continue
+          const z = depthOf(node.id)
+          const depth = persp(z)
           const age = node.updatedAt === '' ? 365 : Math.min(365, (now - Date.parse(node.updatedAt)) / 86400000)
           const fresh = 1 - Math.min(1, age / 120) // 120 天以内线性衰减
-          const radius = (3.2 + Math.min(6, node.degree) * 0.9) * Math.min(1.6, view.k)
+          const radius = (3.2 + Math.min(6, node.degree) * 0.9) * Math.min(1.6, view.k) * depth
           const isHover = hover === node.id
+          const color = colorMap.get(node.id) ?? '#6b8cff'
+          const alpha = (isHover ? 1 : 0.35 + fresh * 0.65) * fog(z)
+
+          // 光晕：越靠前越亮，模拟"离你更近的星"
+          if (depth > 1.02) {
+            ctx.beginPath()
+            ctx.arc(point.x, point.y, radius * 2.3, 0, Math.PI * 2)
+            ctx.fillStyle = color
+            ctx.globalAlpha = alpha * 0.1 * (depth - 1) * 6
+            ctx.fill()
+          }
+
           ctx.beginPath()
           ctx.arc(point.x, point.y, isHover ? radius + 2.5 : radius, 0, Math.PI * 2)
-          ctx.fillStyle = colorMap.get(node.id) ?? '#6b8cff'
-          ctx.globalAlpha = isHover ? 1 : 0.35 + fresh * 0.65
+          ctx.fillStyle = color
+          ctx.globalAlpha = alpha
           ctx.fill()
+
           if (isHover) {
             ctx.globalAlpha = 1
             ctx.strokeStyle = 'rgba(255,255,255,.9)'
