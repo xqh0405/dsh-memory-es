@@ -691,3 +691,82 @@ test('表情包预览：只读同目录图片，路径穿越与非图片一律 4
   assert.equal(missing.statusCode, 404)
   assert.match(String(missing.body), /文件不存在/)
 })
+
+// ── 星图构图：度数上限与节点上限决定了图是"能看"还是"一团毛球" ────────────
+const { buildGraph } = await import('../panel/index.js')
+
+const nodeOf = (id, extra = {}) => ({
+  id,
+  scope: 'personal',
+  label: id,
+  type: 'fact',
+  domain: extra.domain ?? 'general',
+  updatedAt: extra.updatedAt ?? '2026-10-01T00:00:00Z',
+  status: 'active',
+})
+
+test('buildGraph：A→B 与 B→A 是同一条边，权重取大', () => {
+  const graph = buildGraph(
+    [nodeOf('a'), nodeOf('b')],
+    [
+      { source: 'a', target: 'b', weight: 0.6 },
+      { source: 'b', target: 'a', weight: 0.7 },
+    ],
+  )
+  assert.equal(graph.edges.length, 1, '无向图里两点之间只能有一条边')
+  assert.equal(graph.edges[0].weight, 0.7)
+  assert.equal(graph.stats.nodes, 2)
+  assert.equal(graph.stats.edges, 1)
+})
+
+test('buildGraph：单点度数不超过上限（防毛球）', () => {
+  const hub = nodeOf('hub')
+  const leaves = Array.from({ length: 20 }, (_, i) => nodeOf(`leaf${i}`))
+  const edges = leaves.map((leaf, i) => ({ source: 'hub', target: leaf.id, weight: 0.6 + i / 100 }))
+  const graph = buildGraph([hub, ...leaves], edges, { limit: 100, maxDegree: 3 })
+  const hubNode = graph.nodes.find((node) => node.id === 'hub')
+  assert.ok(hubNode.degree <= 3, `度数应为 3，实际 ${hubNode.degree}`)
+  // 留的是权重最高的三条（索引末尾那几个）
+  const linked = graph.edges.map((edge) => (edge.source === 'hub' ? edge.target : edge.source))
+  assert.deepEqual(linked.sort(), ['leaf17', 'leaf18', 'leaf19'])
+})
+
+test('buildGraph：节点上限按「度数 → 新鲜度」，孤立点沉底', () => {
+  const connected = [nodeOf('a', { updatedAt: '2026-10-01T00:00:00Z' }), nodeOf('b', { updatedAt: '2026-10-01T00:00:00Z' })]
+  const fresh = nodeOf('fresh', { updatedAt: '2026-11-01T00:00:00Z' })
+  const old = nodeOf('old', { updatedAt: '2025-01-01T00:00:00Z' })
+  const graph = buildGraph(
+    [...connected, fresh, old],
+    [{ source: 'a', target: 'b', weight: 0.7 }],
+    { limit: 3 },
+  )
+  assert.deepEqual(graph.nodes.map((node) => node.id).slice(0, 2).sort(), ['a', 'b'], '有边的先留下')
+  assert.equal(graph.nodes.length, 3)
+  // 剩下一个名额给更新的孤立点
+  assert.ok(graph.nodes.some((node) => node.id === 'fresh'))
+  assert.equal(graph.stats.orphans, 1, 'fresh 是孤儿，应当计入统计')
+})
+
+test('buildGraph：指向取不到端点的边计入 unresolved，不入图', () => {
+  const graph = buildGraph(
+    [nodeOf('a')],
+    [
+      { source: 'a', target: 'missing', weight: 0.8 },
+      { source: 'a', target: 'a', weight: 0.9 },
+    ],
+  )
+  assert.equal(graph.edges.length, 0, '自环与被裁掉的端点都不该出现在边里')
+  assert.equal(graph.stats.unresolved, 1)
+  assert.equal(graph.stats.orphans, 1)
+})
+
+test('buildGraph：按 domain 分团，计数与节点一致', () => {
+  const graph = buildGraph(
+    [nodeOf('a', { domain: 'lottery-cloud' }), nodeOf('b', { domain: 'lottery-cloud' }), nodeOf('c', { domain: 'huoxin-data' })],
+    [{ source: 'a', target: 'b', weight: 0.7 }],
+  )
+  const total = graph.clusters.reduce((sum, cluster) => sum + cluster.count, 0)
+  assert.equal(total, graph.nodes.length)
+  assert.equal(graph.clusters[0].domain, 'lottery-cloud')
+  assert.equal(graph.clusters[0].count, 2)
+})

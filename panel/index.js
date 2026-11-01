@@ -397,6 +397,212 @@ function projectHit(hit, scope) {
   }
 }
 
+/**
+ * 读 `related`：`[{id, weight}]`，容忍脏数据（和 src/edges.ts 的 readEdges 同口径）。
+ *
+ * ⚠️ `related` 的 mapping 是 `{"type":"object","enabled":false}` —— **不参与索引**，
+ * 只能用 `_source` 读回来。`exists: {field:'related'}` 这类查询永远返回 0，
+ * 2026-11-01 就因此误判过「全库没有边」，实际个人库 296/310 条都有。
+ */
+function readRelated(raw) {
+  if (!Array.isArray(raw)) return []
+  const out = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const id = str(item.id).trim()
+    const weight = typeof item.weight === 'number' ? item.weight : Number.NaN
+    if (id === '' || !Number.isFinite(weight)) continue
+    out.push({ id, weight })
+  }
+  return out
+}
+
+/**
+ * 星图构图（纯函数，便于单测）。
+ *
+ * 输入是「已取到的原始节点 + 单向边」，输出可直接交给前端画：
+ *  1. 边去重：A→B 与 B→A 是同一条，权重取大；
+ *  2. **度数上限**：每个节点只留权重最高的 maxDegree 条。不加这个上限，
+ *     库一大就成了毛球（文档 8.4 的「防毛球天花板」）；
+ *  3. 节点上限：按「度数 → 新鲜度」排序取前 limit，孤立点自然沉底；
+ *  4. 成边时两端必须都在保留集合里，否则丢弃；
+ *  5. 分团按 `domain`：P0 用现成领域标签，不做聚类（留到 P1）。
+ */
+function buildGraph(nodeList, edgeList, options = {}) {
+  const limit = Number.isInteger(options.limit) ? options.limit : 300
+  const maxDegree = Number.isInteger(options.maxDegree) ? options.maxDegree : 10
+
+  const byId = new Map()
+  for (const node of nodeList) if (!byId.has(node.id)) byId.set(node.id, node)
+
+  // 每个节点的候选边（单向边归属到 source 一侧；无向图的两端都要有候选）
+  const candidates = new Map()
+  const unresolved = new Set()
+  const addCandidate = (id, other, weight) => {
+    const list = candidates.get(id)
+    if (list === undefined) candidates.set(id, [{ other, weight }])
+    else list.push({ other, weight })
+  }
+  for (const edge of edgeList) {
+    if (!byId.has(edge.source)) continue
+    if (!byId.has(edge.target)) {
+      // 源在、目标不在：取数范围内找不到端点（可能是真断链，也可能只是没取到）
+      unresolved.add(`${edge.source}|${edge.target}`)
+      continue
+    }
+    if (edge.source === edge.target) continue // 自环没有信息量
+    addCandidate(edge.source, edge.target, edge.weight)
+    addCandidate(edge.target, edge.source, edge.weight)
+  }
+
+  // 度数上限：每个节点只留权重最高的若干条
+  for (const list of candidates.values()) {
+    list.sort((a, b) => b.weight - a.weight)
+    if (list.length > maxDegree) list.length = maxDegree
+  }
+
+  // 节点上限：度数高的优先，同度数按更新时间新的优先
+  const ranked = [...byId.values()]
+    .map((node) => ({ ...node, degree: (candidates.get(node.id) ?? []).length }))
+    .sort((a, b) => {
+      if (b.degree !== a.degree) return b.degree - a.degree
+      return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0
+    })
+    .slice(0, limit)
+  const kept = new Set(ranked.map((node) => node.id))
+
+  // 成边：两端都在保留集合里，无向去重，权重取大
+  const byPair = new Map()
+  for (const node of ranked) {
+    for (const item of candidates.get(node.id) ?? []) {
+      if (item.other === node.id) continue
+      if (!kept.has(item.other)) continue
+      // 度数上限是**每个节点自己的**约束：hub 裁掉的那条边，不能因为叶子那边还留着就复活
+      const backKept = (candidates.get(item.other) ?? []).some((entry) => entry.other === node.id)
+      if (!backKept) continue
+      const key = node.id < item.other ? `${node.id}|${item.other}` : `${item.other}|${node.id}`
+      const prev = byPair.get(key)
+      if (prev === undefined || item.weight > prev.weight) {
+        byPair.set(key, { source: node.id, target: item.other, weight: item.weight })
+      }
+    }
+  }
+  const edges = [...byPair.values()].map((edge) => ({
+    source: edge.source,
+    target: edge.target,
+    // 保留 3 位，前端当强弱用
+    weight: Math.round(edge.weight * 1000) / 1000,
+  }))
+
+  // 最终度数（按成图后的边重算——裁剪和节点上限都会让度数变小）
+  const degree = new Map()
+  for (const edge of edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1)
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1)
+  }
+  const nodes = ranked.map((node) => ({ ...node, degree: degree.get(node.id) ?? 0 }))
+
+  // 分团：按 domain 计数，前端据此分区布局
+  const clusters = new Map()
+  for (const node of nodes) {
+    const entry = clusters.get(node.domain)
+    if (entry === undefined) clusters.set(node.domain, { domain: node.domain, count: 1 })
+    else entry.count += 1
+  }
+
+  return {
+    nodes,
+    edges,
+    clusters: [...clusters.values()].sort((a, b) => b.count - a.count),
+    stats: {
+      nodes: nodes.length,
+      edges: edges.length,
+      orphans: nodes.filter((node) => node.degree === 0).length,
+      unresolved: unresolved.size,
+    },
+  }
+}
+
+/** 星图默认与上限（文档 8.4：节点封顶 400、单点度数 10） */
+const GRAPH_DEFAULT_NODES = 300
+const GRAPH_MAX_NODES = 400
+const GRAPH_MAX_DEGREE = 10
+
+/**
+ * 星图数据（阶段 8 第六个页签）。
+ *
+ * 只读：把两个索引的 active 记忆与 `related` 拉回来，交给 buildGraph 裁成可画的图。
+ * 取数按「更新时间倒序」多取一倍——孤立点会在裁剪里沉底，只取 limit 条会让图比预期稀。
+ */
+async function handleGraph(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  const rawLimit = Number(url.searchParams.get('limit') ?? GRAPH_DEFAULT_NODES)
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(20, Math.min(GRAPH_MAX_NODES, Math.trunc(rawLimit)))
+    : GRAPH_DEFAULT_NODES
+  const scope = str(url.searchParams.get('scope') ?? 'both')
+  const targets =
+    scope === 'team'
+      ? [['team', names.team]]
+      : scope === 'personal'
+        ? [['personal', names.personal]]
+        : [['personal', names.personal], ['team', names.team]]
+
+  const fetchSize = Math.min(GRAPH_MAX_NODES * 2, Math.max(limit * 2, 200))
+  const nodes = []
+  const edges = []
+
+  for (const [scopeName, index] of targets) {
+    let result
+    try {
+      result = await client.search(index, {
+        size: fetchSize,
+        sort: [{ updated_at: 'desc' }],
+        query: { term: { status: 'active' } },
+        _source: ['memory_id', 'summary', 'content', 'domain', 'memory_type', 'updated_at', 'status', 'related'],
+      })
+    } catch (error) {
+      return json(res, 503, { ok: false, error: String(error?.message ?? error) })
+    }
+    // 面板的 search 返回 ES 原始响应（`{ hits: { hits: [...] } }`），不是数组
+    for (const hit of result.hits?.hits ?? []) {
+      const source = hit._source ?? {}
+      const id = str(source.memory_id) || str(hit._id)
+      if (id === '') continue
+      nodes.push({
+        id,
+        scope: scopeName,
+        // 详情面板只需要一句可读的摘要，全文由「记忆浏览」负责
+        label: str(source.summary) || str(source.content).slice(0, 80),
+        type: str(source.memory_type) || 'fact',
+        domain: str(source.domain) || 'general',
+        updatedAt: str(source.updated_at),
+        status: str(source.status) || 'active',
+      })
+      for (const edge of readRelated(source.related)) {
+        edges.push({ source: id, target: edge.id, weight: edge.weight })
+      }
+    }
+  }
+
+  const graph = buildGraph(nodes, edges, { limit, maxDegree: GRAPH_MAX_DEGREE })
+  return json(res, 200, {
+    ok: true,
+    value: {
+      generatedAt: new Date().toISOString(),
+      scope,
+      limit,
+      maxDegree: GRAPH_MAX_DEGREE,
+      ...graph,
+    },
+  })
+}
+
 async function handleOverview(ctx, res) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -1925,6 +2131,7 @@ async function handle(ctx, req, res) {
     if (path === '/identity/review' && req.method === 'POST') return await handleIdentityReview(ctx, res, req)
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: '该接口只支持 GET' })
     if (path === '/overview') return await handleOverview(ctx, res)
+    if (path === '/graph') return await handleGraph(ctx, res, url)
     if (path === '/memories') return await handleMemories(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
@@ -2286,7 +2493,9 @@ export {
   handleCapabilities,
   handleConsolidate,
   handleDeleteMemory,
+  buildGraph,
   handleExport,
+  handleGraph,
   handleMaintenanceGet,
   handleMemories,
   handleReviewAction,
