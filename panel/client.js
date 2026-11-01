@@ -266,6 +266,7 @@ window.__ModuleLoader__.load({
       configRestart: '⚠️ 需要重启 dsh 才生效（ES 客户端在插件加载时建立）。容器里执行：docker restart <容器名>',
       configReadonly: '只读信息（密码不显示）',
       configNoChange: '没有改动',
+      configDefault: '默认值',
       configChanged: '有未保存改动',
       indexNames: '索引',
       backendTitle: '记忆后端',
@@ -510,6 +511,7 @@ window.__ModuleLoader__.load({
       configRestart: '⚠️ Restart dsh for it to take effect (the ES client is built when the plugin loads). In a container: docker restart <container>',
       configReadonly: 'Read-only info (passwords hidden)',
       configNoChange: 'No changes',
+      configDefault: 'default',
       configChanged: 'Unsaved changes',
       indexNames: 'Indexes',
       backendTitle: 'Memory backend',
@@ -2015,6 +2017,9 @@ window.__ModuleLoader__.load({
                     placeholder: field.hint ?? '',
                     onChange: (event) => setDraft((prev) => ({ ...prev, [field.key]: event.target.value })),
                   }),
+              field.isDefault
+                ? h('span', { style: { fontSize: 11, ...S.muted, whiteSpace: 'nowrap' } }, t('configDefault'))
+                : null,
               h('code', { style: { ...S.mono, ...S.muted, width: 170 } }, field.key),
             ),
           ),

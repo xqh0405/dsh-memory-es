@@ -1877,30 +1877,32 @@ async function handleReviewAction(ctx, res, docId, action, req) {
  * 所以走 profile 的 `cordis.patch.yml` 手动改，收益不比面板低、攻击面小得多。
  */
 const EDITABLE = [
-  { path: ['es', 'requestTimeoutMs'], label: '请求超时(ms)', type: 'number' },
-  { path: ['index', 'team'], label: '团队库索引名', type: 'string' },
-  { path: ['embedding', 'url'], label: 'Embedding 地址', type: 'string' },
-  { path: ['embedding', 'model'], label: 'Embedding 模型', type: 'string' },
-  { path: ['embedding', 'dims'], label: '向量维度', type: 'number' },
-  { path: ['defaults', 'domain'], label: '默认 domain', type: 'string' },
+  { path: ['es', 'requestTimeoutMs'], label: '请求超时(ms)', type: 'number', default: 8000 },
+  { path: ['index', 'team'], label: '团队库索引名', type: 'string', default: 'team_knowledge' },
+  { path: ['embedding', 'url'], label: 'Embedding 地址', type: 'string', default: 'http://127.0.0.1:11434' },
+  { path: ['embedding', 'model'], label: 'Embedding 模型', type: 'string', default: 'bge-m3' },
+  { path: ['embedding', 'dims'], label: '向量维度', type: 'number', default: 1024 },
+  { path: ['defaults', 'domain'], label: '默认 domain', type: 'string', default: 'general' },
   // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用
-  { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
-  { path: ['distill', 'model'], label: '蒸馏模型', type: 'string', hint: '留空 = 用宿主第一个可用模型' },
-  { path: ['distill', 'timeoutMs'], label: '蒸馏超时(ms)', type: 'number' },
+  { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', default: false, hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
+  { path: ['distill', 'model'], label: '蒸馏模型', type: 'string', default: '', hint: '留空 = 用宿主第一个可用模型' },
+  { path: ['distill', 'timeoutMs'], label: '蒸馏超时(ms)', type: 'number', default: 30000 },
   // 阶段 9.4：人格内核允许在面板里直接改（改完写回 profile 配置，热重载后下一轮提示词生效）
-  { path: ['persona', 'seed'], label: '人格内核', type: 'string', hint: '这段文字会进系统提示词；留空即不注入人格' },
-  { path: ['persona', 'enabled'], label: '启用人格', type: 'boolean' },
+  { path: ['persona', 'seed'], label: '人格内核', type: 'string', default: '', hint: '这段文字会进系统提示词；留空即不注入人格' },
+  { path: ['persona', 'enabled'], label: '启用人格', type: 'boolean', default: true },
   // 阶段 9.5：每日回顾（默认开；关掉后不再调模型，已有日记保留）
   {
     path: ['journal', 'enabled'],
     label: '每日回顾',
     type: 'boolean',
+    default: true,
     hint: '每天到点把当天对话压成一段，写进「人格 → 日记」的回顾栏；关掉后不再调模型',
   },
   {
     path: ['journal', 'at'],
     label: '回顾时间',
     type: 'string',
+    default: '23:30',
     hint: 'HH:MM（本地时区）。过了点会补跑；同一天只写一次',
   },
   // 阶段 9.6：每日自动提炼（产物仍是待审核候选，不会自己改行为）
@@ -1908,42 +1910,49 @@ const EDITABLE = [
     path: ['traits', 'enabled'],
     label: '每日自动提炼',
     type: 'boolean',
+    default: true,
     hint: '每天到点替你跑一次 memory_traits；产出仍是待审核候选，采纳要人工点',
   },
   {
     path: ['traits', 'at'],
     label: '提炼时间',
     type: 'string',
+    default: '02:30',
     hint: 'HH:MM（本地时区），默认 02:30',
   },
   {
     path: ['traits', 'days'],
     label: '回看天数',
     type: 'number',
+    default: 14,
     hint: '提炼时回看最近多少天的记忆（1~90）',
   },
   {
     path: ['traits', 'maxPerDay'],
     label: '每天最多候选',
     type: 'number',
+    default: 5,
     hint: '跨多次运行累计（定时一次 + 手动几次都算），默认 5',
   },
   {
     path: ['traits', 'maxOutput'],
     label: '单次上限',
     type: 'number',
+    default: 5,
     hint: '一次模型调用最多接受几条，默认 5',
   },
   {
     path: ['traits', 'dedupMinScore'],
     label: '判重阈值',
     type: 'number',
+    default: 0.88,
     hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.88',
   },
   {
     path: ['traits', 'dedupMinScoreAnchored'],
     label: '锚定条目阈值',
     type: 'number',
+    default: 0.82,
     hint: '对已设锚点（定稿）的自述判重更严（0.6~0.99），默认 0.82',
   },
 ]
@@ -1962,12 +1971,19 @@ async function handleConfigGet(ctx, res) {
   json(res, 200, {
     ok: true,
     value: {
-      fields: EDITABLE.map((field) => ({
-        key: field.path.join('.'),
-        label: field.label,
-        type: field.type,
-        value: pick(value, field.path) ?? (field.type === 'number' ? 0 : ''),
-      })),
+      fields: EDITABLE.map((field) => {
+        // 未显式配置时**不能**渲染成 0：0 会被当成"生效值"，而实际生效的是 schema 默认值。
+        // 2026-11-01 用户看到 traits 四项全是 0 来问，就是这条占位逻辑的锅。
+        const raw = pick(value, field.path)
+        const missing = raw === undefined || raw === null
+        return {
+          key: field.path.join('.'),
+          label: field.label,
+          type: field.type,
+          value: missing ? field.default : raw,
+          isDefault: missing,
+        }
+      }),
       readonly: {
         entryLabel: configRow.label ?? '',
         personalIndex: `${value.index.personalPrefix}${value.identity.userId}`,

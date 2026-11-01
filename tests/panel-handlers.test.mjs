@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE } = await import(
   '../panel/index.js'
 )
 
@@ -865,4 +865,29 @@ test('buildGraph：按 domain 分团，计数与节点一致', () => {
   assert.equal(total, graph.nodes.length)
   assert.equal(graph.clusters[0].domain, 'lottery-cloud')
   assert.equal(graph.clusters[0].count, 2)
+})
+
+test('配置页字段都带 default，且与 schema 的默认值一致', () => {
+  // 为什么值得钉：GET /config 读的是「配置行里显式写了什么」，不是运行中的合并配置。
+  // 字段不带 default 时，未配置的数值会被渲染成 0 —— 用户会以为生效值是 0（2026-11-01 真踩）。
+  const { readFileSync } = process.getBuiltinModule('node:fs')
+  const src = readFileSync(new URL('../src/config.ts', import.meta.url), 'utf8')
+  const schemaDefault = (key) => {
+    // 只看 `key: z....default(x)` 那一行（dedupMinScore 是 dedupMinScoreAnchored 的前缀，必须精确）
+    const match = src.match(new RegExp(`^\\s*${key}:\\s*z\\.[^\\n]*?default\\(([^)]+)\\)`, 'm'))
+    return match ? match[1].trim() : null
+  }
+
+  for (const field of EDITABLE) {
+    assert.ok(Object.hasOwn(field, 'default'), `${field.path.join('.')} 缺 default：未配置时会显示 0`)
+  }
+
+  // 只对「容易被误当成 0」的数值字段做 schema 对照（其余字段由上一行的存在性断言兜住）
+  for (const key of ['maxPerDay', 'maxOutput', 'dedupMinScore', 'dedupMinScoreAnchored', 'days']) {
+    const field = EDITABLE.find((item) => item.path.join('.').endsWith(`.${key}`))
+    if (!field) continue
+    const expected = schemaDefault(key)
+    assert.ok(expected !== null, `config.ts 里找不到 ${key} 的 default`)
+    assert.equal(String(field.default), expected, `${field.path.join('.')} 的 default 与 schema 不一致`)
+  }
 })
