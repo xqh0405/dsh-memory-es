@@ -22,6 +22,9 @@ export type AuditEvent =
   | 'approved'
   | 'rejected'
   | 'withdrawn'
+  // 阶段 13：把个人库的完成态并进已有团队条目（内容更新，状态不变）——
+  // 用 promoted 冒充会让审计读起来像"新晋升了一条"，与事实不符
+  | 'merged'
   // 个人库独占的裁决（不写团队库）：也要留审计，否则事后答不了「为什么没晋升」
   | 'personal_only'
 
