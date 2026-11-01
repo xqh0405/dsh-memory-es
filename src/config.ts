@@ -60,6 +60,10 @@ export interface ConfigType {
     topK: number
     rrfK: number
     limit: number
+    /** 阶段 12：同一 domain 最多几条（0 = 关闭） */
+    maxPerDomain: number
+    /** 阶段 12：缺省详略（full / summary） */
+    defaultDetail: string
   }
   /** 排序乘子（阶段 2） */
   ranking: {
@@ -198,6 +202,10 @@ export const Config: z<ConfigType> = z.object({
   retrieval: z.object({
     topK: z.number().step(1).default(20)
       .description('每一路（BM25 / kNN）取的候选数。'),
+    maxPerDomain: z.number().step(1).default(0)
+      .description('阶段 12 结果多样化：同一 domain 最多保留几条（0 = 关闭，默认关）。'),
+    defaultDetail: z.string().default('full')
+      .description('阶段 12 缺省详略：full（正文 500 字）或 summary（摘要 + 120 字，省 70%+ token，需要时用 memory_get 展开）。实测 30 条查询正文从 107k 降到 29k 字符。'),
     rrfK: z.number().step(1).default(60)
       .description('RRF 融合常数。'),
     limit: z.number().step(1).default(8)
@@ -379,6 +387,12 @@ export function validateConfig(config: ConfigType): string[] {
   }
   if (!Number.isInteger(config.embedding.dims) || config.embedding.dims < 1) {
     problems.push(`embedding.dims 必须是正整数（当前 ${String(config.embedding.dims)}）`)
+  }
+  // 阶段 12：非法值不静默回落——那会让「配了 summary 却一直给全文」变成看不见的问题。
+  // 但「没配」（undefined）是合法的：schema 会填默认值，手写配置对象则可能没有这个键。
+  const defaultDetail = config.retrieval?.defaultDetail ?? 'full'
+  if (defaultDetail !== 'full' && defaultDetail !== 'summary') {
+    problems.push(`retrieval.defaultDetail 只能是 full 或 summary（当前「${String(defaultDetail)}」）`)
   }
   return problems
 }

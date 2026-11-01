@@ -10,11 +10,12 @@ import {
   applyRanking,
   moodAffinity,
   spreadActivation,
+  diversifyByDomain,
+  projectHit,
   DEFAULT_RANKING,
   mergeScopes,
   normalizeContent,
   type Projected,
-  projectHit,
   renderText,
   rrfFuse,
   scoreMargin,
@@ -440,5 +441,65 @@ describe('spreadActivation（阶段 5.3 扩散激活）', () => {
     const out = spreadActivation(hits, 1)
     const a = out.find((h) => h.id === 'a')!
     assert.ok(Math.abs(a.fusedScore - (0.01 + (0.02 * 0.9 + 0.02 * 0.8))) < 1e-12)
+  })
+})
+
+describe('阶段 12：分级读取（projectHit）', () => {
+  const long = '北单同步要逐位对拍赔率列。'.repeat(40) // 520 字
+  const hit: Fused = {
+    id: 'm1',
+    score: 0.9,
+    source: { memory_id: 'm1', content: long, memory_type: 'fact', domain: 'lottery-cloud', updated_at: '2026-10-01T00:00:00.000Z' },
+    routeRanks: [1],
+    fusedScore: 0.03,
+  }
+
+  test('full：正文最多 500 字，超出标 has_more', () => {
+    const out = projectHit(hit, 500, 'personal', { detail: 'full' })
+    assert.equal(out.content.length, 501, '500 字 + 省略号')
+    assert.equal(out.has_more, true)
+    assert.equal(out.summary, undefined)
+  })
+
+  test('summary：正文砍到 120 字（省 token 才是真的省）', () => {
+    const out = projectHit(hit, 500, 'personal', { detail: 'summary' })
+    assert.equal(out.content.length, 121)
+    assert.equal(out.has_more, true)
+  })
+
+  test('summary：有 summary 字段时一并给出，没有就不写（不塞空串）', () => {
+    const withSummary: Fused = { ...hit, source: { ...hit.source, summary: '一句话摘要' } }
+    assert.equal(projectHit(withSummary, 500, 'personal', { detail: 'summary' }).summary, '一句话摘要')
+    assert.equal(projectHit(hit, 500, 'personal', { detail: 'summary' }).summary, undefined)
+  })
+
+  test('短正文不标 has_more（模型不必展开）', () => {
+    const short: Fused = { ...hit, source: { ...hit.source, content: '一句很短的事实' } }
+    assert.equal(projectHit(short, 500, 'personal', { detail: 'summary' }).has_more, undefined)
+  })
+
+  test('缺省 detail = full（默认行为不变）', () => {
+    assert.deepEqual(projectHit(hit, 500, 'personal'), projectHit(hit, 500, 'personal', { detail: 'full' }))
+  })
+})
+
+describe('阶段 12：结果多样化（diversifyByDomain）', () => {
+  const of = (id: string, domain: string) => ({ id, source: { memory_id: id, domain } })
+
+  test('maxPerDomain<=0 原样返回（默认关闭）', () => {
+    const hits = [of('a', 'x'), of('b', 'x'), of('c', 'x')]
+    assert.deepEqual(diversifyByDomain(hits, 0).map((h) => h.id), ['a', 'b', 'c'])
+    assert.deepEqual(diversifyByDomain(hits, -1).map((h) => h.id), ['a', 'b', 'c'])
+  })
+
+  test('同一 domain 超配额时跳过，保留不同域', () => {
+    const hits = [of('a', 'lottery'), of('b', 'lottery'), of('c', 'lottery'), of('d', 'huoxin')]
+    // 每域 2 条 → a、b 保留，c 跳过，d 保留
+    assert.deepEqual(diversifyByDomain(hits, 2).map((h) => h.id), ['a', 'b', 'd'])
+  })
+
+  test('domain 缺失的归到 (none) 桶，同样受配额限制', () => {
+    const hits = [of('a', ''), of('b', ''), of('c', 'x')]
+    assert.deepEqual(diversifyByDomain(hits, 1).map((h) => h.id), ['a', 'c'])
   })
 })

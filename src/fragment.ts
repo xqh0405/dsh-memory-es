@@ -253,6 +253,34 @@ export interface ActivationOptions {
 }
 
 /**
+ * 阶段 12：结果多样化——同一 domain 最多保留 `maxPerDomain` 条。
+ *
+ * 为什么需要：某个域的记忆天然多（比如 lottery-cloud 占了大半），RRF 之后很容易
+ * 前 5 条里 4 条来自同一个域，把别的域的正确答案挤掉。这不是「排序错了」，
+ * 而是「候选分布偏了」——所以在切片之前按域做一次配额，不动分数。
+ *
+ * `maxPerDomain <= 0` 时原样返回（**默认就是关闭**）：它会改变返回集合，
+ * 必须能一键回到旧行为，而且由契约评测守着。
+ */
+export function diversifyByDomain<T extends { source: Record<string, unknown> }>(
+  hits: readonly T[],
+  maxPerDomain: number,
+): T[] {
+  if (!Number.isFinite(maxPerDomain) || maxPerDomain <= 0) return [...hits]
+  const counts = new Map<string, number>()
+  const kept: T[] = []
+  for (const hit of hits) {
+    const raw = hit.source.domain
+    const domain = typeof raw === 'string' && raw !== '' ? raw : '(none)'
+    const used = counts.get(domain) ?? 0
+    if (used >= maxPerDomain) continue
+    counts.set(domain, used + 1)
+    kept.push(hit)
+  }
+  return kept
+}
+
+/**
  * 阶段 5.3：扩散激活。
  *
  * 语义：一条记忆的邻居如果**也在本次结果集里**，就把它的一部分分借给这条记忆。
@@ -499,25 +527,52 @@ export interface Projected {
   updated_at: string
   source: Scope
   score: number
+  /**
+   * 阶段 12：`detail=summary` 时给出摘要（有 `summary` 字段就用它，否则取正文前 120 字）。
+   * `content` 在 summary 模式下也会被截到很短——这样「不贴正文」才是真的省 token。
+   */
+  summary?: string
+  /** 原文比返回的正文更长：要全文请用 `memory_get` 展开 */
+  has_more?: boolean
 }
+
+/** 分级读取的两档：`summary` 只给摘要（省 token），`full` 沿用旧的 500 字正文 */
+export const DETAIL_LEVELS = ['summary', 'full'] as const
+export type DetailLevel = (typeof DETAIL_LEVELS)[number]
+
+/** summary 档的正文上限：够判断「要不要展开」，又不至于把 context 吃掉 */
+export const SUMMARY_MAX_CHARS = 120
 
 /**
  * 投影：把 ES 命中裁成给模型看的精简字段（content 截断）。
  * `source` 优先用调用方显式给的值（检索层知道这条从哪个索引来）；
  * 不给时才退回「有 source_user 就算团队库」的旧启发式。
  */
-export function projectHit(hit: Fused, maxChars = 500, source?: Scope): Projected {
+export function projectHit(
+  hit: Fused,
+  maxChars = 500,
+  source?: Scope,
+  options: { detail?: DetailLevel } = {},
+): Projected {
   const src = hit.source
   const rawContent = typeof src.content === 'string' ? src.content : ''
-  return {
+  const storedSummary = typeof src.summary === 'string' ? src.summary : ''
+  const detail = options.detail ?? 'full'
+  const limit = detail === 'summary' ? SUMMARY_MAX_CHARS : maxChars
+  const trimmed = rawContent.length > limit ? `${rawContent.slice(0, limit)}…` : rawContent
+  const projected: Projected = {
     memory_id: typeof src.memory_id === 'string' ? src.memory_id : hit.id,
-    content: rawContent.length > maxChars ? `${rawContent.slice(0, maxChars)}…` : rawContent,
+    content: trimmed,
     memory_type: typeof src.memory_type === 'string' ? src.memory_type : '',
     domain: typeof src.domain === 'string' ? src.domain : '',
     updated_at: typeof src.updated_at === 'string' ? src.updated_at : '',
     source: source ?? (src.source_user === undefined ? 'personal' : 'team'),
     score: hit.fusedScore,
+    ...(detail === 'summary' && storedSummary !== '' ? { summary: storedSummary } : {}),
+    // 原文比返回的长 → 提示模型可以展开；没有这个标记，模型只能靠"看起来像被截断"去猜
+    ...(rawContent.length > limit ? { has_more: true } : {}),
   }
+  return projected
 }
 
 /** 把投影后的命中渲染成给模型读的短文本（空结果也要说清楚） */

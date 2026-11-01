@@ -348,3 +348,69 @@ describe('检索埋点：hit_ids 与 query_norm', () => {
     }
   })
 })
+
+describe('阶段 12：detail 分级读取', () => {
+  const LONG = '北单同步要逐位对拍赔率列，动工前先确认五个赔率列的口径。'.repeat(10) // 约 290 字
+
+  function startLongFake(): Promise<FakeEs> {
+    return startFakeEs((req, res) => {
+      if (req.method === 'POST' && req.path.includes('/_search')) {
+        sendJson(res, 200, {
+          took: 1,
+          hits: {
+            total: { value: 1, relation: 'eq' },
+            hits: [
+              {
+                _id: 'long',
+                _score: 0.9,
+                _source: {
+                  memory_id: 'long',
+                  content: LONG,
+                  memory_type: 'fact',
+                  domain: 'lottery-cloud',
+                  updated_at: '2026-10-01T00:00:00.000Z',
+                },
+              },
+            ],
+          },
+        })
+        return
+      }
+      sendJson(res, 400, { error: { type: 'bad_request', reason: 'unhandled' } })
+    })
+  }
+
+  test('summary：正文砍到 120 字并标 has_more（省 token 才是真的省）', async () => {
+    const fake = await startLongFake()
+    try {
+      const result = await searchMemories(makeDeps(fake), { query: '北单 赔率', scope: 'personal', detail: 'summary' })
+      assert.equal(result.hits[0]?.content.length, 121)
+      assert.equal(result.hits[0]?.has_more, true)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('full（缺省）保持旧行为：最多 500 字', async () => {
+    const fake = await startLongFake()
+    try {
+      const result = await searchMemories(makeDeps(fake), { query: '北单 赔率', scope: 'personal' })
+      assert.equal(result.hits[0]?.content.length, LONG.length)
+      assert.equal(result.hits[0]?.has_more, undefined)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('未知 detail 直接报错（不静默回落到默认）', async () => {
+    const fake = await startLongFake()
+    try {
+      await assert.rejects(
+        () => searchMemories(makeDeps(fake), { query: 'q', scope: 'personal', detail: 'tiny' as never }),
+        /未知 detail/,
+      )
+    } finally {
+      await fake.close()
+    }
+  })
+})

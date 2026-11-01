@@ -35,6 +35,9 @@ export const MEMORY_PROMPT = [
   '**团队化要克制**：只有确实对别人有用的经验（接口契约、踩坑、口径）才用 `memory_promote` 标候选；',
   '它只是标记，不会直接进团队库——去重与敏感扫描由整理任务负责。',
   '',
+  '**省 context 的读法**：`memory_search` 传 `detail=summary` 只回摘要 + 120 字；需要看细节时用 `memory_get` 按 id 展开全文，',
+  '比重新检索一遍便宜。不知道 id 时不要用 `memory_get`，先用 `memory_search`。',
+  '',
   '**文档另有一套**：`doc_search` 查个人文档库（方案、复盘、开发文档等长文），结果按文档聚合、带命中的小节路径与片段；',
   '`memory_search` 只返回「一句事实」。要查「某个项目的方案细节 / 踩坑记录」时先用 `doc_search`。',
 ].join('\n')

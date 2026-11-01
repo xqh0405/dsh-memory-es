@@ -609,6 +609,8 @@ describe('defineSearchTool', () => {
       const def = defineSearchTool(h.deps())
       const parameters = def.parameters as { properties: Record<string, unknown> }
       assert.deepEqual(Object.keys(parameters.properties).sort(), [
+        // 阶段 12：detail=summary 才砍正文（默认 full，行为不变）
+        'detail',
         'domain',
         // 阶段 10：explain=true 才附回执（默认关，省 token）
         'explain',

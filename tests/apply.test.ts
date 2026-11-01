@@ -112,7 +112,7 @@ describe('apply', () => {
     assert.equal(requests.length, 0, '加载期不应发任何请求')
     assert.deepEqual(
       harness.registered.map((tool) => tool.name).sort(),
-      ['doc_search', 'memory_distill', 'memory_history', 'memory_journal', 'memory_persona', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
+      ['doc_search', 'memory_distill', 'memory_get', 'memory_history', 'memory_journal', 'memory_persona', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
     )
     assert.equal(harness.logs.length, 1)
     // 版本号在 ready 行里：部署后靠它判断「加载的是哪一版」（格式由 version.test.ts 守）
@@ -123,12 +123,12 @@ describe('apply', () => {
     const harness = fakeCtx()
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
-    assert.equal(harness.registered.length, 11, '十一个工具各一次 effect')
+    assert.equal(harness.registered.length, 12, '十二个工具各一次 effect')
     assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      20,
-      '十一个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 两个事件监听，都走 ctx.effect',
+      21,
+      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 两个事件监听，都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)

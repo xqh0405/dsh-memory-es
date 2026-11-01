@@ -41,6 +41,7 @@ import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
 import { defineSearchTool } from './memory/search.ts'
+import { defineGetTool } from './memory/get.ts'
 import { createRecallCache } from './memory/recallCache.ts'
 import { defineStatusTool } from './memory/status.ts'
 import { readVersion } from './version.ts'
@@ -130,6 +131,12 @@ export function apply(ctx: Context, config: ConfigType): void {
   const userId = config.identity.userId
   const personalPrefix = config.index.personalPrefix
 
+  // 阶段 12：config 里是 string，这里收窄到 DetailLevel（非法值已被 validateConfig 拦在启动前）
+  const retrieval = {
+    ...config.retrieval,
+    defaultDetail: (config.retrieval.defaultDetail === 'summary' ? 'summary' : 'full') as 'summary' | 'full',
+  }
+
   // 阶段 9：本会话最近命中的短期缓存（进程内、有 TTL）。
   // search 写、save 读——「检索原文再摄取」的判据只能靠它（全库相似是值钱的同义改写）。
   const recallCache = createRecallCache({
@@ -198,7 +205,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           reader,
           embed,
           dims: config.embedding.dims,
-          retrieval: config.retrieval,
+          retrieval,
           confidence: config.confidence,
           ranking: config.ranking,
           // 阶段 6.3：情绪一致召回读当前心情（同步读缓存，不额外打 ES）
@@ -216,6 +223,20 @@ export function apply(ctx: Context, config: ConfigType): void {
     'dsh-memory-es.search',
   )
 
+  // 阶段 12：分级读取的展开动作（按 id 取全文；不检索）
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineGetTool({
+          userId,
+          personalPrefix,
+          reader,
+          log: (event) => logger.info('get %o', event),
+        }),
+      ),
+    'dsh-memory-es.get',
+  )
+
   ctx.effect(
     () =>
       ctx.tools.register(
@@ -225,7 +246,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           reader,
           embed,
           dims: config.embedding.dims,
-          retrieval: config.retrieval,
+          retrieval,
           log: (event) => logger.info('doc_search %o', event),
         }),
       ),

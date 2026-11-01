@@ -19,7 +19,7 @@ import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFil
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
-import { applyRanking, buildHitReceipts, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type HitReceipt, type RankingConfig, type ReceiptSource } from '../fragment.ts'
+import { applyRanking, buildHitReceipts, DETAIL_LEVELS, diversifyByDomain, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type DetailLevel, type HitReceipt, type RankingConfig, type ReceiptSource } from '../fragment.ts'
 import { NON_FACT_MEMORY_TYPES } from './common.ts'
 import type { RecallCache } from './recallCache.ts'
 
@@ -142,12 +142,24 @@ export interface SearchInput {
   limit?: number
   /** true 时在结果里附「命中回执」（只解释排序，不参与算分；默认关闭省 token） */
   explain?: boolean
+  /**
+   * 阶段 12 分级读取：`full`（默认，正文最多 500 字）/ `summary`（摘要 + 120 字，省 token）。
+   * 默认**仍是 full**——切默认值是行为变更，要先过契约评测与 token 对比，不在这轮偷偷改。
+   */
+  detail?: DetailLevel
 }
 
 export interface RetrievalConfig {
   topK: number
   rrfK: number
   limit: number
+  /** 阶段 12 结果多样化：同一 domain 最多几条（0 = 关闭，默认关） */
+  maxPerDomain?: number
+  /**
+   * 阶段 12 缺省详略：`full`（默认）/ `summary`。
+   * 调用方显式传 `detail` 时以调用方为准；这里只决定「没传时给什么」。
+   */
+  defaultDetail?: DetailLevel
 }
 
 export interface SearchDeps {
@@ -271,6 +283,10 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   const scope: SearchScope = input.scope ?? 'both'
   if (!SCOPES.includes(scope)) throw new Error(`memory_search: 未知 scope「${String(scope)}」`)
   const limit = clampLimit(input.limit, deps.retrieval.limit)
+  const detail: DetailLevel = input.detail ?? deps.retrieval.defaultDetail ?? 'full'
+  if (!DETAIL_LEVELS.includes(detail)) {
+    throw new Error(`memory_search: 未知 detail「${String(input.detail)}」（只支持 ${DETAIL_LEVELS.join(' / ')}）`)
+  }
   const now = deps.now?.() ?? new Date()
   const { meta, filtered } = buildMeta(input, now)
 
@@ -408,7 +424,10 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha, { now })
   // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
   // 系数默认温和（±10% 量级），归零即完全关闭。
-  const merged = applyRanking(spread, rankingCfg, now, deps.mood?.() ?? null)
+  const ranked = applyRanking(spread, rankingCfg, now, deps.mood?.() ?? null)
+  // 阶段 12：同一 domain 最多 N 条（默认 0 = 关）。放在乘子之后、切片之前——
+  // 多样化的语义是「别让一个域刷屏」，而不是改变相关性打分。
+  const merged = diversifyByDomain(ranked, deps.retrieval.maxPerDomain ?? 0)
   const basis = `${scope === 'both' ? 'personal+team' : scope}:${degraded ? 'bm25' : 'bm25+knn'}`
 
   /**
@@ -475,7 +494,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   )
 
   const topMerged = merged.slice(0, limit)
-  const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin))
+  const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin, { detail }))
 
   // 阶段 10：回执与 hits **逐条同序**，且不参与任何打分（纯解释）。
   const receipts = wantExplain
@@ -593,6 +612,7 @@ const DESCRIPTION = [
   '同一问题最多查一次，拿到结果就往前走；查不到就问人，不要凭印象编。',
   '返回精简结果（正文截断 500 字，不带向量）。note=no_match 表示确实没有；',
   'note=low_confidence 表示候选区分度偏低：结果仍会给出，但要谨慎采信。',
+  '想省 context 可传 detail=summary（只给摘要 + 120 字）；需要全文时用 memory_get 按 id 展开。',
 ].join(' ')
 
 /** 把编排封成模型可见的工具定义 */
@@ -635,6 +655,12 @@ export function defineSearchTool(deps: SearchDeps) {
         description:
           'true 时附「命中回执」：每条的各路名次与原始分、RRF 分、乘子前后分、入选原因（两路一致/仅关键词/标识符命中）。默认关（省 token）；想核对「为什么这条排第一」或怀疑排序有问题时再开。',
       },
+      detail: {
+        type: 'string',
+        enum: [...DETAIL_LEVELS],
+        description:
+          '返回详略：full（默认，正文最多 500 字）/ summary（摘要 + 正文 120 字，省 token；要全文用 memory_get 展开）。',
+      },
     },
     output: {
       schema: {
@@ -655,6 +681,8 @@ export function defineSearchTool(deps: SearchDeps) {
                 updated_at: { type: 'string', required: true },
                 source: { type: 'string', required: true },
                 score: { type: 'number', required: true },
+                summary: { type: 'string' },
+                has_more: { type: 'boolean' },
               },
             },
           },
