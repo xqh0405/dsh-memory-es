@@ -250,6 +250,7 @@ describe('saveMemory 编排', () => {
         memory_id: FIXED_ID,
         deduped: false,
         degraded: false,
+        quarantined: false,
         text: '已保存',
       })
       assert.equal(fake.requests.length, 2)

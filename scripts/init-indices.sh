@@ -90,6 +90,8 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "distill_source_chars": { "type": "integer" },
         "promote_state":     { "type": "keyword" },
         "status":            { "type": "keyword" },
+        "origin":            { "type": "keyword" },
+        "quarantine_reason": { "type": "keyword", "ignore_above": 256 },
         "supersedes":        { "type": "keyword" },
         "superseded_by":     { "type": "keyword" },
         "content_sha256":    { "type": "keyword" },

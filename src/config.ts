@@ -98,6 +98,14 @@ export interface ConfigType {
     model: string
     timeoutMs: number
   }
+  /** 阶段 9：写入准入屏障（凭据 / 检索原文再摄取 → 隔离待审） */
+  admission: {
+    enabled: boolean
+    similarEnabled: boolean
+    similarScore: number
+    recentMax: number
+    recentTtlMinutes: number
+  }
   /** 阶段 9.1：人格内核（部署者写，模型不改） */
   persona: {
     enabled: boolean
@@ -262,6 +270,25 @@ export const Config: z<ConfigType> = z.object({
     provider: z.string().default(''),
     model: z.string().default(''),
     timeoutMs: z.number().default(30_000),
+  }),
+  /**
+   * 阶段 9：写入准入屏障。
+   *
+   * 默认开——它防的是真实发生过的事（巡检把明文口令蒸馏进了记忆库）。
+   * 三条规则各自可关，便于排查「为什么这条存不进去」；
+   * 关掉 `enabled` 等于退回「什么都不拦」的旧行为。
+   */
+  admission: z.object({
+    enabled: z.boolean().default(true)
+      .description('准入屏障总开关：凭据形态 + 「检索原文再摄取」命中即写 status=quarantine（不丢弃）。'),
+    similarEnabled: z.boolean().default(true)
+      .description('近似去重提示：库里有 cos ≥ similarScore 的条目时回 similar_to，不阻塞写入。'),
+    similarScore: z.number().default(0.85)
+      .description('近似去重的余弦阈值；与建边的 maxScore 同源但语义不同（那边是「不连边」，这边是「提示一句」）。'),
+    recentMax: z.number().step(1).default(20)
+      .description('召回缓存每个用户保留几条最近命中（供「原样再摄取」判定）。'),
+    recentTtlMinutes: z.number().step(1).default(30)
+      .description('召回缓存有效期（分钟）：只活在一轮对话的跨度里，过期不是错误。'),
   }),
   /**
    * 阶段 9.1：人格内核。

@@ -394,6 +394,9 @@ function projectHit(hit, scope) {
     sourceUser: str(source.source_user),
     sourceMemoryId: str(source.source_memory_id),
     promoteState: str(source.promote_state),
+    // 阶段 9：写入来源戳与隔离原因（隔离条目靠这两格在面板上审）
+    origin: str(source.origin),
+    quarantineReason: str(source.quarantine_reason),
     // 命中理由：`score` 是 BM25 分（只在搜索时有），`highlights` 是「哪几个字段、命中了什么」
     score: typeof hit._score === 'number' ? Math.round(hit._score * 100) / 100 : undefined,
     highlights: projectHighlights(hit.highlight),
@@ -1001,6 +1004,74 @@ async function handleDeleteMemory(ctx, res, req) {
   json(res, 200, {
     ok: true,
     value: { esId, scope, deleted, auditWritten, auditError, at: now },
+  })
+}
+
+/**
+ * POST /memories/restore：把一条被隔离（status=quarantine）的记忆恢复为有效。
+ *
+ * 为什么必须有这个按钮：隔离的设计是「不丢弃、等人审」——只能被 AI 用工具恢复的话，
+ * 面板就成了只读的事故现场，审完也处理不掉。
+ *
+ * 权限照旧问 ES（`_has_privileges` 的 index），不认配置声明。
+ * 恢复后**不补向量**（面板侧没有 embedding 服务）：诚实告诉前端 `embeddingMissing`，
+ * 这条此后只能关键词检索，要向量就重新存一次。
+ */
+async function handleRestoreMemory(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  const esId = str(input.esId).trim()
+  const scope = str(input.scope).trim() || 'personal'
+  if (esId === '') return json(res, 400, { ok: false, error: '缺少 esId（要用 ES 主键）' })
+  if (scope !== 'personal') {
+    return json(res, 400, { ok: false, error: '隔离只发生在个人库；团队库走审核台的驳回/撤回' })
+  }
+
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  let rights
+  try {
+    rights = await client.hasIndexPrivileges(names.personal, ['index'])
+  } catch (error) {
+    return json(res, 403, { ok: false, error: `权限探测失败：${String(error?.message ?? error)}` })
+  }
+  if (rights?.has_all_requested !== true) {
+    return json(res, 403, { ok: false, error: '没有个人库写权限（恢复需要 index 权限）' })
+  }
+
+  let source
+  // 读侧没有 get 方法（只暴露 search/count），用 ids 查询取同一条。
+  // 不排除 embedding：要用它判断「恢复后是不是只能关键词检索」（只查一条，代价可忽略）。
+  const found = await client.search(names.personal, {
+    size: 1,
+    query: { ids: { values: [esId] } },
+    track_total_hits: true,
+  })
+  const hit = found?.hits?.hits?.[0]
+  if (!hit) return json(res, 404, { ok: false, error: '这条记忆不存在' })
+  source = hit._source ?? {}
+  if (str(source.status) !== 'quarantine') {
+    return json(res, 409, { ok: false, error: `这条当前状态是 ${str(source.status) || '?'}（只有已隔离的能恢复）` })
+  }
+
+  const now = new Date().toISOString()
+  await client.update(names.personal, esId, {
+    status: 'active',
+    // 置 null 而不是删字段：ES 的 exists 对 null 返回 false，效果等价且不需要脚本权限
+    quarantine_reason: null,
+    updated_at: now,
+  }, { refresh: 'wait_for' })
+
+  const embeddingMissing = !Array.isArray(source.embedding) || source.embedding.length === 0
+  console.error(`[memory-es-panel] 恢复隔离 esId=${esId} embeddingMissing=${embeddingMissing}`)
+  json(res, 200, {
+    ok: true,
+    value: { esId, status: 'active', embeddingMissing, at: now },
   })
 }
 
@@ -2345,6 +2416,7 @@ async function handle(ctx, req, res) {
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
     if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
+    if (path === '/memories/restore' && req.method === 'POST') return await handleRestoreMemory(ctx, res, req)
     if (req.method === 'POST' && reviewMatch) {
       return await handleReviewAction(ctx, res, decodeURIComponent(reviewMatch[1]), reviewMatch[2], req)
     }

@@ -153,12 +153,19 @@ window.__ModuleLoader__.load({
       searchGo: '查询',
       statusActive: '有效',
       statusAll: '全部状态',
+      statusQuarantine: '已隔离',
       includePending: '含待裁决',
       colContent: '内容',
       colScope: '库',
       colDomain: '领域',
       colType: '类型',
       colStatus: '状态',
+      colOrigin: '来源',
+      quarantineReason: '隔离原因',
+      quarantineNoReason: '（早期条目没有记录原因）',
+      restoreBtn: '恢复为有效',
+      restoreDone: '已恢复为有效',
+      restoreDoneNoVector: '已恢复为有效（这条没有向量，此后只能关键词检索）',
       colUpdated: '更新时间',
       detail: '详情',
       delBtn: '删除',
@@ -251,6 +258,7 @@ window.__ModuleLoader__.load({
       stSuperseded: '已撤回',
       stAuto: '自动',
       stExpired: '已过期',
+      stQuarantine: '已隔离',
       maintCliMissing: '面板未随带 CLI 源码，整理与导出不可用（部署时缺 panel/cli）',
       configTitle: '配置',
       configSave: '保存',
@@ -403,12 +411,19 @@ window.__ModuleLoader__.load({
       searchGo: 'Search',
       statusActive: 'Active',
       statusAll: 'All statuses',
+      statusQuarantine: 'Quarantined',
       includePending: 'Include pending',
       colContent: 'Content',
       colScope: 'Index',
       colDomain: 'Domain',
       colType: 'Type',
       colStatus: 'Status',
+      colOrigin: 'Origin',
+      quarantineReason: 'Quarantine reason',
+      quarantineNoReason: '(no reason recorded)',
+      restoreBtn: 'Restore',
+      restoreDone: 'Restored',
+      restoreDoneNoVector: 'Restored (no vector; keyword search only)',
       colUpdated: 'Updated',
       detail: 'Detail',
       delBtn: 'Delete',
@@ -487,6 +502,7 @@ window.__ModuleLoader__.load({
       stSuperseded: 'superseded',
       stAuto: 'auto',
       stExpired: 'expired',
+      stQuarantine: 'quarantined',
       maintCliMissing: 'CLI sources were not shipped with the panel',
       configTitle: 'Configuration',
       configSave: 'Save',
@@ -794,6 +810,7 @@ window.__ModuleLoader__.load({
       superseded: 'stSuperseded',
       auto: 'stAuto',
       expired: 'stExpired',
+      quarantine: 'stQuarantine',
     }
 
     // 记忆类型中文化：只翻语义明确的枚举值，认不出的原样露出
@@ -2898,6 +2915,9 @@ window.__ModuleLoader__.load({
       // 删除：物理删除不可恢复，所以要点一下按钮 → 在下方展开确认区 → 再确认
       // （个人删不需要原因；团队删必须填，后端也会写 memory_audit）
       const [deleting, setDeleting] = React.useState(null)
+      // 阶段 9：隔离条目可以在面板上直接恢复（只能让模型用工具恢复的话，审完也处理不掉）
+      const [restoreBusy, setRestoreBusy] = React.useState(false)
+      const [restoreResult, setRestoreResult] = React.useState(null)
       const [delReason, setDelReason] = React.useState('')
       const [delBusy, setDelBusy] = React.useState(false)
       const [delResult, setDelResult] = React.useState(null)
@@ -2989,6 +3009,22 @@ window.__ModuleLoader__.load({
           .finally(() => setDelBusy(false))
       }
 
+      const doRestore = () => {
+        if (!selected || restoreBusy) return
+        setRestoreBusy(true)
+        apiPost('/memories/restore', { esId: selected.esId, scope: selected.scope })
+          .then((value) => {
+            setRestoreResult({
+              ok: true,
+              text: value?.embeddingMissing ? t('restoreDoneNoVector') : t('restoreDone'),
+            })
+            setSelected(null)
+            load()
+          })
+          .catch((error) => setRestoreResult({ ok: false, error: String(error.message ?? error) }))
+          .finally(() => setRestoreBusy(false))
+      }
+
       const data = state.data
       const rows = data?.rows ?? []
       const total = data?.total ?? 0
@@ -3058,6 +3094,7 @@ window.__ModuleLoader__.load({
             },
           },
             h('option', { value: 'active' }, t('statusActive')),
+            h('option', { value: 'quarantine' }, t('statusQuarantine')),
             h('option', { value: 'all' }, t('statusAll')),
           ),
           h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
@@ -3251,7 +3288,11 @@ window.__ModuleLoader__.load({
                   ['topic_key', selected.topicKey || '-'],
                   ['source_user', selected.sourceUser || '-'],
                   ['source_memory_id', selected.sourceMemoryId || '-'],
+                  [t('colOrigin'), selected.origin || '-'],
                   ['promote_state', selected.promoteState || '-'],
+                  ...(selected.status === 'quarantine'
+                    ? [[t('quarantineReason'), selected.quarantineReason || t('quarantineNoReason')]]
+                    : []),
                   [t('colUpdated'), shortTime(selected.updatedAt)],
                 ].map(([label, value]) =>
                   h('div', { key: label, style: { display: 'flex', gap: 6 } },
@@ -3260,9 +3301,26 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
-              h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
+              restoreResult
+                ? h('div', {
+                    style: {
+                      marginTop: 8,
+                      fontSize: 12,
+                      color: restoreResult.ok ? 'var(--dsw-alias-label-secondary)' : 'var(--dsw-alias-state-error-primary)',
+                    },
+                  }, restoreResult.ok ? restoreResult.text : `${t('error')}: ${restoreResult.error}`)
+                : null,
+              h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' } },
                 h(CopyButton, { text: selected.content, t, label: t('copyContent') }),
                 h(CopyButton, { text: selected.id, t, label: t('copyId') }),
+                selected.status === 'quarantine'
+                  ? h('button', {
+                      type: 'button',
+                      style: { ...S.btn, opacity: restoreBusy ? 0.6 : 1 },
+                      disabled: restoreBusy,
+                      onClick: doRestore,
+                    }, restoreBusy ? '…' : t('restoreBtn'))
+                  : null,
               ),
             )
           : null,

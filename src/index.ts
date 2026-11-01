@@ -41,6 +41,7 @@ import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
 import { defineSearchTool } from './memory/search.ts'
+import { createRecallCache } from './memory/recallCache.ts'
 import { defineStatusTool } from './memory/status.ts'
 import { readVersion } from './version.ts'
 
@@ -129,6 +130,13 @@ export function apply(ctx: Context, config: ConfigType): void {
   const userId = config.identity.userId
   const personalPrefix = config.index.personalPrefix
 
+  // 阶段 9：本会话最近命中的短期缓存（进程内、有 TTL）。
+  // search 写、save 读——「检索原文再摄取」的判据只能靠它（全库相似是值钱的同义改写）。
+  const recallCache = createRecallCache({
+    max: config.admission.recentMax,
+    ttlMs: Math.max(1, config.admission.recentTtlMinutes) * 60_000,
+  })
+
   ctx.effect(
     () =>
       ctx.tools.register(
@@ -147,6 +155,14 @@ export function apply(ctx: Context, config: ConfigType): void {
             maxScore: config.edges.maxScore,
             dims: config.embedding.dims,
           },
+          // 阶段 9：准入屏障与近似去重提示
+          admission: { enabled: config.admission.enabled },
+          similar: {
+            enabled: config.admission.similarEnabled,
+            score: config.admission.similarScore,
+            dims: config.embedding.dims,
+          },
+          recentRecalls: () => recallCache.recent(userId),
           log: (event) => logger.info('save %o', event),
           // 入库后立刻返回，蒸馏在后台跑；失败只记日志，条目留在 distill_state=pending
           onSaved: ({ memoryId, content, domain, route }) => {
@@ -192,6 +208,8 @@ export function apply(ctx: Context, config: ConfigType): void {
           // search.ts 内部降级为只打日志，检索结果不受影响。
           recorder: writer,
           searchLogIndex: `${config.index.searchLogPrefix}${userId}`,
+          // 阶段 9：命中写进短期缓存，供写入侧识别「检索原文再摄取」
+          recallCache,
           log: (event) => logger.info('search %o', event),
         }),
       ),

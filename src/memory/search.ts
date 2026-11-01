@@ -21,6 +21,7 @@ import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
 import { applyRanking, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type RankingConfig } from '../fragment.ts'
 import { NON_FACT_MEMORY_TYPES } from './common.ts'
+import type { RecallCache } from './recallCache.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
@@ -164,6 +165,11 @@ export interface SearchDeps {
   recorder?: Pick<EsClient, 'index'> | null
   /** 埋点索引名；与 recorder 同时给出才生效 */
   searchLogIndex?: string
+  /**
+   * 阶段 9：把本次命中的条目记进短期缓存，供写入侧识别「检索原文再摄取」。
+   * 缺省 = 不记（脚本与测试不需要这个联动）。
+   */
+  recallCache?: RecallCache | null
 }
 
 /** `note` 用固定枚举而不是可选字段：空对象/缺字段会被模型误判成“没有记忆” */
@@ -400,6 +406,18 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
 
   const topMerged = merged.slice(0, limit)
   const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin))
+
+  // 阶段 9：把命中记进短期缓存（内存、TTL 30 分钟）。
+  // 写入侧的「原样再摄取」判据靠它——不能拿全库比，全库高相似是值钱的同义改写。
+  // 不 await、不抛：这是给下一次 save 用的旁路信息，失败也不影响本次检索。
+  try {
+    deps.recallCache?.record(
+      deps.userId,
+      hits.map((hit) => ({ memoryId: hit.memory_id, content: hit.content })),
+    )
+  } catch (err) {
+    log({ tool: 'search', event: 'recall_cache_failed', error: String(err).slice(0, 200) })
+  }
 
   // 命中回写：fire-and-forget，失败只记日志——观测通道的可用性不该拖累检索。
   if (deps.hitRecorder !== null && deps.hitRecorder !== undefined && topMerged.length > 0) {
