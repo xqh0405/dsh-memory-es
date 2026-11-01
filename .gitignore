@@ -218,3 +218,4 @@ tests/eval/baseline.json
 # 竞品调研原始素材（第三方 README 原文，不入库）
 .research/
 scratch-research/
+.research-cache/
