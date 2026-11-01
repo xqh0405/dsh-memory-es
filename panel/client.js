@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
       moodEvents: '最近事件',
       moodNote: '心情只由事件推动（用户夸奖/批评、工具成败），面板不提供手动修改。',
       cardAudit: '审计事件',
-      cardAuditNA: '需配置整理身份（identity.consolidatorPassword）后可见',
+      cardAuditNA: '需配置整理身份',
       cardAudit7d: '近 7 天',
       esOk: 'ES 正常',
       esDown: 'ES 不可达',
@@ -312,7 +312,7 @@ window.__ModuleLoader__.load({
       moodEvents: 'Recent events',
       moodNote: 'Mood is driven by events only (praise/criticism, tool success/failure); there is no manual override.',
       cardAudit: 'Audit events',
-      cardAuditNA: 'visible once identity.consolidatorPassword is configured',
+      cardAuditNA: 'needs consolidator identity',
       cardAudit7d: 'last 7 days',
       esOk: 'ES healthy',
       esDown: 'ES unreachable',
@@ -536,7 +536,10 @@ window.__ModuleLoader__.load({
       // 卡片左上角那颗小圆点：健康=绿、需要注意=橙。与「记忆系统」页的状态灯同一个记号。
       dot: (tone) => ({
         width: 6, height: 6, borderRadius: 999, flex: 'none',
-        background: tone === 'warn' ? '#c98a3f' : '#4c9a6a',
+        // idle = 这一格拿不到数据（例如没有整理身份时的审计计数）：
+        // 用灰点而不是绿点，绿点会被读成「一切正常」，那是在替不存在的检查背书。
+        background:
+          tone === 'warn' ? '#c98a3f' : tone === 'idle' ? 'var(--dsw-alias-border-l3, rgba(127,127,127,.4))' : '#4c9a6a',
       }),
       // 卡片区块头：左标题 + 右动作（对应 mnemon 每张卡右上角的计数/链接）
       sectionHead: {
@@ -901,10 +904,12 @@ window.__ModuleLoader__.load({
           h(StatCard, {
             label: t('cardAudit'),
             value: counts.audit === null || counts.audit === undefined ? '—' : counts.audit,
+            // 副文案用短句：卡片宽度只有五分之一，长句会被省略号吃掉（2026-11-01 test 截图）
             hint:
               counts.auditLast7d === null || counts.auditLast7d === undefined
                 ? t('cardAuditNA')
                 : `${t('cardAudit7d')} ${counts.auditLast7d}`,
+            tone: counts.audit === null || counts.audit === undefined ? 'idle' : undefined,
           }),
         ),
 
