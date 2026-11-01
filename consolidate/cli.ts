@@ -29,12 +29,13 @@ import { daysSinceLastRun, loadState, saveState } from './state.ts'
 import { DEFAULT_BATCH_SIZE, shouldRun } from './scan.ts'
 import { exportMirror } from './export.ts'
 import { approve, listPending, reject, withdraw } from './review.ts'
+import { writeAudit } from './audit.ts'
 import { runConsolidation, type RunReport } from './run.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const AUDIT_INDEX = 'memory_audit'
 
-type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw' | 'export' | 'list'
+type Mode = 'consolidate' | 'review-list' | 'approve' | 'reject' | 'withdraw' | 'dismiss' | 'export' | 'list'
 
 interface CliArgs {
   mode: Mode
@@ -73,8 +74,9 @@ function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     mode: 'consolidate',
     target: null,
-    // 默认审计 actor = cli:<userId>（可在 env 里覆盖），与面板的 panel:<userId> 对齐
-    reviewer: process.env.CONSOLIDATE_REVIEWER ?? `cli:${process.env.MEM_USER_ID ?? 'unknown'}`,
+    // 审计 actor：环境变量可覆盖；否则留空，由 main 用**实际生效的** userId 补上
+    // （解析参数时还不知道 --user 的值，之前在这里算会记成 cli:unknown）
+    reviewer: process.env.CONSOLIDATE_REVIEWER ?? '',
     reason: '',
     apply: false,
     dryRun: false,
@@ -163,6 +165,12 @@ function parseArgs(argv: string[]): CliArgs {
         args.mode = 'withdraw'
         args.target = requireValue(argv, ++i, '--withdraw 需要 doc_id')
         break
+      case '--dismiss':
+        // 阶段 13：个人库条目「相似但不该合并」→ promote_state=dismissed，
+        // 从此不再进待合并候选（和团队库的 --withdraw 不是一回事）
+        args.mode = 'dismiss'
+        args.target = requireValue(argv, ++i, '--dismiss 需要 memory_id')
+        break
       case '--ls':
       case '--list':
         args.mode = 'list'
@@ -219,6 +227,7 @@ function printHelp(): void {
 
 选项:
   --apply              真的写入团队库并回写个人库状态（默认只报告）
+  --dismiss <memory_id>  人工判定「不该合并」：标 promote_state=dismissed，不再进候选（需 --reason）
   --proposals <path>   把提案清单（duplicate/merge_candidate/pending）写成 JSON 文件
   --only-ids <ids>     只处理这些 memory_id（逗号分隔）：配合 --apply 做「确认后才落库」
   --dry-run            显式 dry-run（默认行为）
@@ -284,6 +293,8 @@ async function main(): Promise<void> {
   }
   const userId = args.user ?? env.MEM_USER_ID ?? ''
   if (userId === '') throw new Error('缺少用户：用 --user 指定，或在 .env 里配 MEM_USER_ID')
+  // 审计 actor 用**实际生效的** userId（--user 优先），而不是环境变量里的那个
+  if (args.reviewer === '') args.reviewer = `cli:${userId}`
   // 用户 id 会直接拼进索引名（personal_memory_<uid>），必须与面板同一条白名单：
   // 传 `*` 就能用管理员的通配读扫所有人的个人库（2026-10-31 巡检补齐；面板早就有这道）。
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(userId)) {
@@ -352,6 +363,40 @@ async function main(): Promise<void> {
     if (result.files.length === 0) console.log('  （团队库里没有可导出的条目：只导出 active 且 auto/approved 的）')
     if (result.pruned.length > 0) console.log(`  清理旧文件：${result.pruned.join(', ')}`)
     if (!args.dryRun) console.log(`索引：${args.exportDir}/INDEX.md`)
+    return
+  }
+
+  // 阶段 13：dismiss 是**个人库**动作（把条目从待合并候选里摘出来），
+  // 与团队库裁决（approve/reject/withdraw）不是一回事，所以走 main 而不是 runReview。
+  if (args.mode === 'dismiss') {
+    if (args.reason.trim() === '') throw new Error('--dismiss 需要 --reason（为什么判定不合并，要能追溯）')
+    const memId = args.target ?? ''
+    const found = await reader.search(personalIndex, {
+      size: 1,
+      query: { term: { memory_id: memId } },
+      _source: ['memory_id', 'promote_state'],
+    })
+    const hit = found.hits[0]
+    if (hit === undefined) throw new Error(`个人库里没有 memory_id=${memId}`)
+    const before = String(hit.source.promote_state ?? 'none')
+    const now = new Date().toISOString()
+    await writer.update(personalIndex, hit.id, { promote_state: 'dismissed', updated_at: now }, { refresh: 'wait_for' })
+    await writeAudit(
+      { client: consolidator, index: audit.index },
+      {
+        event: 'dismissed',
+        actor: args.reviewer,
+        at: new Date(now),
+        subject_type: 'personal_memory',
+        subject_id: memId,
+        memory_id: memId,
+        from_state: before,
+        to_state: 'dismissed',
+        reason: args.reason,
+      },
+    )
+    console.log(`已标记 dismissed：${memId.slice(0, 8)}（${before} → dismissed）`)
+    console.log('它不会再进待合并候选；团队库未改动。')
     return
   }
 
@@ -535,7 +580,6 @@ async function runReview(
   if (args.mode === 'withdraw' && args.reason.trim() === '') {
     throw new Error('--withdraw 需要 --reason（撤回归因要可追溯）')
   }
-
   if (args.mode === 'approve') {
     const result = await approve(base, docId, args.reviewer)
     console.log(result.changed ? `已通过 ${docId}（现在会出现在检索结果里）` : `${docId} 状态未变（可能已经是 approved）`)

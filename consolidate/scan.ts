@@ -11,6 +11,7 @@
  */
 
 import type { SearchBody } from '../src/es/dsl.ts'
+import { RESCANNABLE_PROMOTE_STATES } from '../src/memory/promoteState.ts'
 
 /** 扫一批候选的默认上限（§9.6：批大小默认 20） */
 export const DEFAULT_BATCH_SIZE = 20
@@ -23,7 +24,7 @@ export interface CandidateQueryOptions {
   batchSize?: number
   /** 只看这个时间点之后创建的（时间窗；不传则不限） */
   createdAfter?: Date | null
-  /** 只看这些 promote_state（默认 none + candidate） */
+  /** 只看这些 promote_state（默认见 RESCANNABLE_PROMOTE_STATES） */
   promoteStates?: string[]
 }
 
@@ -31,7 +32,7 @@ export interface CandidateQueryOptions {
 export function buildCandidateQuery(options: CandidateQueryOptions = {}): SearchBody {
   const filter: Array<Record<string, unknown>> = [
     { term: { status: 'active' } },
-    { terms: { promote_state: options.promoteStates ?? ['none', 'candidate'] } },
+    { terms: { promote_state: options.promoteStates ?? [...RESCANNABLE_PROMOTE_STATES] } },
   ]
   if (options.createdAfter) {
     filter.push({ range: { created_at: { gte: options.createdAfter.toISOString() } } })

@@ -14,6 +14,7 @@ import { detectContradiction } from '../consolidate/conflict.ts'
 import { decideDedupe } from '../consolidate/dedupe.ts'
 import { classifyValue, distillBatch, normalizeHomePath, stripPersonalContext, topicKey } from '../consolidate/distill.ts'
 import { buildCandidateQuery, shouldRun } from '../consolidate/scan.ts'
+import { PROMOTE_STATE_LABELS, PROMOTE_STATES, RESCANNABLE_PROMOTE_STATES, SETTLED_PROMOTE_STATES } from '../src/memory/promoteState.ts'
 import { buildProposals, type StepResult } from '../consolidate/run.ts'
 import { scanSensitive, summarizeHits } from '../consolidate/sensitive.ts'
 import {
@@ -409,5 +410,28 @@ describe('阶段 13：提案清单（buildProposals）', () => {
 
   test('空输入 → 空清单', () => {
     assert.deepEqual(buildProposals([]), [])
+  })
+})
+
+describe('阶段 13：promote_state 词典', () => {
+  test('两个集合不重叠、并集覆盖全部取值（漏一个就会有人被反复处理）', () => {
+    const rescan = new Set<string>(RESCANNABLE_PROMOTE_STATES)
+    const settled = new Set<string>(SETTLED_PROMOTE_STATES)
+    for (const state of rescan) assert.equal(settled.has(state), false, `${state} 同时出现在两组`)
+    assert.deepEqual([...rescan, ...settled].sort(), [...PROMOTE_STATES].sort())
+  })
+
+  test('dismissed 是终态，不会被再扫', () => {
+    assert.equal((RESCANNABLE_PROMOTE_STATES as readonly string[]).includes('dismissed'), false)
+    assert.equal((SETTLED_PROMOTE_STATES as readonly string[]).includes('dismissed'), true)
+    assert.match(PROMOTE_STATE_LABELS.dismissed, /不合并/)
+  })
+
+  test('候选查询默认只扫 none + candidate（dismissed 天然排除）', () => {
+    const body = buildCandidateQuery()
+    const json = JSON.stringify(body)
+    assert.match(json, /none/)
+    assert.match(json, /candidate/)
+    assert.equal(json.includes('dismissed'), false)
   })
 })
