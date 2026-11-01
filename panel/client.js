@@ -24,6 +24,14 @@ window.__ModuleLoader__.load({
       versionLabel: '版本',
       tabOverview: '概览',
       tabBrowse: '记忆浏览',
+      tabGraph: '星图',
+      graphNodes: '节点',
+      graphEdges: '边',
+      graphClusters: '簇',
+      graphOrphans: '孤点',
+      graphUnresolved: '端点缺失',
+      graphZoomHint: '滚轮缩放 · 拖动平移',
+      graphReset: '复位',
       tabReview: '审核台',
       tabIdentity: '自述',
       idTitle: '待采纳的候选（自述 / 人格）',
@@ -236,6 +244,14 @@ window.__ModuleLoader__.load({
       versionLabel: 'Version',
       tabOverview: 'Overview',
       tabBrowse: 'Browse',
+      tabGraph: 'Constellation',
+      graphNodes: 'nodes',
+      graphEdges: 'edges',
+      graphClusters: 'clusters',
+      graphOrphans: 'orphans',
+      graphUnresolved: 'unresolved',
+      graphZoomHint: 'wheel to zoom · drag to pan',
+      graphReset: 'Reset',
       tabReview: 'Review',
       tabIdentity: 'Identity',
       idTitle: 'Draft identity traits',
@@ -989,6 +1005,353 @@ window.__ModuleLoader__.load({
         ),
       )
 
+    }
+
+    // ── 星图（阶段 8 第六个页签）──────────────────────────────────────────
+
+    /** 领域 → 颜色：同一个领域同一个色，图例与节点用它认亲。 */
+    const GRAPH_PALETTE = [
+      '#6b8cff', '#4c9a6a', '#c98a3f', '#b8623f', '#8e6bd8',
+      '#3f9ba8', '#c4508a', '#7a8f3f', '#5b7c99', '#a0663f',
+    ]
+    function colorOfDomain(domain, clusters) {
+      const index = clusters.findIndex((cluster) => cluster.domain === domain)
+      return GRAPH_PALETTE[(index < 0 ? 0 : index) % GRAPH_PALETTE.length]
+    }
+
+    /**
+     * 图布局：**确定性**——同一份数据每次都得到同一张图。
+     *
+     * 为什么不跑力导向：布局不稳定，形状就不能当信息用（文档 8.4 的取舍）。
+     * 这里分两层：
+     *  1. 连通分量就是天然的团（语义边连起来的那一簇），按大小降序横向排开；
+     *  2. 分量内部从度数最大的节点 BFS，层半径等距、同层角度均分。
+     * 全程用排序而不是随机，所以重算一次不会跳。
+     */
+    /** FNV-1a：给节点算一个 0~1 的稳定伪随机数，用于位置抖动（同一 id 永远同一个值）。 */
+    function hashUnit(text) {
+      let hash = 2166136261
+      for (let i = 0; i < text.length; i += 1) {
+        hash ^= text.charCodeAt(i)
+        hash = Math.imul(hash, 16777619)
+      }
+      return (hash >>> 0) / 4294967295
+    }
+
+    function layoutGraph(graph, width, height) {
+      const nodes = graph.nodes
+      if (nodes.length === 0) return { positions: new Map(), bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } }
+
+      const adj = new Map()
+      for (const node of nodes) adj.set(node.id, [])
+      for (const edge of graph.edges) {
+        adj.get(edge.source)?.push(edge.target)
+        adj.get(edge.target)?.push(edge.source)
+      }
+      // 邻居也排序：BFS 的顺序必须可复现
+      for (const list of adj.values()) list.sort()
+
+      const byId = new Map(nodes.map((node) => [node.id, node]))
+      const seen = new Set()
+      const components = []
+      for (const node of nodes) {
+        if (seen.has(node.id)) continue
+        const queue = [node.id]
+        seen.add(node.id)
+        const members = []
+        while (queue.length > 0) {
+          const id = queue.shift()
+          members.push(id)
+          for (const next of adj.get(id) ?? []) {
+            if (seen.has(next)) continue
+            seen.add(next)
+            queue.push(next)
+          }
+        }
+        components.push(members)
+      }
+      components.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1))
+
+      const positions = new Map()
+      const gap = 26
+      let cursorX = 0
+      let maxRadius = 1
+      for (const members of components) {
+        // 分量半径按节点数开方（面积正比于节点数），单点分量给一个最小半径
+        const spread = Math.sqrt(members.length) * 22
+        const radius = Math.max(26, spread)
+        const cx = cursorX + radius
+        const cy = 0
+        // BFS：起点取度数最高、同度数按 id 稳定
+        const start = members.slice().sort((a, b) => {
+          const da = byId.get(a)?.degree ?? 0
+          const db = byId.get(b)?.degree ?? 0
+          return db - da || (a < b ? -1 : 1)
+        })[0]
+        const depth = new Map([[start, 0]])
+        const queue = [start]
+        while (queue.length > 0) {
+          const id = queue.shift()
+          const d = depth.get(id)
+          for (const next of adj.get(id) ?? []) {
+            if (depth.has(next)) continue
+            depth.set(next, d + 1)
+            queue.push(next)
+          }
+        }
+        const layers = new Map()
+        for (const id of members) {
+          const d = depth.get(id) ?? 0
+          if (!layers.has(d)) layers.set(d, [])
+          layers.get(d).push(id)
+        }
+        const maxDepth = Math.max(1, ...[...layers.keys()])
+        for (const [d, ids] of layers) {
+          ids.sort()
+          // 层半径按**最大层数**归一化到簇半径：否则 BFS 只有两三层时，
+          // 所有点会挤在圆心附近（2026-11-01 第一版就是这样，300 个点糊成一坨）
+          const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * radius * 0.94
+          const offset = d * 0.55
+          ids.forEach((id, i) => {
+            const base = ids.length === 1 ? 0 : (Math.PI * 2 * i) / ids.length + offset
+            // 抖动：让环散开一点，不然整张图像靶环。用 id 的哈希，所以**仍然确定性**
+            const j1 = hashUnit(id)
+            const j2 = hashUnit(id + '#r')
+            const angle = base + (j1 - 0.5) * (ids.length > 3 ? 0.9 : 0.25)
+            const r = d === 0 ? 0 : ringRadius * (0.82 + j2 * 0.36)
+            positions.set(id, { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r })
+          })
+        }
+        maxRadius = Math.max(maxRadius, radius)
+        cursorX += radius * 2 + gap
+      }
+
+      // 统一缩放到画布：留边，并保持比例
+      let minX = Infinity
+      let maxX = -Infinity
+      let minY = Infinity
+      let maxY = -Infinity
+      for (const point of positions.values()) {
+        minX = Math.min(minX, point.x)
+        maxX = Math.max(maxX, point.x)
+        minY = Math.min(minY, point.y)
+        maxY = Math.max(maxY, point.y)
+      }
+      const spanX = Math.max(1, maxX - minX)
+      const spanY = Math.max(1, maxY - minY)
+      const pad = 48
+      const scale = Math.min((width - pad * 2) / spanX, (height - pad * 2) / spanY, 1.6)
+      const offsetX = (width - spanX * scale) / 2 - minX * scale
+      const offsetY = (height - spanY * scale) / 2 - minY * scale
+      for (const [id, point] of positions) {
+        positions.set(id, { x: point.x * scale + offsetX, y: point.y * scale + offsetY })
+      }
+      return { positions, bounds: { minX, minY, maxX, maxY } }
+    }
+
+    /**
+     * 星图页：Canvas 2D + 确定性布局。
+     *
+     * 视觉编码（文档 8.4 的约定）：
+     *  · 领域 → 颜色；度数 → 半径；新鲜度 → 亮度（越新越亮，旧记忆淡下去）。
+     *  · 节点上限由服务端兜住（300），所以这里不做抽稀，只负责画。
+     */
+    function GraphView({ t }) {
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const [hover, setHover] = React.useState(null)
+      const [view, setView] = React.useState({ k: 1, x: 0, y: 0 })
+      const wrapRef = React.useRef(null)
+      const canvasRef = React.useRef(null)
+      const [size, setSize] = React.useState({ width: 900, height: 560 })
+      const dragRef = React.useRef(null)
+
+      React.useEffect(() => {
+        let alive = true
+        apiGet('/graph', { limit: 300 })
+          .then((data) => {
+            if (alive) setState({ loading: false, error: '', data })
+          })
+          .catch((error) => {
+            if (alive) setState({ loading: false, error: String(error.message ?? error), data: null })
+          })
+        return () => {
+          alive = false
+        }
+      }, [])
+
+      // 尺寸跟随容器（窗口变了图要跟着重排，否则会被裁掉）
+      React.useEffect(() => {
+        const element = wrapRef.current
+        if (element === null) return
+        const measure = () => {
+          const rect = element.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) setSize({ width: Math.round(rect.width), height: Math.round(rect.height) })
+        }
+        measure()
+        const observer = new ResizeObserver(measure)
+        observer.observe(element)
+        return () => observer.disconnect()
+      }, [])
+
+      const layout = React.useMemo(() => {
+        if (state.data === null) return null
+        return layoutGraph(state.data, size.width, size.height)
+      }, [state.data, size.width, size.height])
+
+      // 颜色按团序号：同一个领域同一个色，图标里 Fig. 用 clusters 顺序
+      const colorMap = React.useMemo(() => {
+        const map = new Map()
+        const clusters = state.data?.clusters ?? []
+        for (const node of state.data?.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters))
+        return map
+      }, [state.data])
+
+      React.useEffect(() => {
+        const canvas = canvasRef.current
+        if (canvas === null || layout === null) return
+        const dpr = Math.min(2, window.devicePixelRatio || 1)
+        canvas.width = Math.round(size.width * dpr)
+        canvas.height = Math.round(size.height * dpr)
+        canvas.style.width = `${size.width}px`
+        canvas.style.height = `${size.height}px`
+        const ctx = canvas.getContext('2d')
+        if (ctx === null) return
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.clearRect(0, 0, size.width, size.height)
+
+        const graph = state.data
+        const now = Date.now()
+        const posOf = (id) => {
+          const point = layout.positions.get(id)
+          if (point === undefined) return undefined
+          return { x: point.x * view.k + view.x, y: point.y * view.k + view.y }
+        }
+
+        // 边：权重即透明度，弱边不抢注意力
+        for (const edge of graph.edges) {
+          const a = posOf(edge.source)
+          const b = posOf(edge.target)
+          if (a === undefined || b === undefined) continue
+          const active = hover !== null && (hover === edge.source || hover === edge.target)
+          ctx.strokeStyle = active ? 'rgba(150,180,255,.95)' : `rgba(140,165,210,${0.14 + edge.weight * 0.22})`
+          ctx.lineWidth = active ? 1.6 : 0.8
+          ctx.beginPath()
+          ctx.moveTo(a.x, a.y)
+          ctx.lineTo(b.x, b.y)
+          ctx.stroke()
+        }
+
+        // 节点
+        for (const node of graph.nodes) {
+          const point = posOf(node.id)
+          if (point === undefined) continue
+          const age = node.updatedAt === '' ? 365 : Math.min(365, (now - Date.parse(node.updatedAt)) / 86400000)
+          const fresh = 1 - Math.min(1, age / 120) // 120 天以内线性衰减
+          const radius = (3.2 + Math.min(6, node.degree) * 0.9) * Math.min(1.6, view.k)
+          const isHover = hover === node.id
+          ctx.beginPath()
+          ctx.arc(point.x, point.y, isHover ? radius + 2.5 : radius, 0, Math.PI * 2)
+          ctx.fillStyle = colorMap.get(node.id) ?? '#6b8cff'
+          ctx.globalAlpha = isHover ? 1 : 0.35 + fresh * 0.65
+          ctx.fill()
+          if (isHover) {
+            ctx.globalAlpha = 1
+            ctx.strokeStyle = 'rgba(255,255,255,.9)'
+            ctx.lineWidth = 1.5
+            ctx.stroke()
+          }
+        }
+        ctx.globalAlpha = 1
+      }, [layout, view, hover, state.data, size, colorMap])
+
+      const hitTest = (event) => {
+        if (layout === null) return null
+        const rect = event.currentTarget.getBoundingClientRect()
+        const px = event.clientX - rect.left
+        const py = event.clientY - rect.top
+        let best = null
+        let bestDist = 14
+        for (const node of state.data.nodes) {
+          const point = layout.positions.get(node.id)
+          if (point === undefined) continue
+          const x = point.x * view.k + view.x
+          const y = point.y * view.k + view.y
+          const dist = Math.hypot(x - px, y - py)
+          if (dist < bestDist) {
+            bestDist = dist
+            best = node
+          }
+        }
+        return best
+      }
+
+      if (state.loading) return h('p', { style: S.muted }, t('loading'))
+      if (state.error) return h('p', { style: S.err }, `${t('error')}: ${state.error}`)
+      const stats = state.data.stats
+      return h('div', null,
+        h('div', { style: S.toolbar },
+          h('span', { style: S.muted, fontSize: 12 },
+            `${state.data.nodes.length} ${t('graphNodes')} · ${state.data.edges.length} ${t('graphEdges')} · ` +
+              `${state.data.clusters.length} ${t('graphClusters')}` +
+              (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
+              (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
+          h('span', { style: { flex: 1 } }),
+          h('span', { style: S.muted, fontSize: 12 }, t('graphZoomHint')),
+          h('button', {
+            type: 'button',
+            style: S.btn,
+            onClick: () => setView({ k: 1, x: 0, y: 0 }),
+          }, t('graphReset')),
+        ),
+        h('div', {
+          ref: wrapRef,
+          style: { ...S.card, padding: 0, overflow: 'hidden', height: 560, position: 'relative' },
+          onMouseMove: (event) => {
+            const hit = hitTest(event)
+            setHover(hit === null ? null : hit.id)
+            const drag = dragRef.current
+            if (drag !== null) setView((prev) => ({ ...prev, x: prev.x + event.clientX - drag.x, y: prev.y + event.clientY - drag.y }))
+            dragRef.current = drag === null ? null : { x: event.clientX, y: event.clientY }
+          },
+          onMouseDown: (event) => {
+            dragRef.current = { x: event.clientX, y: event.clientY }
+          },
+          onMouseUp: () => {
+            dragRef.current = null
+          },
+          onMouseLeave: () => {
+            dragRef.current = null
+            setHover(null)
+          },
+          onWheel: (event) => {
+            const rect = event.currentTarget.getBoundingClientRect()
+            const cx = event.clientX - rect.left
+            const cy = event.clientY - rect.top
+            setView((prev) => {
+              const next = Math.min(4, Math.max(0.4, prev.k * (event.deltaY < 0 ? 1.12 : 0.89)))
+              const ratio = next / prev.k
+              // 以鼠标位置为锚缩放：光标下的点不动
+              return { k: next, x: cx - (cx - prev.x) * ratio, y: cy - (cy - prev.y) * ratio }
+            })
+          },
+        },
+          h('canvas', { ref: canvasRef, style: { display: 'block' } }),
+          hover === null
+            ? null
+            : h('div', {
+                style: {
+                  position: 'absolute', left: 12, bottom: 12, maxWidth: '62%',
+                  background: 'var(--dsw-alias-bg-overlay, rgba(20,22,28,.92))',
+                  border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8,
+                  padding: '8px 10px', fontSize: 12, lineHeight: 1.6,
+                },
+              },
+                h('div', { style: { ...S.muted, fontSize: 11 } }, `${state.data.nodes.find((n) => n.id === hover)?.domain ?? ''} · ${state.data.nodes.find((n) => n.id === hover)?.type ?? ''}`),
+                h('div', { style: { color: 'var(--dsw-alias-label-primary)' } },
+                  String(state.data.nodes.find((n) => n.id === hover)?.label ?? '').slice(0, 120)),
+              ),
+        ),
+      )
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
@@ -2439,6 +2802,7 @@ window.__ModuleLoader__.load({
           [
             ['overview', t('tabOverview')],
             ['browse', t('tabBrowse')],
+            ['graph', t('tabGraph')],
             // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
             ['identity', t('tabIdentity')],
             ['persona', t('tabPersona')],
@@ -2466,6 +2830,8 @@ window.__ModuleLoader__.load({
           ? h(Identity, { t })
           : tab === 'persona'
           ? h(Persona, { t })
+          : tab === 'graph'
+          ? h(GraphView, { t })
           : tab === 'overview'
           ? h(Overview, {
               data: overview.data,
