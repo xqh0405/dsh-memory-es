@@ -193,7 +193,7 @@ describe('applyRanking（阶段 2 排序乘子）', () => {
     const hits = [scoped('a', 0.03), scoped('b', 0.02)]
     const out = applyRanking(
       hits,
-      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0, moodWeight: 0 },
+      { importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0, reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0, moodWeight: 0, utilityWeight: 0 },
       NOW,
     )
     assert.deepEqual(out.map((h) => h.fusedScore), [0.03, 0.02])
@@ -501,5 +501,58 @@ describe('阶段 12：结果多样化（diversifyByDomain）', () => {
   test('domain 缺失的归到 (none) 桶，同样受配额限制', () => {
     const hits = [of('a', ''), of('b', ''), of('c', 'x')]
     assert.deepEqual(diversifyByDomain(hits, 1).map((h) => h.id), ['a', 'c'])
+  })
+})
+
+describe('阶段 12：效用信号（utilityWeight）', () => {
+  function hit(id: string, up: number, down: number): ScopedHit {
+    return {
+      id,
+      score: 0.02,
+      source: { memory_id: id, content: id, confirmed_use: up, corrections: down },
+      routeRanks: [1],
+      fusedScore: 0.02,
+      contentHash: id,
+      origin: 'personal',
+    } as ScopedHit
+  }
+  const cfg = {
+    importanceWeight: 0, hitWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 0,
+    reinforcementPerHit: 0, reinforcementCap: 0, agreementBonus: 0, activationAlpha: 0,
+    moodWeight: 0, utilityWeight: 0.3,
+  }
+  const NOW2 = new Date('2026-11-02T00:00:00.000Z')
+
+  test('utilityWeight=0 时完全不动（默认关，等于没有这个特性）', () => {
+    const out = applyRanking([hit('a', 9, 0), hit('b', 0, 0)], { ...cfg, utilityWeight: 0 }, NOW2)
+    assert.deepEqual(out.map((h) => h.fusedScore), [0.02, 0.02])
+  })
+
+  test('👍 多的条目被提权，且单调（9 个赞 > 2 个赞）', () => {
+    const out = applyRanking([hit('a', 9, 0), hit('b', 2, 0), hit('c', 0, 0)], cfg, NOW2)
+    assert.equal(out[0]?.id, 'a')
+    assert.equal(out[1]?.id, 'b')
+    assert.ok((out[0]?.fusedScore ?? 0) > (out[1]?.fusedScore ?? 0))
+  })
+
+  test('👎 抵消 👍；负效用按 0 算（不降权，只是不涨）', () => {
+    const out = applyRanking([hit('mixed', 3, 3), hit('none', 0, 0)], cfg, NOW2)
+    assert.equal(out[0]?.fusedScore, out[1]?.fusedScore, '3 赞 3 踩 = 净 0，应与无反馈相同')
+    const negative = applyRanking([hit('bad', 0, 5), hit('none', 0, 0)], cfg, NOW2)
+    assert.equal(negative[0]?.fusedScore, negative[1]?.fusedScore, '净负不该被惩罚')
+  })
+
+  test('缺字段的条目按 0 处理（不能因为没反馈就崩）', () => {
+    const bare = {
+      id: 'bare',
+      score: 0.02,
+      source: { memory_id: 'bare', content: 'x' },
+      routeRanks: [1],
+      fusedScore: 0.02,
+      contentHash: 'bare',
+      origin: 'personal',
+    } as ScopedHit
+    const out = applyRanking([bare], cfg, NOW2)
+    assert.equal(out[0]?.fusedScore, 0.02)
   })
 })

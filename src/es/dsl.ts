@@ -47,6 +47,14 @@ export type FilterValue = string | string[]
 export interface MetaFilterOptions {
   /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用） */
   status?: string | null
+  /**
+   * 阶段 13：时间点回看。只返回「该时间点之前创建」的记忆。
+   *
+   * 这是**近似**的 as-of：ES 里没有版本历史，所以它回答的是「那时已经存在的条目」，
+   * 不是「那条目当时的旧版本」。已 supersede/expire 的条目仍按 active 过滤掉。
+   * 语义写清楚比假装能版本回放更重要。
+   */
+  asOf?: Date | null
   memory_type?: FilterValue
   /** 明确排除的类型（阶段 7.1：普通检索默认排除 identity） */
   excludeMemoryTypes?: FilterValue
@@ -127,6 +135,9 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   pushValueFilter(filters, 'domain', options.domain)
   pushValueFilter(filters, 'review_state', options.review_state ?? null)
 
+  if (options.asOf !== undefined && options.asOf !== null) {
+    filters.push({ range: { created_at: { lte: options.asOf.toISOString() } } })
+  }
   if (options.updatedWithinDays !== undefined) {
     assertPositiveInt(options.updatedWithinDays, 'updatedWithinDays')
     const gte = new Date(now.getTime() - options.updatedWithinDays * 86_400_000).toISOString()

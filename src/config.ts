@@ -71,6 +71,8 @@ export interface ConfigType {
   }
   /** 排序乘子（阶段 2） */
   ranking: {
+    /** 阶段 12：效用信号强度（0 = 关闭） */
+    utilityWeight: number
     importanceWeight: number
     hitWeight: number
     recencyWeight: number
@@ -261,6 +263,8 @@ export const Config: z<ConfigType> = z.object({
       .description('阶段 5.3 扩散激活强度：score += alpha × Σ(邻居分 × 边权 × 邻居强度)。0 = 关闭（默认）；邻居只算本次结果集内的，强度来自命中回写的 activation 并按 30 天半衰期衰减。'),
     moodWeight: z.number().default(DEFAULT_RANKING.moodWeight)
       .description('阶段 6.3 情绪一致召回：score × (1 + moodWeight × 相似度)。0 = 关闭；只提权不降权，未标 valence 的条目不参与。'),
+    utilityWeight: z.number().default(DEFAULT_RANKING.utilityWeight)
+      .description('阶段 12 效用信号：score × (1 + utilityWeight × log1p(confirmed_use − corrections))。0 = 关闭（默认）；负效用不惩罚。与 hitWeight（流行度）语义不同，替换与否由评测决定。'),
   }),
   defaults: z.object({
     domain: z.string().default('general')

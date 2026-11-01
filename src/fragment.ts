@@ -211,6 +211,16 @@ export interface RankingConfig {
    * 0 = 关闭。**只提权、不降权**——心情差时想不起开心的事会形成自我强化回路。
    */
   moodWeight: number
+  /**
+   * 阶段 12：效用信号（👍/👎）强度。`score × (1 + utilityWeight × log1p(confirmed_use - corrections))`。
+   * 0 = 关闭（**默认就是 0**）。
+   *
+   * 为什么单独一个旋钮、而不是改 hitWeight：`hit_count` 量的是「被搜到几次」，
+   * 那是流行度，记忆写得越多越容易被搜到（流行度投毒）；`confirmed_use` 量的是
+   * 「被判定有用几次」。两者语义不同，能不能替换必须由评测回答，不能偷偷换算。
+   * 负效用（👎 多于 👍）只降到 log1p(0)=0，即**不惩罚**——被否过不代表该消失。
+   */
+  utilityWeight: number
 }
 
 export const DEFAULT_RANKING: RankingConfig = {
@@ -223,6 +233,8 @@ export const DEFAULT_RANKING: RankingConfig = {
   agreementBonus: 0,
   activationAlpha: 0,
   moodWeight: 0,
+  // 阶段 12：效用信号默认关——先攒 👍/👎 数据，接不接排序由评测回答
+  utilityWeight: 0,
 }
 
 /**
@@ -380,7 +392,13 @@ export function applyRanking(
   now: Date,
   mood?: { valence: number } | null,
 ): ScopedHit[] {
-  if (cfg.importanceWeight === 0 && cfg.hitWeight === 0 && cfg.recencyWeight === 0 && cfg.moodWeight === 0) {
+  if (
+    cfg.importanceWeight === 0 &&
+    cfg.hitWeight === 0 &&
+    cfg.recencyWeight === 0 &&
+    cfg.moodWeight === 0 &&
+    cfg.utilityWeight === 0
+  ) {
     return [...hits]
   }
   const ranked = hits.map((hit) => {
@@ -405,6 +423,13 @@ export function applyRanking(
       if (affinity !== null) factor += cfg.moodWeight * affinity
     }
     factor += cfg.hitWeight * (Math.log1p(hitCount) / 10)
+    // 阶段 12：效用信号。👍 − 👎 为负时按 0 算（只加不罚），量级与 hit_count 同阶（/10）
+    if (cfg.utilityWeight !== 0) {
+      const up = typeof src.confirmed_use === 'number' && Number.isFinite(src.confirmed_use) ? src.confirmed_use : 0
+      const down = typeof src.corrections === 'number' && Number.isFinite(src.corrections) ? src.corrections : 0
+      const utility = Math.max(0, up - down)
+      if (utility > 0) factor += cfg.utilityWeight * (Math.log1p(utility) / 10)
+    }
     if (ageDays !== null) {
       // 半衰期按类型取；被反复命中的条目寿命更长（封顶），
       // 否则「用了三年的关键约定」和「三周前的一句随手记」会一样快地被衰减掉。

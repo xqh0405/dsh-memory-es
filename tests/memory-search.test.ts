@@ -609,6 +609,8 @@ describe('defineSearchTool', () => {
       const def = defineSearchTool(h.deps())
       const parameters = def.parameters as { properties: Record<string, unknown> }
       assert.deepEqual(Object.keys(parameters.properties).sort(), [
+        // 阶段 13：as_of 时间点回看（不传则不加过滤）
+        'as_of',
         // 阶段 12：detail=summary 才砍正文（默认 full，行为不变）
         'detail',
         'domain',
@@ -682,6 +684,39 @@ describe('非事实类型门控（7.1 / 9.3 / 9.5）：默认不返回，显式�
         // 仍然带着 memory_type 的收窄条件（单值 → term，不是 terms）
         assert.equal(JSON.stringify(body).includes('"term":{"memory_type":"identity"}'), true, `${route} 应带收窄`)
       }
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+describe('阶段 13：as_of 入参', () => {
+  test('非法日期直接报错（静默回落会让时间点回看骗人）', async () => {
+    const h = await harness({})
+    try {
+      await assert.rejects(
+        () => searchMemories(h.deps(), { query: 'q', scope: 'personal', as_of: '不是日期' }),
+        /as_of 不是合法日期/,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('合法 as_of 会进两路查询的过滤条件，并在结果里回显', async () => {
+    const h = await harness({
+      personal_memory_xqh: { bm25: [hit('m1', 5, { content: '一条事实' })], knn: [] },
+    })
+    try {
+      const result = await searchMemories(h.deps(), {
+        query: 'q',
+        scope: 'personal',
+        as_of: '2026-10-01T00:00:00.000Z',
+        detail: 'full',
+      })
+      const body = h.bodyOf('personal_memory_xqh', 'bm25')
+      assert.ok(JSON.stringify(body).includes('2026-10-01T00:00:00.000Z'), `过滤里没有 as_of：${JSON.stringify(body)}`)
+      assert.equal(result.asOf, '2026-10-01T00:00:00.000Z')
     } finally {
       await h.fake.close()
     }

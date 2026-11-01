@@ -139,3 +139,24 @@ describe('excludeMemoryTypes（阶段 7.1）', () => {
     assert.equal(buildFilters({}).some(isExclude), false, '不传 = 不排除')
   })
 })
+
+describe('阶段 13：as-of 过滤', () => {
+  test('传 asOf 时加 created_at <= 该时间点（且不动其它过滤）', () => {
+    const at = new Date('2026-10-01T00:00:00.000Z')
+    const filters = buildFilters({ asOf: at })
+    const range = filters.find((f) => 'range' in f && 'created_at' in (f as { range: Record<string, unknown> }).range)
+    assert.ok(range !== undefined, `没生成 created_at 过滤：${JSON.stringify(filters)}`)
+    const created = (range as { range: { created_at: { lte: string } } }).range.created_at
+    assert.equal(created.lte, at.toISOString())
+    // status=active 仍在（as_of 不能把状态过滤顶掉）
+    assert.ok(filters.some((f) => 'term' in f && (f as { term: Record<string, string> }).term.status === 'active'))
+  })
+
+  test('不传 asOf 时不加 created_at 过滤（默认行为不变）', () => {
+    const filters = buildFilters({})
+    assert.equal(
+      filters.some((f) => 'range' in f && 'created_at' in (f as { range: Record<string, unknown> }).range),
+      false,
+    )
+  })
+})

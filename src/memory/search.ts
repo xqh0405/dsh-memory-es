@@ -147,6 +147,11 @@ export interface SearchInput {
    * 默认**仍是 full**——切默认值是行为变更，要先过契约评测与 token 对比，不在这轮偷偷改。
    */
   detail?: DetailLevel
+  /**
+   * 阶段 13 时间点回看：只返回该时间点之前创建的记忆（ISO 8601）。
+   * 近似语义：ES 没有版本历史，看到的是「那条目现在的内容」，不是当时的旧版本。
+   */
+  as_of?: string
 }
 
 export interface RetrievalConfig {
@@ -232,6 +237,8 @@ export interface SearchResult {
   degraded: boolean
   /** true = 用了团队库的兜底时间窗（模型可据此知道自己没给收窄条件） */
   filtered: boolean
+  /** 阶段 13：传了 as_of 时回显生效的时间点（ISO）；没传则缺省 */
+  asOf?: string
   /** 给模型看的短文本 */
   text: string
 }
@@ -242,11 +249,21 @@ function clampLimit(requested: number | undefined, fallback: number): number {
   return Math.max(1, Math.min(MAX_RESULT_LIMIT, Math.trunc(value)))
 }
 
+/** as_of 解析：空串视为未传，非法值直接报错（静默回落到"不过滤"会让时间点回看骗人） */
+function parseAsOf(raw?: string): Date | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const at = Date.parse(raw)
+  if (!Number.isFinite(at)) {
+    throw new Error(`memory_search: as_of 不是合法日期「${raw}」（支持 ISO 8601，如 2026-10-01）`)
+  }
+  return new Date(at)
+}
+
 /** 把工具入参翻译成 ES 过滤条件；团队库在无收窄条件时补 365 天兜底 */
 function buildMeta(
   input: SearchInput,
   now: Date,
-): { meta: MetaFilterOptions; filtered: boolean } {
+): { meta: MetaFilterOptions; filtered: boolean; asOf: Date | undefined } {
   // 阶段 7.1 / 9.3 / 9.5：identity / persona / journal 默认不进普通检索。
   // 它们分别是「我是谁」「我的人格」「某一天的回顾」，混在事实里只会挤占召回
   // （2026-10-31 实测：persona 条目能排到第 1、第 2 名）。
@@ -263,12 +280,15 @@ function buildMeta(
   if (input.time_range !== undefined && input.time_range.trim() !== '') {
     meta.updatedWithinDays = parseTimeRangeDays(input.time_range)
   }
+  const asOf = parseAsOf(input.as_of)
+  if (asOf !== undefined) meta.asOf = asOf
   const narrowed = Boolean(
     (input.memory_type && input.memory_type.length > 0) ||
       (input.domain && input.domain.length > 0) ||
-      meta.updatedWithinDays !== undefined,
+      meta.updatedWithinDays !== undefined ||
+      asOf !== undefined,
   )
-  return { meta, filtered: narrowed }
+  return { meta, filtered: narrowed, asOf }
 }
 
 /**
@@ -288,7 +308,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     throw new Error(`memory_search: 未知 detail「${String(input.detail)}」（只支持 ${DETAIL_LEVELS.join(' / ')}）`)
   }
   const now = deps.now?.() ?? new Date()
-  const { meta, filtered } = buildMeta(input, now)
+  const { meta, filtered, asOf } = buildMeta(input, now)
 
   const personalIndex = `${deps.personalPrefix}${deps.userId}`
   // 团队库按 domain 分层：查某个域时只能看到「本域 + general（跨域通用）」，
@@ -473,7 +493,15 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   if (merged.length === 0) {
     log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, routes: basis, hits: 0, degraded })
     record('no_match', [])
-    return { hits: [], ...(wantExplain ? { receipts: [] } : {}), note: 'no_match', degraded, filtered, text: '没有找到相关记忆。' }
+    return {
+      hits: [],
+      ...(wantExplain ? { receipts: [] } : {}),
+      note: 'no_match',
+      degraded,
+      filtered,
+      ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
+      text: '没有找到相关记忆。',
+    }
   }
 
   // 置信信号只取「主库」的一手分数：scope=both 时以个人库为准。
@@ -562,6 +590,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       note: 'low_confidence',
       degraded,
       filtered,
+      ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
       text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${explainText}`,
     }
   }
@@ -575,7 +604,15 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     ...(margin === undefined ? {} : { margin }),
   })
   record('ok', hits.map((hit) => hit.memory_id), margin === undefined ? {} : { margin })
-  return { hits, ...(receipts === undefined ? {} : { receipts }), note: 'ok', degraded, filtered, text: `${renderText(hits)}${explainText}` }
+  return {
+    hits,
+    ...(receipts === undefined ? {} : { receipts }),
+    note: 'ok',
+    degraded,
+    filtered,
+    ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
+    text: `${renderText(hits)}${explainText}`,
+  }
 }
 
 /**
@@ -655,6 +692,11 @@ export function defineSearchTool(deps: SearchDeps) {
         description:
           'true 时附「命中回执」：每条的各路名次与原始分、RRF 分、乘子前后分、入选原因（两路一致/仅关键词/标识符命中）。默认关（省 token）；想核对「为什么这条排第一」或怀疑排序有问题时再开。',
       },
+      as_of: {
+        type: 'string',
+        description:
+          '阶段 13 时间点回看：只返回该时间点之前创建的记忆（ISO 8601，如 2026-10-01 或 2026-10-01T12:00:00Z）。近似语义——看到的是条目现在的内容，不是当时的旧版本。',
+      },
       detail: {
         type: 'string',
         enum: [...DETAIL_LEVELS],
@@ -707,6 +749,7 @@ export function defineSearchTool(deps: SearchDeps) {
             },
           },
           note: { type: 'string', required: true },
+          as_of: { type: 'string' },
           degraded: { type: 'boolean', required: true },
           filtered: { type: 'boolean', required: true },
           text: { type: 'string', required: true },
