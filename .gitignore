@@ -214,3 +214,7 @@ tests/eval/baseline.json
 # 都「跟人有关」且 github 远端是 public —— 一律只留本地；
 # ingest.ts / extract.py 同目录共存，整目录一起忽略最省心。
 .chat-inspect/
+
+# 竞品调研原始素材（第三方 README 原文，不入库）
+.research/
+scratch-research/
