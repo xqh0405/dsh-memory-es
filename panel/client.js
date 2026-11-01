@@ -437,11 +437,13 @@ window.__ModuleLoader__.load({
       // 主区全局面板的骨架：照 DSH 官方页面（插件管理 / 计划任务）的尺寸——
       // 内容宽 960px、全高滚动、页头左标题右动作。不自己做全屏 workshop：
       // 那种外壳是给要盖住会话的页面用的，我们只是主区里的一个页面。
+      //
+      // 注意这里**不写 background**：底色由注入的 WORKSPACE_CSS 按主题给实色。
+      // 原因见 WORKSPACE_CSS 上方的注释（皮肤会把这个 token 改成透明或 initial）。
       workspace: {
         width: '100%', minWidth: 0, height: '100%', minHeight: 0,
         display: 'flex', overflow: 'hidden',
         color: 'var(--dsw-alias-label-primary)',
-        background: 'var(--dsw-alias-bg-base)',
         fontSize: 14, lineHeight: 1.6,
       },
       workspaceScroll: { scrollbarGutter: 'stable', flex: 1, minHeight: 0, overflow: 'auto' },
@@ -2316,13 +2318,34 @@ window.__ModuleLoader__.load({
     /** 侧栏面板 id：同时用作 `main` 的 key 与 `sidebar.panellist` 的 id，两者必须一致。 */
     const PANEL_ID = 'memory-es'
 
+    /** 主区外壳上的标记属性：样式钩子，也方便排查时在 DOM 里认出来。 */
+    const WORKSPACE_ATTR = 'data-memory-workspace'
+    const WORKSPACE_STYLE_ID = 'dsh-memory-es-workspace-style'
+
+    /**
+     * 主区外壳的底色（注入一次）。
+     *
+     * 为什么不用 `--dsw-alias-bg-base`：皮肤会把这个 token 改成「不是实色」——
+     * orca-link 在亮色主题下把它设成 `#faf7f13d`（24% alpha），暗色主题下设成 `initial`
+     * （自定义属性取 initial 等于未定义 → `background: var(--dsw-alias-bg-base)` 整条声明失效）。
+     * 两种情况下主区都会透出皮肤的插画背景，正文压在漫画上根本看不清（2026-11-01 在 test 实例上复现）。
+     *
+     * 办法：拿 DSH 的静态中性色（皮肤没有改这两个）当画布，按明暗主题各取一档。
+     * 亮色是纯白、暗色是 #151517，与侧栏一致；比跟着皮肤转透明更能保证可读性。
+     * 想以后跟随皮肤？改这一个常量即可，别再回到 `--dsw-alias-bg-*`。
+     */
+    const WORKSPACE_CSS = [
+      `[${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
+      `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
+    ].join('\n')
+
     /**
      * 主区壳：官方全局面板骨架 + 「返回会话」。
      *
      * 回滚方式：摘掉 `main` 那一组注册即可，设置里的「记忆库」节一行没动、照旧可用。
      */
     function MemoryWorkspace({ t, close }) {
-      return h('div', { style: S.workspace },
+      return h('div', { style: S.workspace, [WORKSPACE_ATTR]: '' },
         h('div', { style: S.workspaceScroll },
           h('div', { style: S.workspaceContent },
             h('div', { style: S.workspaceHeading },
@@ -2361,6 +2384,17 @@ window.__ModuleLoader__.load({
           }
         })
         const t = ctx.locale.bind(NS)
+
+        // 主区外壳的底色样式：注入一次，卸载时摘掉（见 WORKSPACE_CSS 的说明）
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return
+          if (document.getElementById(WORKSPACE_STYLE_ID) !== null) return
+          const style = document.createElement('style')
+          style.id = WORKSPACE_STYLE_ID
+          style.textContent = WORKSPACE_CSS
+          document.head.appendChild(style)
+          return () => style.remove()
+        })
 
         // 设置里的「记忆库」节：只留配置 / 维护（主区负责看，设置负责改）
         ctx.slots.inject('settings.section', () => ctx.slots.register({
