@@ -26,6 +26,25 @@ import type { RecallCache } from './recallCache.ts'
 export const SCOPES = ['both', 'personal', 'team'] as const
 export type SearchScope = (typeof SCOPES)[number]
 
+/**
+ * 查询的归一化键（阶段 11）：把「同一个问题的不同提法」聚成一簇。
+ *
+ * 与 `fragment.normalizeContent` 的区别：那个保留空白（正文语义），这个把空白与标点
+ * **全部去掉**——面板要按簇数「这周问过什么」，`Nacos 实例列表` 与 `nacos实例列表`
+ * 必须落进同一个桶。`query` 本身是 ik 分词的 text，没法直接 terms 聚合，所以埋点里
+ * 额外存一份 keyword。
+ *
+ * 截断 200 字：超过这个长度基本是贴了整段上下文，不指望能聚到一起，但也不该撑爆 keyword。
+ */
+export function normalizeQueryKey(query: string): string {
+  const normalized = query
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .slice(0, 200)
+  return normalized === '' ? '<empty>' : normalized
+}
+
 /** 返回给模型的条数上限（§6.3：默认 8，上限 20） */
 export const MAX_RESULT_LIMIT = 20
 /** 正文投影上限：一次检索 8 条 × 500 字，不至于吃掉大量 token */
@@ -399,15 +418,19 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
    * 理由与 §6.5 一致：观测通道的可用性不该成为记忆检索的单点故障。
    * 三个出口（no_match / low_confidence / ok）都要记，否则"空结果率"永远算不出来。
    */
-  const record = (note: SearchNote, hitCount: number, extra: { margin?: number } = {}): void => {
+  const record = (note: SearchNote, hitIds: readonly string[], extra: { margin?: number } = {}): void => {
     const recorder = deps.recorder
     const index = deps.searchLogIndex
     if (!recorder || !index) return
+    const hitCount = hitIds.length
     const doc: Record<string, unknown> = {
       user_id: deps.userId,
       at: new Date().toISOString(),
       tool: 'search',
       query: query.slice(0, 500),
+      // 阶段 11：归一化键（面板按簇统计）与本次返回的 memory_id（反查「被哪些问题命中过」）
+      query_norm: normalizeQueryKey(query),
+      hit_ids: hitIds.slice(0, MAX_RESULT_LIMIT),
       scope,
       hits: hitCount,
       note,
@@ -430,7 +453,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
 
   if (merged.length === 0) {
     log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, routes: basis, hits: 0, degraded })
-    record('no_match', 0)
+    record('no_match', [])
     return { hits: [], ...(wantExplain ? { receipts: [] } : {}), note: 'no_match', degraded, filtered, text: '没有找到相关记忆。' }
   }
 
@@ -513,7 +536,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       note: 'low_confidence',
       reason: verdict.reason,
     })
-    record('low_confidence', hits.length, margin === undefined ? {} : { margin })
+    record('low_confidence', hits.map((hit) => hit.memory_id), margin === undefined ? {} : { margin })
     return {
       hits,
       ...(receipts === undefined ? {} : { receipts }),
@@ -532,7 +555,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     degraded,
     ...(margin === undefined ? {} : { margin }),
   })
-  record('ok', hits.length, margin === undefined ? {} : { margin })
+  record('ok', hits.map((hit) => hit.memory_id), margin === undefined ? {} : { margin })
   return { hits, ...(receipts === undefined ? {} : { receipts }), note: 'ok', degraded, filtered, text: `${renderText(hits)}${explainText}` }
 }
 

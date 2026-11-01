@@ -121,6 +121,35 @@ window.__ModuleLoader__.load({
       kindIdentity: '自述',
       stateActive: '生效中',
       stateArchived: '已拒绝',
+      tabSearchLog: '检索',
+      slDays: '统计范围',
+      slDays7: '近 7 天',
+      slDays30: '近 30 天',
+      slDays90: '近 90 天',
+      slTotal: '检索次数',
+      slClusters: '问题簇',
+      slMiss: '一次没答上',
+      slLowCount: '低置信/漏答',
+      slMissingTitle: '缺口清单（问过、但一次都没命中）',
+      slTopTitle: '被用得最多的记忆',
+      colMemory: '记忆',
+      slLowTitle: '低置信与漏答',
+      slRecentTitle: '最近检索',
+      slEmpty: '这段时间没有检索记录',
+      slLegacyHint: '覆盖率只统计补字段之后的检索；更早的记录没有归一化键，不进簇统计。',
+      slUsedIn: '被哪些检索命中过',
+      slUsedInEmpty: '还没有检索命中过这条',
+      slStatusMiss: '没答上',
+      slStatusMixed: '有漏答',
+      slStatusLow: '低置信',
+      slStatusHit: '有命中',
+      colCount: '次数',
+      colLast: '最近',
+      colQuery: '问题',
+      colHitsN: '命中',
+      colMs: '耗时',
+      colNote: '结论',
+      noData: '—',
       tabConfig: '配置',
       tabMaint: '维护',
       cardPersonal: '个人记忆',
@@ -381,6 +410,35 @@ window.__ModuleLoader__.load({
       kindIdentity: 'Identity',
       stateActive: 'active',
       stateArchived: 'rejected',
+      tabSearchLog: 'Search log',
+      slDays: 'Range',
+      slDays7: 'Last 7 days',
+      slDays30: 'Last 30 days',
+      slDays90: 'Last 90 days',
+      slTotal: 'Searches',
+      slClusters: 'Question clusters',
+      slMiss: 'Never answered',
+      slLowCount: 'Low confidence / missed',
+      slMissingTitle: 'Gaps (asked, never matched)',
+      slTopTitle: 'Most-used memories',
+      colMemory: 'Memory',
+      slLowTitle: 'Low confidence and misses',
+      slRecentTitle: 'Recent searches',
+      slEmpty: 'No searches in this range',
+      slLegacyHint: 'Coverage counts only searches recorded after the field upgrade; older rows have no cluster key.',
+      slUsedIn: 'Matched by which searches',
+      slUsedInEmpty: 'No search has matched this memory yet',
+      slStatusMiss: 'never',
+      slStatusMixed: 'missed some',
+      slStatusLow: 'low conf',
+      slStatusHit: 'matched',
+      colCount: 'count',
+      colLast: 'last',
+      colQuery: 'question',
+      colHitsN: 'hits',
+      colMs: 'ms',
+      colNote: 'note',
+      noData: '—',
       tabConfig: 'Config',
       tabMaint: 'Maintenance',
       cardPersonal: 'Personal',
@@ -2909,6 +2967,160 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ── 检索日志与覆盖率（阶段 11）──────────────────────────────────────
+
+    /**
+     * 「检索」页：这周问过什么、哪些没答上、哪条被用得最多。
+     *
+     * 口径全部来自 `search_log_<uid>`（埋点本来就写，不额外请求 ES 之外的系统）；
+     * 簇由后端按 `query_norm` 聚合，前端只负责展示与分档着色。
+     * 呈现纪律：没有数据就显示「—」，不要把 0 当成"有人问过但没答案"。
+     */
+    function SearchLog({ t }) {
+      const [days, setDays] = React.useState(7)
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const load = React.useCallback(() => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/search-log', { days: String(days), limit: '50' })
+          .then((data) => setState({ loading: false, error: '', data }))
+          .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
+      }, [days])
+      React.useEffect(() => {
+        load()
+      }, [load])
+
+      const data = state.data
+      const summary = data?.summary ?? null
+      const value = (item) => (item === undefined || item === null ? t('noData') : String(item))
+      const statusPill = (status) => {
+        const tone = status === 'hit' ? 'ok' : 'warn'
+        const label =
+          { miss: t('slStatusMiss'), mixed: t('slStatusMixed'), low: t('slStatusLow'), hit: t('slStatusHit') }[status] ?? status
+        return h('span', { style: S.pill(tone) }, label)
+      }
+      const head = (cells, width) =>
+        h('div', {
+          style: {
+            display: 'grid',
+            gridTemplateColumns: width,
+            gap: 10,
+            fontSize: 11,
+            ...S.muted,
+            padding: '6px 0',
+            borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.2))',
+          },
+        }, cells.map((cell) => h('span', { key: cell }, cell)))
+      const line = (key, cells, width) =>
+        h('div', {
+          key,
+          style: {
+            display: 'grid',
+            gridTemplateColumns: width,
+            gap: 10,
+            fontSize: 12.5,
+            padding: '6px 0',
+            alignItems: 'center',
+            color: 'var(--dsw-alias-label-primary)',
+          },
+        }, cells)
+
+      const clusterTable = (rows, emptyText) =>
+        rows.length === 0
+          ? h('p', { style: { ...S.muted, fontSize: 12, margin: '6px 0' } }, emptyText)
+          : h('div', null,
+              head([t('colQuery'), t('colCount'), t('colLast'), t('colStatus')], '1fr 60px 150px 90px'),
+              rows.map((item, index) =>
+                line(`c-${index}-${item.key}`, [
+                  h('span', { key: 'q', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
+                    item.query || item.key),
+                  h('span', { key: 'n', style: S.mono }, String(item.count)),
+                  h('span', { key: 'l', style: S.mono }, shortTime(item.lastAt)),
+                  h('span', { key: 's' }, statusPill(item.status)),
+                ], '1fr 60px 150px 90px'),
+              ),
+            )
+
+      return h('div', null,
+        h('div', { style: S.toolbar },
+          h('div', { style: S.seg },
+            [[7, t('slDays7')], [30, t('slDays30')], [90, t('slDays90')]].map(([value_, label]) =>
+              h('button', {
+                key: value_,
+                type: 'button',
+                style: S.segBtn(days === value_),
+                onClick: () => setDays(value_),
+              }, label),
+            ),
+          ),
+          h('span', { style: { flex: 1 } }),
+          h('button', { type: 'button', style: S.btn, onClick: load }, t('retry')),
+        ),
+        state.loading && data === null
+          ? h('p', { style: S.muted }, t('loading'))
+          : state.error
+            ? h('p', { style: S.err }, `${t('error')}: ${state.error}`)
+            : h('div', null,
+                h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 12 } },
+                  [
+                    [t('slTotal'), summary?.total],
+                    [t('slClusters'), summary?.clusters],
+                    [t('slMiss'), summary?.miss],
+                    [t('slLowCount'), (summary?.low ?? 0) + (summary?.mixed ?? 0)],
+                  ].map(([label, number]) =>
+                    h('div', { key: label, style: S.card },
+                      h('div', { style: { ...S.muted, fontSize: 11 } }, label),
+                      h('div', { style: { fontSize: 22, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, value(number)),
+                    ),
+                  ),
+                ),
+                h('div', { style: S.card },
+                  h('h3', { style: { margin: '0 0 8px', fontSize: 13, fontWeight: 600 } }, t('slMissingTitle')),
+                  clusterTable(data?.missing ?? [], t('slEmpty')),
+                ),
+                h('div', { style: S.card },
+                  h('h3', { style: { margin: '0 0 8px', fontSize: 13, fontWeight: 600 } }, t('slTopTitle')),
+                  (data?.topMemories ?? []).length === 0
+                    ? h('p', { style: { ...S.muted, fontSize: 12, margin: '6px 0' } }, t('slEmpty'))
+                    : h('div', null,
+                        head([t('colMemory'), t('colCount'), t('colContent')], '110px 60px 1fr'),
+                        (data?.topMemories ?? []).map((item, index) =>
+                          line(`t-${index}`, [
+                            h('span', { key: 'm', style: S.mono }, String(item.memory_id ?? '').slice(0, 8)),
+                            h('span', { key: 'c', style: S.mono }, String(item.count)),
+                            h('span', {
+                              key: 'p',
+                              style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+                            }, item.preview || t('noData')),
+                          ], '110px 60px 1fr'),
+                        ),
+                      ),
+                ),
+                h('div', { style: S.card },
+                  h('h3', { style: { margin: '0 0 8px', fontSize: 13, fontWeight: 600 } }, t('slLowTitle')),
+                  clusterTable(data?.low ?? [], t('slEmpty')),
+                ),
+                h('div', { style: S.card },
+                  h('h3', { style: { margin: '0 0 8px', fontSize: 13, fontWeight: 600 } }, t('slRecentTitle')),
+                  (data?.recent ?? []).length === 0
+                    ? h('p', { style: { ...S.muted, fontSize: 12, margin: '6px 0' } }, t('slEmpty'))
+                    : h('div', null,
+                        head([t('colLast'), t('colQuery'), t('colHitsN'), t('colMs'), t('colNote')], '150px 1fr 60px 70px 110px'),
+                        (data?.recent ?? []).map((item, index) =>
+                          line(`r-${index}`, [
+                            h('span', { key: 'a', style: S.mono }, shortTime(item.at)),
+                            h('span', { key: 'q', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, item.query),
+                            h('span', { key: 'h', style: S.mono }, String(item.hits)),
+                            h('span', { key: 'm', style: S.mono }, item.ms > 0 ? String(item.ms) : t('noData')),
+                            h('span', { key: 'n', style: S.mono }, item.note),
+                          ], '150px 1fr 60px 70px 110px'),
+                        ),
+                      ),
+                  h('p', { style: { ...S.muted, fontSize: 11, margin: '8px 0 0' } }, t('slLegacyHint')),
+                ),
+              ),
+      )
+    }
+
     // ── 记忆浏览 ─────────────────────────────────────────────────────────
     function Browse({ t, caps }) {
       const [scope, setScope] = React.useState('both')
@@ -2926,6 +3138,8 @@ window.__ModuleLoader__.load({
       // 阶段 9：隔离条目可以在面板上直接恢复（只能让模型用工具恢复的话，审完也处理不掉）
       const [restoreBusy, setRestoreBusy] = React.useState(false)
       const [restoreResult, setRestoreResult] = React.useState(null)
+      // 阶段 11：反查「这条记忆被哪些检索命中过」（按需拉，不随列表一起取）
+      const [usedIn, setUsedIn] = React.useState(null)
       const [delReason, setDelReason] = React.useState('')
       const [delBusy, setDelBusy] = React.useState(false)
       const [delResult, setDelResult] = React.useState(null)
@@ -3016,6 +3230,11 @@ window.__ModuleLoader__.load({
           .catch((error) => setDelResult({ ok: false, error: String(error.message ?? error) }))
           .finally(() => setDelBusy(false))
       }
+
+      // 详情换了一条就清掉上一条的反查结果，避免张冠李戴
+      React.useEffect(() => {
+        setUsedIn(null)
+      }, [selected === null ? '' : selected.esId])
 
       const doRestore = () => {
         if (!selected || restoreBusy) return
@@ -3329,7 +3548,32 @@ window.__ModuleLoader__.load({
                       onClick: doRestore,
                     }, restoreBusy ? '…' : t('restoreBtn'))
                   : null,
+                h('button', {
+                  type: 'button',
+                  style: S.btn,
+                  onClick: () => {
+                    apiGet('/search-log/used-in', { memory_id: selected.id })
+                      .then((value) => setUsedIn(value))
+                      .catch((error) => setUsedIn({ rows: [], error: String(error.message ?? error) }))
+                  },
+                }, t('slUsedIn')),
               ),
+              usedIn
+                ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
+                    usedIn.error
+                      ? `${t('error')}: ${usedIn.error}`
+                      : (usedIn.rows ?? []).length === 0
+                        ? t('slUsedInEmpty')
+                        : [
+                            h('div', { key: 'title', style: { fontWeight: 600, marginBottom: 4 } },
+                              `${t('slUsedIn')}（${usedIn.rows.length}）`),
+                            ...usedIn.rows.slice(0, 10).map((item, index) =>
+                              h('div', { key: `u-${index}`, style: { ...S.mono, fontSize: 11.5, lineHeight: 1.7 } },
+                                `${shortTime(item.at)} · ${item.query} · ${item.hits} 条`),
+                            ),
+                          ],
+                  )
+                : null,
             )
           : null,
       )
@@ -3403,6 +3647,7 @@ window.__ModuleLoader__.load({
           [
             ['overview', t('tabOverview')],
             ['browse', t('tabBrowse')],
+            ['searchlog', t('tabSearchLog')],
             ['graph', t('tabGraph')],
             // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
             ['identity', t('tabIdentity')],
@@ -3431,6 +3676,8 @@ window.__ModuleLoader__.load({
           ? h(Identity, { t })
           : tab === 'persona'
           ? h(Persona, { t })
+          : tab === 'searchlog'
+          ? h(SearchLog, { t })
           : tab === 'graph'
           ? h(GraphView, { t })
           : tab === 'overview'

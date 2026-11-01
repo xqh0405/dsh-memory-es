@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster } = await import(
   '../panel/index.js'
 )
 
@@ -890,4 +890,28 @@ test('配置页字段都带 default，且与 schema 的默认值一致', () => {
     assert.ok(expected !== null, `config.ts 里找不到 ${key} 的 default`)
     assert.equal(String(field.default), expected, `${field.path.join('.')} 的 default 与 schema 不一致`)
   }
+})
+
+test('classifyCluster：覆盖率三档的口径', () => {
+  // 一次都没命中 = 内容缺口（最值钱的那张清单）
+  assert.equal(classifyCluster({ maxHits: 0, notes: {} }).status, 'miss')
+  // 答上过也漏过：要看「有漏答」，不能因为后来答上了就抹掉缺口
+  assert.equal(classifyCluster({ maxHits: 3, notes: { ok: 2, no_match: 1 } }).status, 'mixed')
+  // 答上了但低置信：候选区分度不足
+  assert.equal(classifyCluster({ maxHits: 2, notes: { low_confidence: 2 } }).status, 'low')
+  // 正常命中
+  assert.equal(classifyCluster({ maxHits: 2, notes: { ok: 2 } }).status, 'hit')
+  // max(hits) 缺失时按 0 处理，不抛错
+  assert.equal(classifyCluster({ notes: {} }).status, 'miss')
+})
+
+test('indexNames：没显式配置的前缀要兜底（面板读的是「写了什么」，不是 schema 默认）', () => {
+  // 2026-11-01 自检踩过：searchLogPrefix 没写 → 拼出 `undefinedxqh` → ES 403
+  const names = indexNames({
+    index: { personalPrefix: 'personal_memory_', team: 'team_knowledge' },
+    identity: { userId: 'xqh' },
+  })
+  assert.equal(names.searchLog, 'search_log_xqh')
+  assert.equal(names.docs, 'personal_doc_xqh')
+  assert.equal(names.personalAudit, 'personal_audit_xqh')
 })

@@ -223,6 +223,8 @@ es -X PUT "$ES/_index_template/search_log_template" -d @- >/dev/null <<'JSON'
         "at":       { "type": "date" },
         "tool":     { "type": "keyword" },
         "query":    { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "query_norm": { "type": "keyword", "ignore_above": 512 },
+        "hit_ids":  { "type": "keyword" },
         "scope":    { "type": "keyword" },
         "hits":     { "type": "integer" },
         "note":     { "type": "keyword" },

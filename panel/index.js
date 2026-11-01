@@ -252,6 +252,10 @@ function indexNames(config) {
     team: config.index.team,
     audit: AUDIT_INDEX,
     personalAudit: `${config.index.auditPrefix ?? 'personal_audit_'}${config.identity.userId}`,
+    // ⚠️ 面板拿到的是「配置行里显式写了什么」，不是 schema 合并后的默认值：
+    // 没写的键一律 undefined（2026-11-01 自检因此拼出 `undefinedxqh`，ES 直接 403）。
+    // 每个可选前缀都必须带兜底，别指望默认值在这里存在。
+    searchLog: `${config.index.searchLogPrefix ?? 'search_log_'}${config.identity.userId}`,
   }
 }
 
@@ -744,6 +748,201 @@ async function handleOverview(ctx, res) {
       },
     },
   })
+}
+
+/**
+ * 把查询簇归类（阶段 11 的覆盖率口径）。
+ *
+ * 三档不是拍脑袋，对应三种「没答上」的不同原因：
+ *  · `miss`   —— **一次都没命中**：真正的内容缺口，最值钱的那张清单；
+ *  · `mixed`  —— 答上过也漏过：可能是问法更具体、也可能是库在长大（同一条 query 前后两次结果不同）；
+ *  · `low`    —— 答上了但低置信：候选区分度不足，通常是「库里没有精确答案，只有近邻」；
+ *  · `hit`    —— 正常命中。
+ *
+ * 判据刻意用 max(hits) 而不是「最新一次」：一次 no_match 不代表这个问题一直没人答得出来，
+ * 反过来一次命中也不代表缺口填上了——两种都记下来，让人自己看。
+ */
+export function classifyCluster(input) {
+  const maxHits = num(input.maxHits)
+  const notes = input.notes ?? {}
+  const noMatch = num(notes.no_match)
+  const low = num(notes.low_confidence)
+  const status = maxHits <= 0 ? 'miss' : noMatch > 0 ? 'mixed' : low > 0 ? 'low' : 'hit'
+  return { ...input, maxHits, status }
+}
+
+/** GET /search-log：最近检索记录 + 按查询归一化键聚类的覆盖率（阶段 11） */
+async function handleSearchLog(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const index = indexNames(config).searchLog
+
+  const daysRaw = Number.parseInt(url.searchParams.get('days') ?? '7', 10)
+  const days = Math.min(90, Math.max(1, Number.isFinite(daysRaw) ? daysRaw : 7))
+  const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '50', 10)
+  const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50))
+  const since = new Date(Date.now() - days * 86_400_000).toISOString()
+  const range = { range: { at: { gte: since } } }
+
+  let recent = []
+  let total = 0
+  let clusters = []
+  /** 「被用得最多」的原始排行（hit_ids terms 聚合的结果） */
+  let topHitRank = []
+  try {
+    const [rows, agg] = await Promise.all([
+      client.search(index, {
+        size: limit,
+        sort: [{ at: 'desc' }],
+        query: range,
+        _source: ['at', 'query', 'scope', 'hits', 'note', 'degraded', 'ms'],
+      }),
+      client.search(index, {
+        size: 0,
+        track_total_hits: true,
+        query: range,
+        aggs: {
+          clusters: {
+            terms: { field: 'query_norm', size: 200, order: { last: 'desc' } },
+            aggs: {
+              // 带 format 才会返回 value_as_string；不带的话拿到的是 epoch millis
+              last: { max: { field: 'at', format: 'strict_date_optional_time' } },
+              max_hits: { max: { field: 'hits' } },
+              notes: { terms: { field: 'note', size: 5 } },
+              sample: { top_hits: { size: 1, sort: [{ at: 'desc' }], _source: ['query'] } },
+            },
+          },
+          // 阶段 11：「哪条记忆被用得最多」——hit_ids 是 keyword 数组，terms 会按元素展开
+          hit_rank: { terms: { field: 'hit_ids', size: 10 } },
+        },
+      }),
+    ])
+
+    recent = (rows.hits?.hits ?? []).map((hit) => {
+      const src = hit._source ?? {}
+      return {
+        at: str(src.at),
+        query: str(src.query),
+        scope: str(src.scope),
+        hits: num(src.hits),
+        note: str(src.note),
+        ms: num(src.ms),
+        degraded: src.degraded === true,
+      }
+    })
+
+    total = num(agg.hits?.total?.value)
+    topHitRank = (agg.aggregations?.hit_rank?.buckets ?? []).map((bucket) => ({
+      memory_id: str(bucket.key),
+      count: num(bucket.doc_count),
+    }))
+    clusters = (agg.aggregations?.clusters?.buckets ?? []).map((bucket) =>
+      classifyCluster({
+        key: bucket.key,
+        query: str(bucket.sample?.hits?.hits?.[0]?._source?.query),
+        count: num(bucket.doc_count),
+        lastAt: bucket.last?.value_as_string ?? '',
+        maxHits: bucket.max_hits?.value,
+        notes: Object.fromEntries((bucket.notes?.buckets ?? []).map((item) => [item.key, item.doc_count])),
+      }),
+    )
+  } catch (error) {
+    // 索引不存在 = 这个用户还没检索过。那不是错误，返回空集合（面板会显示「—」）。
+    if (error?.status !== 404) throw error
+  }
+
+  // 「被用得最多」的正文预览：拿到 id 排行后回个人库补第一条正文（只取前 60 字）
+  let topMemories = []
+  if (topHitRank.length > 0) {
+    try {
+      const found = await client.search(indexNames(config).personal, {
+        size: topHitRank.length,
+        query: { ids: { values: topHitRank.map((item) => item.memory_id) } },
+        _source: ['memory_id', 'content'],
+      })
+      const preview = new Map(
+        (found.hits?.hits ?? []).map((hit) => [str(hit._source?.memory_id) || hit._id, str(hit._source?.content)]),
+      )
+      topMemories = topHitRank.map((item) => ({
+        ...item,
+        preview: (preview.get(item.memory_id) ?? '').slice(0, 60),
+      }))
+    } catch {
+      // 补正文失败不影响排行本身：id 与次数照给
+      topMemories = topHitRank.map((item) => ({ ...item, preview: '' }))
+    }
+  }
+
+  const summary = {
+    total,
+    clusters: clusters.length,
+    miss: clusters.filter((item) => item.status === 'miss').length,
+    mixed: clusters.filter((item) => item.status === 'mixed').length,
+    low: clusters.filter((item) => item.status === 'low').length,
+    hit: clusters.filter((item) => item.status === 'hit').length,
+    /** 存量记录没有 query_norm（阶段 11 之前），面板要如实说明统计范围 */
+    since,
+  }
+  const missing = clusters
+    .filter((item) => item.status === 'miss')
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50)
+  const low = clusters
+    .filter((item) => item.status === 'low' || item.status === 'mixed')
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50)
+
+  json(res, 200, {
+    ok: true,
+    value: {
+      days,
+      limit,
+      summary,
+      recent,
+      missing,
+      low,
+      topMemories,
+      clusters: clusters.slice(0, 50),
+    },
+  })
+}
+
+/** GET /search-log/used-in：反查「这条记忆被哪些问题命中过」（阶段 11） */
+async function handleSearchLogUsedIn(ctx, res, url) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
+  const config = configRow.value
+  const memoryId = str(url.searchParams.get('memory_id')).trim()
+  if (memoryId === '') return json(res, 400, { ok: false, error: '缺少 memory_id' })
+
+  const daysRaw = Number.parseInt(url.searchParams.get('days') ?? '90', 10)
+  const days = Math.min(365, Math.max(1, Number.isFinite(daysRaw) ? daysRaw : 90))
+  const since = new Date(Date.now() - days * 86_400_000).toISOString()
+
+  const client = createReadClient(() => resolveClientConfig(ctx))
+  const index = indexNames(config).searchLog
+  try {
+    const result = await client.search(index, {
+      size: 50,
+      sort: [{ at: 'desc' }],
+      query: {
+        bool: {
+          filter: [{ range: { at: { gte: since } } }, { term: { hit_ids: memoryId } }],
+        },
+      },
+      _source: ['at', 'query', 'hits', 'note'],
+    })
+    const rows = (result.hits?.hits ?? []).map((hit) => {
+      const src = hit._source ?? {}
+      return { at: str(src.at), query: str(src.query), hits: num(src.hits), note: str(src.note) }
+    })
+    json(res, 200, { ok: true, value: { days, memoryId, total: rows.length, rows } })
+  } catch (error) {
+    if (error?.status !== 404) throw error
+    json(res, 200, { ok: true, value: { days, memoryId, total: 0, rows: [] } })
+  }
 }
 
 async function handleMemories(ctx, res, url) {
@@ -2444,6 +2643,9 @@ async function handle(ctx, req, res) {
     if (path === '/overview') return await handleOverview(ctx, res)
     if (path === '/graph') return await handleGraph(ctx, res, url)
     if (path === '/memories') return await handleMemories(ctx, res, url)
+    // 阶段 11：检索埋点的覆盖率与反查
+    if (path === '/search-log' && req.method === 'GET') return await handleSearchLog(ctx, res, url)
+    if (path === '/search-log/used-in' && req.method === 'GET') return await handleSearchLogUsedIn(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
     if (path === '/persona') return await handlePersonaGet(ctx, res)
@@ -2724,6 +2926,19 @@ async function selfTest(ctx) {
       maintInfo = `HTTP ${maintRes.status} 非 JSON`
     }
 
+    // 阶段 11：检索埋点的自检。次数=0 有两种可能——这 7 天真的没检索，或埋点写失败
+    // （fire-and-forget，失败只记日志），所以这一行要能在部署时被看到。
+    const searchLogRes = await call('/search-log?days=7&limit=1')
+    let searchLogInfo = `HTTP ${searchLogRes.status}`
+    try {
+      const body = JSON.parse(searchLogRes.body)
+      searchLogInfo = body.ok
+        ? `ok 次数=${body.value?.summary?.total ?? 0} 簇=${body.value?.summary?.clusters ?? 0} 缺口=${body.value?.summary?.miss ?? 0}`
+        : `err ${body.error}`
+    } catch {
+      searchLogInfo = `HTTP ${searchLogRes.status} 非 JSON`
+    }
+
     // 凭据体检：只打长度不打值。整理任务报「.env 缺少 MEM_USERNAME/MEM_PASSWORD」时，
     // 先看这一行——passwordLen=0 说明配置没读到凭据，非 0 说明是写盘或 CLI 解析的问题。
     {
@@ -2756,7 +2971,7 @@ async function selfTest(ctx) {
         `待裁决=${counts.pending} 最近=${payload.value?.recent?.length ?? 0} | ` +
         `审计=${payload.value?.counts?.audit ?? '—'} | 浏览: ${listInfo} | 分页: ${pagingInfo} | ` +
         `审核: ${pendingInfo} | 过滤候选: ${facetsInfo} | 镜像预览: ${mirrorInfo} | ` +
-        `权限: ${capsInfo} | 配置: ${configInfo} | 维护: ${maintInfo} | ` +
+        `权限: ${capsInfo} | 配置: ${configInfo} | 维护: ${maintInfo} | 检索: ${searchLogInfo} | ` +
         `${moodView} | ${pendingView} | ${auditView}`,
     )
   } catch {
@@ -2809,6 +3024,8 @@ export {
   handleGraph,
   handleMaintenanceGet,
   handleMemories,
+  handleSearchLog,
+  handleSearchLogUsedIn,
   handleReviewAction,
   handleStickerImageGet,
   handleStickerAdd,

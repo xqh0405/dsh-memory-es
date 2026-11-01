@@ -17,7 +17,7 @@ import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 
 import { createEsClient } from '../src/es/http.ts'
 import { buildHitReceipts, type ScopedHit } from '../src/fragment.ts'
-import { defineSearchTool, renderReceipts, searchMemories, type SearchDeps } from '../src/memory/search.ts'
+import { defineSearchTool, normalizeQueryKey, renderReceipts, searchMemories, type SearchDeps } from '../src/memory/search.ts'
 import { sendJson, startFakeEs, type FakeEs } from './helpers/fake-es.ts'
 
 const NOW = new Date('2026-11-01T12:00:00.000Z')
@@ -271,6 +271,78 @@ describe('工具契约：receipts 必须过 DSH 的 output schema 校验', () =>
       )) as Record<string, unknown>
       assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [])
       assert.equal('receipts' in value, false)
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+describe('normalizeQueryKey（阶段 11 的簇键）', () => {
+  test('去空白标点、大小写折叠：同一问题的不同提法落进同一个桶', () => {
+    assert.equal(normalizeQueryKey('Nacos 实例 列表'), normalizeQueryKey('nacos实例列表。'))
+    assert.equal(normalizeQueryKey('  LOT.BD_WRITE_SYNC  '), 'lotbdwritesync')
+  })
+
+  test('全角转半角（NFKC）', () => {
+    assert.equal(normalizeQueryKey('ＮＡＣＯＳ：实例'), 'nacos实例')
+  })
+
+  test('空串兜底成 <empty>，不留空 keyword', () => {
+    assert.equal(normalizeQueryKey('。。。'), '<empty>')
+  })
+})
+
+describe('检索埋点：hit_ids 与 query_norm', () => {
+  test('写进 search_log 的 hit_ids 与返回的 hits 一致（反查的地基）', async () => {
+    const fake = await startSearchFake()
+    const logs: Array<{ index: string; doc: Record<string, unknown> }> = []
+    try {
+      const result = await searchMemories(
+        makeDeps(fake, {
+          searchLogIndex: 'search_log_xqh',
+          recorder: {
+            index: async (index: string, doc: Record<string, unknown>) => {
+              logs.push({ index, doc })
+              return {}
+            },
+          } as never,
+        }),
+        { query: 'lot.bd_write_sync 北单同步', scope: 'personal' },
+      )
+      // record 是 fire-and-forget，等一个 tick 让它落地
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      assert.equal(logs.length, 1, '一次检索只记一条埋点')
+      assert.equal(logs[0]?.index, 'search_log_xqh')
+      assert.deepEqual(logs[0]?.doc.hit_ids, result.hits.map((hit) => hit.memory_id))
+      assert.equal(logs[0]?.doc.query_norm, normalizeQueryKey('lot.bd_write_sync 北单同步'))
+      assert.equal(logs[0]?.doc.zero_hit, false)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('no_match 时 hit_ids 是空数组（不是缺字段）', async () => {
+    const fake = await startFakeEs((_req, res) => {
+      sendJson(res, 200, { took: 1, hits: { total: { value: 0, relation: 'eq' }, hits: [] } })
+    })
+    const logs: Array<Record<string, unknown>> = []
+    try {
+      await searchMemories(
+        makeDeps(fake, {
+          searchLogIndex: 'search_log_xqh',
+          recorder: {
+            index: async (_index: string, doc: Record<string, unknown>) => {
+              logs.push(doc)
+              return {}
+            },
+          } as never,
+        }),
+        { query: '一条查不到的记忆', scope: 'personal' },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      assert.deepEqual(logs[0]?.hit_ids, [])
+      assert.equal(logs[0]?.note, 'no_match')
+      assert.equal(logs[0]?.zero_hit, true)
     } finally {
       await fake.close()
     }
