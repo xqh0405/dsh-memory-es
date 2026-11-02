@@ -1242,7 +1242,7 @@ window.__ModuleLoader__.load({
       GALAXY_DUST.length = 0
       for (let i = 0; i < count; i += 1) {
         const t = (i + 0.5) / count
-        const reach = GALAXY_R1 * (0.55 + hashUnit(`dust-r-${i}`) * 0.62)
+        const reach = GALAXY_R1 * (0.55 + hashUnit(`dust-r-${i}`) * 0.85)
         const r = Math.max(24, GALAXY_R0 * 0.35 + Math.sqrt(t) * reach)
         const free = hashUnit(`dust-a-${i}`) * Math.PI * 2
         const pull = Math.pow(hashUnit(`dust-p-${i}`), 2.1) * 0.9
@@ -1785,7 +1785,7 @@ window.__ModuleLoader__.load({
         }
 
         // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆
-        const dust = galaxyDust(3200)
+        const dust = galaxyDust(3800)
         ctx.globalCompositeOperation = 'lighter'
         for (const mote of dust) {
           const projected = project(mote.x, mote.y, mote.z)
@@ -1871,18 +1871,19 @@ window.__ModuleLoader__.load({
           // 半径拉开层次：度数取 0.75 次幂后差距更明显，再叠 id 哈希（0.72~1.32），
           // 少数大亮星 + 大量小点才像星图，全都一样大就成撒豆子了
           const sizeJitter = 0.8 + hashUnit(node.id + '#sz') * 0.5
-          const radius = (1.5 + Math.pow(Math.min(8, node.degree), 0.7) * 1.05) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
+          const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
-          const alpha = Math.min(1, (0.34 + fresh * 0.64) * (0.55 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
+          const alpha = Math.min(1, (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
-          // 柔光：参考图里每颗星外面都有一层淡淡的光，不只是 hub
-          ctx.globalAlpha = alpha * 0.2
+          // 柔光：半径拉到 3.2 倍、alpha 压到 0.08——小半径高 alpha 会形成一圈能看见的环，
+          // 星星应该是"亮核 + 范围很大、几乎看不见边界的光"
+          ctx.globalAlpha = alpha * 0.08
           ctx.fillStyle = item.color
           ctx.beginPath()
-          ctx.arc(screen.x, screen.y, radius * 2.35, 0, Math.PI * 2)
+          ctx.arc(screen.x, screen.y, radius * 3.2, 0, Math.PI * 2)
           ctx.fill()
 
           // 强光晕只给"重要"的星：hub、悬停、选中
