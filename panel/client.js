@@ -1444,6 +1444,60 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 双盘布局（2026-11-02）：个人库与团队库之间没有跨库边，天然是两个连通分量。
+     *
+     * 旧版把「最大的连通分量」当主盘、其余塞进盘外的晕里，于是团队库那 142 个点
+     * 被压成一个半径 26 的小球（截图右下角那团）。这里改成两边各画一张盘，
+     * 并给出盘心与半径，供绘制时标「个人 · N / 团队 · N」。
+     *
+     * 只在一张图上同时有两种来源时启用；单库视图仍然走 layoutGalaxy。
+     */
+    function layoutDualDisk(graph) {
+      const personal = graph.nodes.filter((node) => node.scope !== 'team')
+      const team = graph.nodes.filter((node) => node.scope === 'team')
+      if (personal.length === 0 || team.length === 0) {
+        return { ...layoutGalaxy(graph), disks: [] }
+      }
+      const pSet = new Set(personal.map((node) => node.id))
+      const tSet = new Set(team.map((node) => node.id))
+      const edgesOf = (keep) => graph.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target))
+      const pLayout = layoutGalaxy({ ...graph, nodes: personal, edges: edgesOf(pSet) })
+      const tLayout = layoutGalaxy({ ...graph, nodes: team, edges: edgesOf(tSet) })
+
+      // 两张盘按 sqrt(节点数) 定比例：密度接近，才不会一大一小
+      const bigger = Math.max(personal.length, team.length)
+      const scaleFor = (layout, count) => {
+        const target = 560 * Math.sqrt(count / bigger)
+        return layout.radius > 0 ? Math.max(0.3, target / layout.radius) : 1
+      }
+      const sp = scaleFor(pLayout, personal.length)
+      const st = scaleFor(tLayout, team.length)
+      const rP = pLayout.radius * sp
+      const rT = tLayout.radius * st
+      const gap = 90
+      const cxP = -(rP + gap)
+      const cxT = rT + gap
+
+      const positions = new Map()
+      const place = (layout, scale, cx) => {
+        for (const [id, pos] of layout.positions) {
+          positions.set(id, { x: cx + pos.x * scale, y: pos.y * scale, z: pos.z * scale })
+        }
+      }
+      place(pLayout, sp, cxP)
+      place(tLayout, st, cxT)
+
+      return {
+        positions,
+        radius: Math.max(Math.abs(cxP) + rP, cxT + rT),
+        disks: [
+          { scope: 'personal', labelKey: 'scopePersonal', count: personal.length, x: cxP, z: 0, r: rP },
+          { scope: 'team', labelKey: 'scopeTeam', count: team.length, x: cxT, z: 0, r: rT },
+        ],
+      }
+    }
+
+    /**
      * 取以 `centerId` 为中心、`depth` 跳以内的子图。
      *
      * 用已取到的全局图算，不再打接口：图里已经有 300 个节点和它们的边，
@@ -1787,7 +1841,7 @@ window.__ModuleLoader__.load({
 
       const model = React.useMemo(() => {
         if (visibleData === null) return null
-        if (focusId === null) return { graph: visibleData, layout: layoutGalaxy(visibleData), focused: null }
+        if (focusId === null) return { graph: visibleData, layout: layoutDualDisk(visibleData), focused: null }
         const sub = subgraphOf(visibleData, focusId, 2)
         return { graph: sub, layout: layoutFocusGalaxy(sub), focused: focusId }
       }, [visibleData, focusId])
@@ -1797,6 +1851,16 @@ window.__ModuleLoader__.load({
         const clusters = model?.graph.clusters ?? []
         for (const node of model?.graph.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters))
         return map
+      }, [model])
+
+      // 双盘与单盘切换时把相机拉远/拉回一次；只在「双盘与否」翻转时动，避免打架
+      const dualRef = React.useRef(false)
+      React.useEffect(() => {
+        const dual = (model?.layout?.disks?.length ?? 0) > 0
+        if (dual === dualRef.current) return
+        dualRef.current = dual
+        camRef.current = { ...GALAXY_CAM, dist: GALAXY_CAM.dist * (dual ? 1.7 : 1) }
+        drawRef.current()
       }, [model])
 
       /** 世界坐标 → 屏幕坐标。focal/dist 是透视，unit 让盘在任意画布上都差不多大。 */
@@ -2037,6 +2101,21 @@ window.__ModuleLoader__.load({
           ctx.fillStyle = '#dce8ff'
           ctx.fillText(text, boxX, entry.item.screen.y + 3)
         }
+        // 双盘：每张盘下面标一行「个人 · 153 / 团队 · 142」，否则两团挨着看不出谁是谁
+        const disks = model.layout.disks ?? []
+        if (disks.length > 0) {
+          ctx.globalCompositeOperation = 'source-over'
+          ctx.textAlign = 'center'
+          ctx.font = '13px "Microsoft YaHei", system-ui, sans-serif'
+          for (const disk of disks) {
+            const anchor = project(disk.x, 0, disk.z)
+            const y = anchor.y + Math.max(30, disk.r * anchor.k * 0.95)
+            ctx.globalAlpha = 0.9
+            ctx.fillStyle = disk.scope === 'team' ? 'rgba(150,190,255,.95)' : 'rgba(190,215,255,.95)'
+            ctx.fillText(`${t(disk.labelKey)} · ${disk.count}`, anchor.x, y)
+          }
+          ctx.textAlign = 'start'
+        }
         ctx.globalAlpha = 1
 
         sceneRef.current = { hits, screen: screenOf }
@@ -2118,7 +2197,8 @@ window.__ModuleLoader__.load({
       }, [])
 
       const resetCamera = () => {
-        camRef.current = { ...GALAXY_CAM, dist: focusId === null ? GALAXY_CAM.dist : 880 }
+        const dual = (model?.layout?.disks?.length ?? 0) > 0
+        camRef.current = { ...GALAXY_CAM, dist: focusId === null ? GALAXY_CAM.dist * (dual ? 1.7 : 1) : 880 }
         drawRef.current()
       }
 
