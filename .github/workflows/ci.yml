@@ -20,14 +20,15 @@ jobs:
 
       - name: 安装依赖
         run: |
-          # 同 release.yml：npm 10 解析 `*` 形式的 peerDependencies 会崩，
-          # 跳过 peer 解算，再按宿主版本补装四个 peer（只用于编译与 .d.ts）。
+          # 同 release.yml：npm 10 解析 `*` 形式的 peerDependencies 会崩，跳过 peer 解算。
           npm ci --legacy-peer-deps
-          npm install --no-save --legacy-peer-deps \
-            @deepseek-ai/cordis@4.0.5 \
-            @deepseek-ai/schemastery@3.18.5 \
-            @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 \
-            @deepseek-ai/dsh-tools@0.2.1-rc.3
+          # 类型检查要的是**拼齐事件表**的包环境，而不是四个孤立包：
+          # cordis 的 Events 接口靠各子包 `declare module` 拼出来
+          # （例如 `agent/inbox/inserted` 来自 dsh-agent），只装 cordis / dsh-tools
+          # 会在 `ctx.on(...)` 处报 TS2345，看着像插件代码写错，其实是环境缺料。
+          # 所以整装一份 dsh——它自带全部子包，npm 会平铺到 node_modules。
+          # 版本必须与运行时宿主一致（见 scripts/link-deps.sh 的注释）。
+          npm install --no-save --legacy-peer-deps @deepseek-ai/dsh@0.2.1-rc.3
 
       - name: 类型检查
         run: npm run typecheck

@@ -26,14 +26,12 @@ jobs:
       - name: 安装依赖
         run: |
           # npm 10 解析这些 `*` 形式的 peerDependencies 的 arborist 会崩
-          # （Cannot read properties of null (reading 'children')），跳过 peer 解算；
-          # peer 本来就该由 dsh 宿主提供，构建期再单独补装同版本，只用于编译与 .d.ts。
+          # （Cannot read properties of null (reading 'children')），跳过 peer 解算。
           npm ci --legacy-peer-deps
-          npm install --no-save --legacy-peer-deps \
-            @deepseek-ai/cordis@4.0.5 \
-            @deepseek-ai/schemastery@3.18.5 \
-            @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 \
-            @deepseek-ai/dsh-tools@0.2.1-rc.3
+          # 整装一份 dsh（不是四个孤立 peer 包）：cordis 的 Events 接口靠各子包
+          # `declare module` 拼起来（`agent/inbox/inserted` 来自 dsh-agent），
+          # 只装 cordis / dsh-tools 会让 typecheck 报 TS2345。版本与运行宿主一致。
+          npm install --no-save --legacy-peer-deps @deepseek-ai/dsh@0.2.1-rc.3
 
       - name: 质量闸门（类型 + 单测）
         run: |
@@ -45,8 +43,8 @@ jobs:
       - name: 构建并打包
         run: |
           # 不走 scripts/build.sh：它的第二步 link-deps 要把宿主 dsh 的
-          # node_modules 链进来，CI 里没有宿主、必然失败。四个 peer 已在
-          # 「安装依赖」按宿主版本补装，直接 tsdown + 打包即可。
+          # node_modules 链进来，CI 里没有宿主、必然失败。宿主包已在
+          # 「安装依赖」整装一份，直接 tsdown + 打包即可。
           npx tsdown
           bash scripts/package.sh
 
