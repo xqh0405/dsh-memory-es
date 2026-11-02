@@ -17,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { EsClient } from './es/http.ts'
 import { personalIndexFor } from './memory/common.ts'
 import { dshSessionsRoot } from './sessions.ts'
+import { DEFAULT_TIMEZONE, addDays, minutesOfDay, zonedDayStart, zonedParts } from './timezone.ts'
 
 export const JOURNAL_MEMORY_TYPE = 'journal'
 /** 一段回顾的字符上限（模型偶尔会写长，截断而不是丢） */
@@ -44,21 +45,25 @@ export interface JournalDeps {
   log?: (event: Record<string, unknown>) => void
 }
 
-/** `YYYY-MM-DD` → 当地时区的当天毫秒区间（左闭右开） */
-export function dayRange(date: string): { start: number; end: number } {
-  const [y, m, d] = date.split('-').map((part) => Number.parseInt(part, 10))
+/** `YYYY-MM-DD` → 该时区当天的毫秒区间（左闭右开） */
+export function dayRange(
+  date: string,
+  timeZone: string = DEFAULT_TIMEZONE,
+): { start: number; end: number } {
   return {
-    start: new Date(y, m - 1, d, 0, 0, 0, 0).getTime(),
-    end: new Date(y, m - 1, d + 1, 0, 0, 0, 0).getTime(),
+    start: zonedDayStart(date, timeZone),
+    end: zonedDayStart(addDays(date, 1), timeZone),
   }
 }
 
-/** 本地时区的 `YYYY-MM-DD`（不用 toISOString：那是 UTC，凌晨会串天） */
-export function dateKey(at: Date): string {
-  const y = at.getFullYear()
-  const m = String(at.getMonth() + 1).padStart(2, '0')
-  const d = String(at.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+/**
+ * 指定时区的 `YYYY-MM-DD`。
+ *
+ * 注意参数：容器跑在 UTC（见 timezone.ts），所以不能再用 `getFullYear()` 这类本地方法，
+ * 否则北京时间凌晨的对话会被算到前一天。
+ */
+export function dateKey(at: Date, timeZone: string = DEFAULT_TIMEZONE): string {
+  return zonedParts(at, timeZone).date
 }
 
 function joinTextBlocks(blocks: unknown): string {
@@ -167,9 +172,9 @@ function readLog(file: string): string {
 export function collectDayTurns(
   root = dshSessionsRoot(),
   date: string,
-  options: { maxTurns?: number } = {},
+  options: { maxTurns?: number; timeZone?: string } = {},
 ): { date: string; turns: DayTurn[]; sessions: number } {
-  const { start, end } = dayRange(date)
+  const { start, end } = dayRange(date, options.timeZone)
   const maxTurns = options.maxTurns ?? JOURNAL_MAX_TURNS
   const base = expandHome(root)
   const turns: DayTurn[] = []
@@ -260,11 +265,12 @@ export async function writeJournal(
   deps: JournalDeps,
   date: string,
   content: string,
+  timeZone: string = DEFAULT_TIMEZONE,
 ): Promise<{ written: boolean; memory_id: string }> {
   const now = deps.now?.() ?? new Date()
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const memoryId = journalMemoryId(date)
-  const { start } = dayRange(date)
+  const { start } = dayRange(date, timeZone)
   const doc: Record<string, unknown> = {
     memory_id: memoryId,
     user_id: deps.userId,
@@ -332,6 +338,8 @@ export interface JournalRunDeps extends JournalDeps {
   summarize: (prompt: string, system: string) => Promise<string>
   /** `HH:MM`，到点后才跑；过了点补跑也认（当天只跑一次） */
   at: string
+  /** 时区（默认 Asia/Shanghai）：容器跑在 UTC 时，`23:30` 才不会变成次日 07:30 */
+  timeZone?: string
   root?: string
 }
 
@@ -345,21 +353,23 @@ export async function maybeRunDailyJournal(
   deps: JournalRunDeps,
   now = new Date(),
 ): Promise<{ ran: boolean; reason: string; date?: string; chars?: number }> {
-  const date = dateKey(now)
-  const [hh, mm] = deps.at.split(':').map((part) => Number.parseInt(part, 10))
-  const dueAt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh || 23, mm || 30, 0, 0)
-  if (now.getTime() < dueAt.getTime()) return { ran: false, reason: 'not-due' }
+  const timeZone = deps.timeZone ?? DEFAULT_TIMEZONE
+  // 一律按配置时区算「今天几号」与「现在几点」：容器是 UTC，用本地方法会整体偏 8 小时
+  const zoned = zonedParts(now, timeZone)
+  const date = zoned.date
+  const dueMinutes = minutesOfDay(deps.at, { hour: 23, minute: 30 })
+  if (zoned.hour * 60 + zoned.minute < dueMinutes) return { ran: false, reason: 'not-due' }
 
   if (await hasJournal(deps, date)) return { ran: false, reason: 'already-done', date }
 
-  const { turns, sessions } = collectDayTurns(deps.root, date)
+  const { turns, sessions } = collectDayTurns(deps.root, date, { timeZone })
   if (turns.length < JOURNAL_MIN_TURNS) {
     return { ran: false, reason: `too-few-turns(${turns.length}/${sessions})`, date }
   }
   const raw = await deps.summarize(buildJournalPrompt(date, turns), JOURNAL_SYSTEM)
   const content = parseJournalOutput(raw)
   if (content === null) return { ran: false, reason: 'empty-summary', date }
-  await writeJournal(deps, date, content)
+  await writeJournal(deps, date, content, timeZone)
   return { ran: true, reason: 'ok', date, chars: content.length }
 }
 
@@ -409,7 +419,10 @@ export function defineJournalTool(deps: {
       const raw = typeof args.date === 'string' ? args.date.trim() : ''
       const target = /^\d{4}-\d{2}-\d{2}$/.test(raw)
         ? raw
-        : dateKey(new Date(Date.now() - 24 * 3600 * 1000))
+        : dateKey(
+            new Date(Date.now() - 24 * 3600 * 1000),
+            deps.journal()?.timeZone ?? DEFAULT_TIMEZONE,
+          )
       const runDeps = deps.journal()
       if (runDeps === null) {
         return {

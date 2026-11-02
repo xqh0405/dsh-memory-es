@@ -27,6 +27,7 @@ import {
   defineJournalTool,
   maybeRunDailyJournal,
 } from './journal.ts'
+import { minutesOfDay, zonedParts } from './timezone.ts'
 import { definePersonaTool, loadActivePersona, type PersonaDeps } from './memory/persona.ts'
 import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SECTION_NAME, CITATION_SECTION_ORDER, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
@@ -421,11 +422,12 @@ export function apply(ctx: Context, config: ConfigType): void {
     let lastRunDate = ''
     const runTraitsDaily = (): void => {
       const now = new Date()
-      const today = dateKey(now)
+      // 容器跑在 UTC：必须按配置时区取「今天几号 / 现在几点」，否则 02:30 会变成 10:30
+      const zoned = zonedParts(now, config.traits.timeZone)
+      const today = zoned.date
       if (lastRunDate === today) return
-      const [hh, mm] = config.traits.at.split(':').map((part) => Number.parseInt(part, 10))
-      const due = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh || 2, mm || 30, 0, 0)
-      if (now.getTime() < due.getTime()) return
+      const dueMinutes = minutesOfDay(config.traits.at, { hour: 2, minute: 30 })
+      if (zoned.hour * 60 + zoned.minute < dueMinutes) return
       lastRunDate = today
       logger.info('traits: 到点自动提炼（回看 %d 天）', config.traits.days)
       runTraitsJob(traitsDeps, {
@@ -551,6 +553,7 @@ export function apply(ctx: Context, config: ConfigType): void {
       log: (event: Record<string, unknown>) => logger.info('journal %o', event),
       summarize: (prompt: string, system: string) => summarizeTraits(prompt, system),
       at: config.journal.at,
+      timeZone: config.journal.timeZone,
     }
     const runJournal = (): void => {
       maybeRunDailyJournal(journalDeps)

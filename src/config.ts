@@ -127,8 +127,10 @@ export interface ConfigType {
   /** 阶段 9.6：每日自动提炼用户画像（等价于每天替你跑一次 memory_traits dry_run=false） */
   traits: {
     enabled: boolean
-    /** 每天几点之后跑（HH:MM，本地时区） */
+    /** 每天几点之后跑（HH:MM，按 timeZone 解释） */
     at: string
+    /** 解释 at 的时区；容器常跑在 UTC，靠它才能让 02:30 真的是北京时间 */
+    timeZone: string
     /** 回看多少天的记忆 */
     days: number
     /** 每天最多写几条新候选（跨多次运行累计，按 created_at 算当天） */
@@ -143,8 +145,10 @@ export interface ConfigType {
   /** 阶段 9.5：每日回顾（把一天的对话压成一段，写进「日记」的回顾栏） */
   journal: {
     enabled: boolean
-    /** 每天几点之后跑（HH:MM，本地时区）；过了点补跑也认 */
+    /** 每天几点之后跑（HH:MM，按 timeZone 解释）；过了点补跑也认 */
     at: string
+    /** 解释 at 的时区；容器常跑在 UTC，靠它才能让 23:30 真的是北京时间 */
+    timeZone: string
   }
   /** 阶段 9.2：表情包（图片在包外，按目录配置） */
   stickers: {
@@ -344,7 +348,10 @@ export const Config: z<ConfigType> = z.object({
   // 阶段 9.6：每日自动提炼。产物是 pending 候选，仍要人工审核才生效
   traits: z.object({
     enabled: z.boolean().default(true),
-    at: z.string().default('02:30'),
+    at: z.string().default('02:30')
+      .description('每天几点之后跑（HH:MM）；按 timeZone 解释，不是容器的本地时区。'),
+    timeZone: z.string().default('Asia/Shanghai')
+      .description('解释 at 的时区。容器通常跑在 UTC，默认按北京时间算，否则 02:30 会变成 10:30。'),
     days: z.number().step(1).min(1).max(90).default(14),
     /**
      * 每天最多写几条候选。
@@ -365,7 +372,10 @@ export const Config: z<ConfigType> = z.object({
   // 阶段 9.5：每日回顾。默认开，但只在有足够对话时才真的调模型（少于 3 轮直接跳过）
   journal: z.object({
     enabled: z.boolean().default(true),
-    at: z.string().default('23:30'),
+    at: z.string().default('23:30')
+      .description('每天几点之后跑（HH:MM）；按 timeZone 解释，不是容器的本地时区。'),
+    timeZone: z.string().default('Asia/Shanghai')
+      .description('解释 at 的时区。容器通常跑在 UTC，默认按北京时间算，否则 23:30 会变成次日 07:30。'),
   }),
   /**
    * 阶段 9.2：表情包。
