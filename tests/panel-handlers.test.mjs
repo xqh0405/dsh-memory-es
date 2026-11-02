@@ -687,6 +687,47 @@ test('写接口门禁：非管理员 POST /config 与新增表情包一律 403�
   assert.equal(res2.statusCode, 403, `表情包新增应 403，实际 ${res2.statusCode}`)
 })
 
+test('写接口白名单：即便管理员也不能改 embedding.url / dims / index.team（2026-11-02）', async () => {
+  const { handleConfigWrite } = await import('../panel/index.js')
+  // handleConfigWrite 直接读 ctx.configEditor（不走 ctx.get），而 requireAdmin 走 get('configEditor') —— 两个形状都要给
+  const configEditor = {
+    configuration: () => [
+      {
+        entry: { id: 'dsh-memory-es' },
+        inherited: {
+          es: { url: 'https://example:9200' },
+          identity: { userId: 'xqh', username: 'mem-user-xqh', password: 'x', teamWrite: true },
+        },
+        override: undefined,
+      },
+    ],
+    edit: async () => {},
+  }
+  const ctx = { configEditor, get: (name) => (name === 'configEditor' ? configEditor : undefined) }
+  /** readJsonBody 走 req.on('data'|'end')，假的 req 必须真的触发这两个事件 */
+  const fakeReq = (value) => {
+    const handlers = {}
+    const req = {
+      on(event, fn) {
+        ;(handlers[event] ??= []).push(fn)
+        return req
+      },
+    }
+    queueMicrotask(() => {
+      const buf = Buffer.from(JSON.stringify(value))
+      for (const fn of handlers.data ?? []) fn(buf)
+      for (const fn of handlers.end ?? []) fn()
+    })
+    return req
+  }
+  for (const key of ['embedding.url', 'embedding.dims', 'index.team']) {
+    const res = fakeRes()
+    await handleConfigWrite(ctx, res, fakeReq({ confirm: true, changes: [{ key, value: 'x', type: 'string' }] }))
+    assert.equal(res.statusCode, 400, `${key} 应被白名单拒绝，实际 ${res.statusCode}`)
+    assert.match(res.body, /不可修改的字段/)
+  }
+})
+
 test('resolveStickerDir：~ 开头的按家目录展开，绝对路径原样', async () => {
   const { resolveStickerDir } = await import('../panel/index.js')
   const home = os.homedir()
