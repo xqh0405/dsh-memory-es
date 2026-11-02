@@ -166,6 +166,21 @@ export interface RetrievalConfig {
    * 调用方显式传 `detail` 时以调用方为准；这里只决定「没传时给什么」。
    */
   defaultDetail?: DetailLevel
+  /**
+   * 召回质量：低置信时**拒答**（返回空而不是「5 条不相关的结果 + 一句提示」）。
+   *
+   * 默认关：这是行为变更，且会丢掉少量真命中。
+   * 2026-11-02 A/B 实测（43 条契约）：开它 should 失败 10 → 3（7 条噪声全部修掉，零误伤）。
+   */
+  abstainOnLowConfidence?: boolean
+  /**
+   * 查询扩展表：口语/中文 → 书面/英文同义词。
+   *
+   * **两路都吃**（BM25 与向量都用扩展后的句子）。实测依据：只扩 BM25 时 43 条契约
+   * should 失败仍是 10（毫无收益）；两路都扩才 10 → 8，与 abstain 同开 10 → 1。
+   * 默认空表 = 不改写。
+   */
+  synonyms?: Record<string, string>
 }
 
 export interface SearchDeps {
@@ -250,6 +265,24 @@ export interface SearchResult {
   text: string
 }
 
+/**
+ * 查询扩展：命中同义词表就把它展开的词拼回原句。
+ *
+ * 两路都吃（BM25 + 向量）。实测：只扩 BM25 时契约结果毫无变化，
+ * 收益来自向量侧——口语化措辞（「那个方法」「归我发」）先被扩成书面词，
+ * 语义才落得到目标记忆上。
+ */
+export function expandQuery(query: string, synonyms?: Record<string, string>): string {
+  if (synonyms === undefined || synonyms === null) return query
+  const extra: string[] = []
+  for (const [key, value] of Object.entries(synonyms)) {
+    if (key !== '' && query.includes(key) && typeof value === 'string' && value.trim() !== '') {
+      extra.push(value.trim())
+    }
+  }
+  return extra.length === 0 ? query : `${query} ${extra.join(' ')}`
+}
+
 function clampLimit(requested: number | undefined, fallback: number): number {
   const value = requested ?? fallback
   if (!Number.isFinite(value)) return fallback
@@ -315,6 +348,8 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   const startedAt = Date.now()
   const log = deps.log ?? (() => {})
   const query = (input.query ?? '').trim()
+  // 查询扩展只算一次，BM25 与向量共用（实测依据见 RetrievalConfig.synonyms）
+  const expandedQuery = expandQuery(query, deps.retrieval.synonyms)
   if (query === '') throw new Error('memory_search: query 不能为空')
 
   const scope: SearchScope = input.scope ?? 'both'
@@ -355,7 +390,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   let degraded = false
   if (deps.embed) {
     try {
-      vector = await deps.embed.embed(query, { signal: deps.signal })
+      vector = await deps.embed.embed(expandedQuery, { signal: deps.signal })
     } catch (err) {
       degraded = true
       log({ tool: 'search', user: deps.userId, event: 'embedding_degraded', kind: (err as { kind?: string }).kind ?? 'unknown' })
@@ -375,7 +410,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       scope: target,
       route: 'bm25',
       run: deps.reader
-        .search(indexName, bm25Body(query, targetMeta, topK, identifiers), { signal: deps.signal })
+        .search(indexName, bm25Body(expandedQuery, targetMeta, topK, identifiers), { signal: deps.signal })
         .then((r) => r.hits),
     })
     if (vector) {
@@ -541,6 +576,22 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     { top1: knnScores[0] ?? null, top2: knnScores[1] ?? null, bm25Top1 },
     deps.confidence,
   )
+
+  // 召回质量开关（默认关）：判成低置信就拒答，而不是「照给 5 条 + 一句提示」。
+  // 2026-11-02 A/B：43 条契约里 should 失败 10 → 3（7 条噪声全修，零误伤）。
+  // 仍记 search_log（note=no_match），面板的缺口清单会如实把它算成「问过但没答上」。
+  if (verdict.low && deps.retrieval.abstainOnLowConfidence === true) {
+    record('no_match', [], margin === undefined ? {} : { margin })
+    return {
+      hits: [],
+      ...(wantExplain ? { receipts: [] } : {}),
+      note: 'no_match',
+      degraded,
+      filtered,
+      ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
+      text: '没有找到足够相关的记忆（候选区分度不足，已按配置拒答）。可以换个说法、加 domain / memory_type 收窄再试。',
+    }
+  }
 
   const topMerged = merged.slice(0, limit)
   const hits = topMerged.map((hit) => projectHit(hit, PROJECT_MAX_CHARS, hit.origin, { detail }))

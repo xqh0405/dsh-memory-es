@@ -690,6 +690,94 @@ describe('非事实类型门控（7.1 / 9.3 / 9.5）：默认不返回，显式�
   })
 })
 
+describe('召回质量开关（2026-11-02，默认关）', () => {
+  // 噪声形态：kNN 分数低且彼此贴近 → judgeConfidence 判 low
+  const noisy = () => ({
+    [PERSONAL_INDEX]: { bm25: [hit('n1', 11), hit('n2', 9)], knn: [hit('n1', 0.72), hit('n2', 0.711)] },
+  })
+
+  test('abstain 关（默认）：低置信照常返回结果并标注', async () => {
+    const h = await harness(noisy())
+    try {
+      const result = await searchMemories(h.deps(), { query: 'PostgreSQL autovacuum 阈值', scope: 'personal' })
+      assert.equal(result.note, 'low_confidence')
+      assert.ok(result.hits.length > 0, '默认不拒答')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('abstain 开：低置信返回空，note=no_match（面板缺口清单会算成没答上）', async () => {
+    const h = await harness(noisy())
+    try {
+      const result = await searchMemories(
+        h.deps({ retrieval: { ...retrieval, abstainOnLowConfidence: true } }),
+        { query: 'PostgreSQL autovacuum 阈值', scope: 'personal' },
+      )
+      assert.equal(result.note, 'no_match')
+      assert.equal(result.hits.length, 0)
+      assert.match(result.text, /拒答/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('abstain 开但置信足够：照常返回（不能把真命中一起丢掉）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('ok1', 30)], knn: [hit('ok1', 0.86)] } })
+    try {
+      const result = await searchMemories(
+        h.deps({ retrieval: { ...retrieval, abstainOnLowConfidence: true } }),
+        { query: '北单 state 口径', scope: 'personal' },
+      )
+      assert.equal(result.hits.length, 1)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // 实测（43 条契约）：只扩 BM25 时 should 失败仍是 10（零收益）；两路都扩才 10 → 8。
+  // 所以这里钉的是「两路都吃扩展」，不是「只有词法路吃」。
+  test('synonyms 两路都扩展：BM25 与向量都吃扩展词', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('s1', 20)], knn: [hit('s1', 0.8)] } })
+    const embedded: string[] = []
+    try {
+      const deps = h.deps({
+        retrieval: { ...retrieval, synonyms: { 告警: 'alert 告警规则' } },
+        embed: {
+          embed: async (text: string) => {
+            embedded.push(text)
+            return VECTOR
+          },
+        },
+      })
+      await searchMemories(deps, { query: '哪些告警归我发', scope: 'personal' })
+      const bm25 = JSON.stringify(h.bodyOf(PERSONAL_INDEX, 'bm25'))
+      assert.ok(bm25.includes('alert'), `BM25 没吃扩展词：${bm25}`)
+      assert.ok(
+        embedded.some((text) => text.includes('alert')),
+        `向量路没吃扩展词：${JSON.stringify(embedded)}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('synonyms 为空表时不改写（默认行为不变）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('x1', 20)], knn: [] } })
+    const embedded: string[] = []
+    try {
+      await searchMemories(
+        h.deps({ embed: { embed: async (text: string) => { embedded.push(text); return VECTOR } } }),
+        { query: '哪些告警归我发', scope: 'personal' },
+      )
+      assert.ok(!JSON.stringify(h.bodyOf(PERSONAL_INDEX, 'bm25')).includes('alert'))
+      assert.deepEqual(embedded, ['哪些告警归我发'], '空表时向量输入应与原句一致')
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
 describe('阶段 13：as_of 入参', () => {
   test('非法日期直接报错（静默回落会让时间点回看骗人）', async () => {
     const h = await harness({})
