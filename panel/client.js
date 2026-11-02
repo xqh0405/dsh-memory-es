@@ -1773,7 +1773,8 @@ window.__ModuleLoader__.load({
         const unit = Math.min(width, height) / 900
         ctx.globalCompositeOperation = 'lighter'
         ctx.lineCap = 'round'
-        for (const pass of [{ color: 'rgba(120,165,255,1)', width: 58, alpha: 0.05 }, { color: 'rgba(255,170,205,1)', width: 22, alpha: 0.03 }]) {
+        // 雾带只求隐约可见：这里是 lighter 叠加，两层会累加，过亮会盖过星点
+        for (const pass of [{ color: 'rgba(120,165,255,1)', width: 66, alpha: 0.02 }, { color: 'rgba(255,170,205,1)', width: 28, alpha: 0.011 }]) {
           ctx.globalAlpha = pass.alpha
           ctx.strokeStyle = pass.color
           ctx.lineWidth = pass.width * unit
