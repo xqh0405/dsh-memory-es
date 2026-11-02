@@ -8,7 +8,7 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 <tr>
     <td align="center"><img src="docs/images/tab-1-overview.jpg" width="238" alt="概览"><br><sub>概览</sub></td>
     <td align="center"><img src="docs/images/tab-2-browse.jpg" width="238" alt="记忆浏览"><br><sub>记忆浏览</sub></td>
-    <td align="center"><img src="docs/images/tab-3-graph.jpg" width="238" alt="星图"><br><sub>星图</sub></td>
+    <td align="center"><img src="docs/images/tab-3-graph-galaxy.jpg" width="238" alt="星图"><br><sub>星图</sub></td>
     <td align="center"><img src="docs/images/tab-4-identity.jpg" width="238" alt="自述"><br><sub>自述</sub></td>
 </tr>
 <tr>
