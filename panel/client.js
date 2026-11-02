@@ -1329,12 +1329,15 @@ window.__ModuleLoader__.load({
       const spanX = Math.max(1, maxX - minX)
       const spanY = Math.max(1, maxY - minY)
       const pad = 48
-      const scale = Math.min((width - pad * 2) / spanX, (height - pad * 2) / spanY, 1.6)
-      const offsetX = (width - spanX * scale) / 2 - minX * scale
-      const offsetY = (height - spanY * scale) / 2 - minY * scale
+      // 两轴各自适配：等比缩放只会按较短的一边定倍数，宽屏画布上就是"图只撑满高度、
+      // 左右空一大块"（2026-11-02 用户反馈"外面变大了里面没变"）。上限 1.6 防止小图被拉散。
+      const scaleX = Math.min((width - pad * 2) / spanX, 1.6)
+      const scaleY = Math.min((height - pad * 2) / spanY, 1.6)
+      const offsetX = (width - spanX * scaleX) / 2 - minX * scaleX
+      const offsetY = (height - spanY * scaleY) / 2 - minY * scaleY
       for (const [id, point] of positions) {
         // z 不参与缩放：它表示的是深度，量纲和画布不同
-        positions.set(id, { x: point.x * scale + offsetX, y: point.y * scale + offsetY, z: point.z })
+        positions.set(id, { x: point.x * scaleX + offsetX, y: point.y * scaleY + offsetY, z: point.z })
       }
       return { positions, bounds: { minX, minY, maxX, maxY } }
     }
@@ -1511,6 +1514,48 @@ window.__ModuleLoader__.load({
           alive = false
         }
       }, [scope])
+
+      // 拖动挂在 window 上：鼠标划出画布时拖拽不该断（2026-11-02 用户反馈"拖起来很费劲"）。
+      // 位移按 rAF 合并：mousemove 比屏幕刷新快时，逐条 setState 会把重绘堆起来。
+      React.useEffect(() => {
+        let frame = null
+        const flush = () => {
+          frame = null
+          const drag = dragRef.current
+          if (drag === null || drag.pending === null) return
+          const next = drag.pending
+          drag.pending = null
+          setView((prev) => ({ ...prev, x: prev.x + (next.x - drag.lastX), y: prev.y + (next.y - drag.lastY) }))
+          drag.lastX = next.x
+          drag.lastY = next.y
+        }
+        const onMove = (event) => {
+          const drag = dragRef.current
+          if (drag === null) return
+          // 超过 3px 才算拖动：否则点节点会被当成微小平移，聚焦点不中
+          if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) drag.moved = true
+          if (!drag.moved) return
+          drag.pending = { x: event.clientX, y: event.clientY }
+          if (frame === null) frame = window.requestAnimationFrame(flush)
+        }
+        const onUp = () => {
+          if (frame !== null) {
+            window.cancelAnimationFrame(frame)
+            frame = null
+          }
+          dragRef.current = null
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+        // 切走窗口时也会丢 mouseup，不清掉的话回来后鼠标一动就继续平移
+        window.addEventListener('blur', onUp)
+        return () => {
+          if (frame !== null) window.cancelAnimationFrame(frame)
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+          window.removeEventListener('blur', onUp)
+        }
+      }, [])
 
       // 尺寸跟随容器（窗口变了图要跟着重排，否则会被裁掉）
       React.useEffect(() => {
@@ -1770,29 +1815,27 @@ window.__ModuleLoader__.load({
             cursor: hover === null ? 'default' : 'pointer',
           },
           onMouseMove: (event) => {
+            // 拖动中不做过点检测：省一次全表扫描，也避免高亮跟着鼠标乱跳
+            if (dragRef.current !== null) return
             const rect = event.currentTarget.getBoundingClientRect()
             const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
             setHover(hit === null ? null : hit.id)
-            const drag = dragRef.current
-            if (drag === null) return
-            // 超过 3px 才算拖动：否则点节点会被当成微小平移，聚焦点不中
-            if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) drag.moved = true
-            if (!drag.moved) return
-            setView((prev) => ({ ...prev, x: prev.x + (event.clientX - drag.lastX), y: prev.y + (event.clientY - drag.lastY) }))
-            drag.lastX = event.clientX
-            drag.lastY = event.clientY
           },
           onMouseDown: (event) => {
+            // 阻止浏览器开始选择文本/原生拖拽，否则按住拖动会被浏览器抢走鼠标
+            event.preventDefault()
             dragRef.current = {
               startX: event.clientX, startY: event.clientY,
               lastX: event.clientX, lastY: event.clientY,
-              moved: false,
+              moved: false, pending: null,
             }
           },
           onMouseUp: (event) => {
+            // 点击判定在这里做（React 的事件委托早于 window 上的 mouseup，
+            // 所以此刻 dragRef 还在）；拖动结束的清理交给 window 监听。
             const drag = dragRef.current
-            dragRef.current = null
             if (drag === null || drag.moved) return
+            dragRef.current = null
             const rect = event.currentTarget.getBoundingClientRect()
             const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
             if (hit === null) {
@@ -1803,7 +1846,7 @@ window.__ModuleLoader__.load({
             setView({ k: 1, x: 0, y: 0 })
           },
           onMouseLeave: () => {
-            dragRef.current = null
+            // 只清高亮，不清 dragRef：鼠标拖出画布后还应能继续拖
             setHover(null)
           },
           onWheel: (event) => {
