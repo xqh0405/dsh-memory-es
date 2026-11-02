@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
       graphUnresolved: '端点缺失',
       graphZoomHint: '滚轮缩放 · 拖动平移',
       graphReset: '复位',
+      graphOrbit: '自转',
+      graphOrbitHint: '开/关镜头自转；只在页签可见时转，切走就停',
       graphFocus: '聚焦',
       graphBack: '返回全图',
       graphGlobalHint: '点击节点看两跳',
@@ -327,6 +329,8 @@ window.__ModuleLoader__.load({
       graphUnresolved: 'unresolved',
       graphZoomHint: 'wheel to zoom · drag to pan',
       graphReset: 'Reset',
+      graphOrbit: 'Orbit',
+      graphOrbitHint: 'Toggle the slow camera orbit; it stops while the tab is hidden',
       graphFocus: 'Focus',
       graphBack: 'Back to full graph',
       graphGlobalHint: 'click a node to see two hops',
@@ -1204,15 +1208,6 @@ window.__ModuleLoader__.load({
       return GRAPH_PALETTE[(index < 0 ? 0 : index) % GRAPH_PALETTE.length]
     }
 
-    /**
-     * 图布局：**确定性**——同一份数据每次都得到同一张图。
-     *
-     * 为什么不跑力导向：布局不稳定，形状就不能当信息用（文档 8.4 的取舍）。
-     * 这里分两层：
-     *  1. 连通分量就是天然的团（语义边连起来的那一簇），按大小降序横向排开；
-     *  2. 分量内部从度数最大的节点 BFS，层半径等距、同层角度均分。
-     * 全程用排序而不是随机，所以重算一次不会跳。
-     */
     /** FNV-1a：给节点算一个 0~1 的稳定伪随机数，用于位置抖动（同一 id 永远同一个值）。 */
     function hashUnit(text) {
       let hash = 2166136261
@@ -1223,9 +1218,22 @@ window.__ModuleLoader__.load({
       return (hash >>> 0) / 4294967295
     }
 
-    function layoutGraph(graph, width, height) {
+    /**
+     * 银河盘布局（世界坐标 3D，确定性）。
+     *
+     * 和第一版 2D 布局同一个骨架（连通分量 = 团，团内按 BFS 层铺开），
+     * 只是坐标搬进了 3D 世界：x/z 是盘面，y 是厚度。
+     *  · 最大的一团放盘心，其余按黄金角散到外圈（黄金角不会挤成一圈）；
+     *  · 团内仍是 BFS 环，半径归一到该团的尺度；
+     *  · y 按 id 哈希抖动，团越大越厚——侧着看才有体积。
+     *
+     * 相机（yaw / pitch / dist）只参与投影、不参与布局：
+     * 旋转永远是"转这张盘"，节点不会因为视角变化而换位置。
+     */
+    function layoutGalaxy(graph) {
+      const positions = new Map()
       const nodes = graph.nodes
-      if (nodes.length === 0) return { positions: new Map(), bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } }
+      if (nodes.length === 0) return { positions, radius: 0 }
 
       const adj = new Map()
       for (const node of nodes) adj.set(node.id, [])
@@ -1257,92 +1265,77 @@ window.__ModuleLoader__.load({
       }
       components.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1))
 
-      const positions = new Map()
-      const gap = 26
-      let cursorX = 0
-      let maxRadius = 1
-      for (const [clusterIndex, members] of components.entries()) {
-        // 伪 3D 的 z：整簇一个基准深度，簇内再小幅抖动。
-        // 纯按节点哈希会让相邻两点的深度乱跳，看着像噪点；先给簇定层才有"体积"。
-        const baseZ = (hashUnit(`cluster:${clusterIndex}:${members[0]}`) - 0.5) * 1.1
-        // 分量半径按节点数开方（面积正比于节点数），单点分量给一个最小半径
-        const spread = Math.sqrt(members.length) * 22
-        const radius = Math.max(26, spread)
-        const cx = cursorX + radius
-        const cy = 0
+      const GOLDEN = Math.PI * (3 - Math.sqrt(5))
+      const CORE = 460 // 盘心那一团的目标半径（世界单位）
+      let radius = CORE
+
+      for (const [index, members] of components.entries()) {
+        const reach = Math.max(42, Math.sqrt(members.length) * 30)
+        let cx = 0
+        let cz = 0
+        if (index > 0) {
+          // 外圈：黄金角 + sqrt 半径增量，既散得开又不会叠在一起
+          const angle = index * GOLDEN + hashUnit(components[index][0]) * 0.6
+          const dist = CORE + 190 + Math.sqrt(index) * 210
+          cx = Math.cos(angle) * dist
+          cz = Math.sin(angle) * dist
+          radius = Math.max(radius, dist + reach)
+        }
+
         // BFS：起点取度数最高、同度数按 id 稳定
         const start = members.slice().sort((a, b) => {
           const da = byId.get(a)?.degree ?? 0
           const db = byId.get(b)?.degree ?? 0
           return db - da || (a < b ? -1 : 1)
         })[0]
-        const depth = new Map([[start, 0]])
+        const level = new Map([[start, 0]])
         const queue = [start]
         while (queue.length > 0) {
           const id = queue.shift()
-          const d = depth.get(id)
+          const d = level.get(id)
           for (const next of adj.get(id) ?? []) {
-            if (depth.has(next)) continue
-            depth.set(next, d + 1)
+            if (level.has(next)) continue
+            level.set(next, d + 1)
             queue.push(next)
           }
         }
         const layers = new Map()
         for (const id of members) {
-          const d = depth.get(id) ?? 0
+          const d = level.get(id) ?? 0
           if (!layers.has(d)) layers.set(d, [])
           layers.get(d).push(id)
         }
         const maxDepth = Math.max(1, ...[...layers.keys()])
+        // 团越大越厚：268 个节点的主团约 60 世界单位，孤点只有 16
+        const thickness = Math.min(78, 16 + members.length * 0.42)
+
         for (const [d, ids] of layers) {
           ids.sort()
-          // 层半径按**最大层数**归一化到簇半径：否则 BFS 只有两三层时，
-          // 所有点会挤在圆心附近（2026-11-01 第一版就是这样，300 个点糊成一坨）
-          const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * radius * 0.94
-          const offset = d * 0.55
+          // 层半径按**最大层数**归一化到团的尺度：否则 BFS 只有两三层时
+          // 所有点会挤在圆心一小圈里（2026-11-01 第一版就是这样）
+          const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * reach * 0.94
           ids.forEach((id, i) => {
-            const base = ids.length === 1 ? 0 : (Math.PI * 2 * i) / ids.length + offset
-            // 抖动：让环散开一点，不然整张图像靶环。用 id 的哈希，所以**仍然确定性**
+            const base = ids.length === 1 ? 0 : (Math.PI * 2 * i) / ids.length + d * 0.55
+            // 抖动让环散开、不像靶心；用 id 哈希，所以仍然确定性
             const j1 = hashUnit(id)
             const j2 = hashUnit(id + '#r')
             const angle = base + (j1 - 0.5) * (ids.length > 3 ? 0.9 : 0.25)
-            const r = d === 0 ? 0 : ringRadius * (0.82 + j2 * 0.36)
-            const z = baseZ + (hashUnit(`${id}#z`) - 0.5) * 0.55
-            positions.set(id, { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, z })
+            const rr = ringRadius * (0.82 + j2 * 0.36)
+            positions.set(id, {
+              x: cx + Math.cos(angle) * rr,
+              // 中心厚、外缘薄：给出一个"盘"的轮廓
+              y: (hashUnit(id + '#y') - 0.5) * thickness * (index === 0 ? 1 : 0.7),
+              z: cz + Math.sin(angle) * rr,
+            })
           })
         }
-        maxRadius = Math.max(maxRadius, radius)
-        cursorX += radius * 2 + gap
       }
 
-      // 统一缩放到画布：留边，并保持比例
-      let minX = Infinity
-      let maxX = -Infinity
-      let minY = Infinity
-      let maxY = -Infinity
-      for (const point of positions.values()) {
-        minX = Math.min(minX, point.x)
-        maxX = Math.max(maxX, point.x)
-        minY = Math.min(minY, point.y)
-        maxY = Math.max(maxY, point.y)
-      }
-      const spanX = Math.max(1, maxX - minX)
-      const spanY = Math.max(1, maxY - minY)
-      const pad = 48
-      // 两轴各自适配：等比缩放只会按较短的一边定倍数，宽屏画布上就是"图只撑满高度、
-      // 左右空一大块"（2026-11-02 用户反馈"外面变大了里面没变"）。上限 1.6 防止小图被拉散。
-      const scaleX = Math.min((width - pad * 2) / spanX, 1.6)
-      const scaleY = Math.min((height - pad * 2) / spanY, 1.6)
-      const offsetX = (width - spanX * scaleX) / 2 - minX * scaleX
-      const offsetY = (height - spanY * scaleY) / 2 - minY * scaleY
-      for (const [id, point] of positions) {
-        // z 不参与缩放：它表示的是深度，量纲和画布不同
-        positions.set(id, { x: point.x * scaleX + offsetX, y: point.y * scaleY + offsetY, z: point.z })
-      }
-      return { positions, bounds: { minX, minY, maxX, maxY } }
+      return { positions, radius }
     }
 
     /**
+
      * 取以 `centerId` 为中心、`depth` 跳以内的子图。
      *
      * 用已取到的全局图算，不再打接口：图里已经有 300 个节点和它们的边，
@@ -1380,41 +1373,42 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 聚焦布局：中心节点在画布正中，1 跳、2 跳各一圈。
+     * 聚焦布局：中心节点在原点，1 跳 / 2 跳各一层球壳。
      *
-     * 和全局图一样是确定性布局（同数据同位置），只是分层依据从「连通分量」
-     * 换成了「到中心的跳数」——这正是「局部图当体检器」的用法。
+     * 用球面均匀分布（黄金角 + 余弦分层）而不是同心环：3D 视线下
+     * 同心环转起来会像两个亮圈套在一起，球壳看起来才像"周围一圈邻居"。
      */
-    function layoutFocus(subgraph, centerId, width, height) {
+    function layoutFocusGalaxy(subgraph) {
       const positions = new Map()
-      const cx = width / 2
-      const cy = height / 2
       const rings = new Map()
       for (const node of subgraph.nodes) {
         const d = subgraph.level.get(node.id) ?? 0
         if (!rings.has(d)) rings.set(d, [])
         rings.get(d).push(node.id)
       }
-      const maxDepth = Math.max(1, ...[...rings.keys()])
-      const usable = Math.min(width, height) / 2 - 56
+      const GOLDEN = Math.PI * (3 - Math.sqrt(5))
+      const SHELL = [0, 250, 490]
       for (const [d, ids] of rings) {
         ids.sort()
-        // 中心单独一个点；其余层按 sqrt(d) 归一化到可用半径
-        const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * usable
+        if (d === 0) {
+          positions.set(ids[0], { x: 0, y: 0, z: 0 })
+          continue
+        }
+        const radius = SHELL[Math.min(d, SHELL.length - 1)]
+        const count = ids.length
         ids.forEach((id, i) => {
-          if (d === 0) {
-            positions.set(id, { x: cx, y: cy, z: -0.2 })
-            return
-          }
-          const base = (Math.PI * 2 * i) / ids.length + d * 0.4
-          const jitter = (hashUnit(id) - 0.5) * (ids.length > 4 ? 0.7 : 0.2)
-          const r = ringRadius * (0.9 + hashUnit(id + '#r') * 0.2)
-          // 越外圈越靠后：聚焦时中心节点要"跳出来"
-          const z = (d / maxDepth) * 0.9 + (hashUnit(`${id}#z`) - 0.5) * 0.3
-          positions.set(id, { x: cx + Math.cos(base + jitter) * r, y: cy + Math.sin(base + jitter) * r, z })
+          const v = count === 1 ? 0 : 1 - (i / (count - 1)) * 2
+          const ring = Math.sqrt(Math.max(0, 1 - v * v))
+          const theta = i * GOLDEN + d * 0.7
+          const jitter = 0.86 + hashUnit(id) * 0.28
+          positions.set(id, {
+            x: Math.cos(theta) * ring * radius * jitter,
+            y: v * radius * 0.7 * jitter,
+            z: Math.sin(theta) * ring * radius * jitter,
+          })
         })
       }
-      return { positions, bounds: { minX: 0, minY: 0, maxX: width, maxY: height }, focusedCenter: centerId }
+      return { positions, radius: 540 }
     }
 
     /** JSON Canvas 的六种颜色编号（1 红 / 2 橙 / 3 黄 / 4 绿 / 5 青 / 6 紫） */
@@ -1482,26 +1476,94 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 星图页：Canvas 2D + 确定性布局。
+     * 星图页：Canvas 2D + 手写 3D 投影。
      *
-     * 视觉编码（文档 8.4 的约定）：
-     *  · 领域 → 颜色；度数 → 半径；新鲜度 → 亮度（越新越亮，旧记忆淡下去）。
-     *  · 节点上限由服务端兜住（300），所以这里不做抽稀，只负责画。
+     * 视觉参考了 dsh-Memory-Galaxy（MIT，Derpyu520 & 大肥鱼）的银河风格，
+     * 但布局、投影、交互都是这里自己的实现：数据仍然是我们自己的记忆边，
+     * 相机只在渲染层转，不动任何业务。
+     *
+     * 做法：世界坐标 3D → yaw/pitch 旋转 → 透视 → 屏幕。
+     * 不引 three.js：300 个点和 600 条边用不着渲染管线，手写这套更轻。
      */
+    const GALAXY_CAM = { yaw: -0.55, pitch: -1.05, dist: 1180, focal: 1600 }
+    const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
+
+    /** #rrggbb → rgba(r,g,b,a)：画布渐变的色标只认 rgba 字符串 */
+    function hexToRgba(hex, alpha) {
+      const value = String(hex).replace('#', '')
+      const r = parseInt(value.slice(0, 2), 16) || 0
+      const g = parseInt(value.slice(2, 4), 16) || 0
+      const b = parseInt(value.slice(4, 6), 16) || 0
+      return `rgba(${r},${g},${b},${alpha})`
+    }
+
+    /** 深空背景：渐变 + 中心核辉光 + 远景散星，只在画布尺寸变化时重画一次 */
+    function buildGalaxyBackdrop(width, height, dpr) {
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(width * dpr))
+      canvas.height = Math.max(1, Math.round(height * dpr))
+      const ctx = canvas.getContext('2d')
+      if (ctx === null) return { canvas, width, height }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      const bg = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height) * 0.72)
+      bg.addColorStop(0, '#0e1730')
+      bg.addColorStop(0.45, '#070c18')
+      bg.addColorStop(1, '#03050b')
+      ctx.fillStyle = bg
+      ctx.fillRect(0, 0, width, height)
+
+      // 核心辉光：暖金色，模仿银河核球
+      const coreRadius = Math.max(120, Math.min(width, height) * 0.46)
+      const glow = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, coreRadius)
+      glow.addColorStop(0, 'rgba(255,246,225,.12)')
+      glow.addColorStop(0.16, 'rgba(255,232,190,.07)')
+      glow.addColorStop(0.46, 'rgba(255,205,140,.022)')
+      glow.addColorStop(1, 'rgba(255,190,120,0)')
+      ctx.fillStyle = glow
+      ctx.fillRect(0, 0, width, height)
+
+      // 远景散星：确定性（同一个位置永远是同一颗星）
+      ctx.globalCompositeOperation = 'lighter'
+      for (let i = 0; i < 220; i += 1) {
+        const x = hashUnit(`bg-x-${i}`) * width
+        const y = hashUnit(`bg-y-${i}`) * height
+        const r = 0.35 + hashUnit(`bg-r-${i}`) * 1.15
+        const warm = hashUnit(`bg-w-${i}`) > 0.72
+        ctx.globalAlpha = 0.1 + hashUnit(`bg-a-${i}`) * 0.34
+        ctx.fillStyle = warm ? 'rgba(255,225,180,1)' : 'rgba(170,195,255,1)'
+        ctx.beginPath()
+        ctx.arc(x, y, r, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
+      ctx.globalCompositeOperation = 'source-over'
+      return { canvas, width, height }
+    }
+
     function GraphView({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
-      // 个人库与团队库分开画：默认团队，看个人要显式切换（混画会让两个库的节点互相抢边）
+      // 个人库与团队库分开画：默认团队，看个人要显式切换
       const [scope, setScope] = React.useState('team')
       const [hover, setHover] = React.useState(null)
-      const [view, setView] = React.useState({ k: 1, x: 0, y: 0 })
+      const [size, setSize] = React.useState({ width: 900, height: 560 })
+      const [focusId, setFocusId] = React.useState(null)
+      // 自转默认开：转起来才有"星图"的感觉；切走页签会自动停
+      const [orbit, setOrbit] = React.useState(true)
       const wrapRef = React.useRef(null)
       const canvasRef = React.useRef(null)
-      const [size, setSize] = React.useState({ width: 900, height: 560 })
+      const backdropRef = React.useRef(null)
       const dragRef = React.useRef(null)
+      const camRef = React.useRef({ ...GALAXY_CAM })
+      const sceneRef = React.useRef({ hits: [], screen: new Map() })
+      const drawRef = React.useRef(() => {})
+      const orbitRef = React.useRef(true)
+      const visibleRef = React.useRef(true)
+      const rafRef = React.useRef(null)
+      const loopRef = React.useRef(null)
 
       React.useEffect(() => {
         let alive = true
-        // 切范围时先回到加载态：旧图留在画布上会冒充新范围
         setState({ loading: true, error: '', data: null })
         apiGet('/graph', { limit: 300, scope })
           .then((data) => {
@@ -1515,49 +1577,7 @@ window.__ModuleLoader__.load({
         }
       }, [scope])
 
-      // 拖动挂在 window 上：鼠标划出画布时拖拽不该断（2026-11-02 用户反馈"拖起来很费劲"）。
-      // 位移按 rAF 合并：mousemove 比屏幕刷新快时，逐条 setState 会把重绘堆起来。
-      React.useEffect(() => {
-        let frame = null
-        const flush = () => {
-          frame = null
-          const drag = dragRef.current
-          if (drag === null || drag.pending === null) return
-          const next = drag.pending
-          drag.pending = null
-          setView((prev) => ({ ...prev, x: prev.x + (next.x - drag.lastX), y: prev.y + (next.y - drag.lastY) }))
-          drag.lastX = next.x
-          drag.lastY = next.y
-        }
-        const onMove = (event) => {
-          const drag = dragRef.current
-          if (drag === null) return
-          // 超过 3px 才算拖动：否则点节点会被当成微小平移，聚焦点不中
-          if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) drag.moved = true
-          if (!drag.moved) return
-          drag.pending = { x: event.clientX, y: event.clientY }
-          if (frame === null) frame = window.requestAnimationFrame(flush)
-        }
-        const onUp = () => {
-          if (frame !== null) {
-            window.cancelAnimationFrame(frame)
-            frame = null
-          }
-          dragRef.current = null
-        }
-        window.addEventListener('mousemove', onMove)
-        window.addEventListener('mouseup', onUp)
-        // 切走窗口时也会丢 mouseup，不清掉的话回来后鼠标一动就继续平移
-        window.addEventListener('blur', onUp)
-        return () => {
-          if (frame !== null) window.cancelAnimationFrame(frame)
-          window.removeEventListener('mousemove', onMove)
-          window.removeEventListener('mouseup', onUp)
-          window.removeEventListener('blur', onUp)
-        }
-      }, [])
-
-      // 尺寸跟随容器（窗口变了图要跟着重排，否则会被裁掉）
+      // 尺寸跟随容器。布局与画布尺寸无关（世界坐标），这里只影响投影与画布像素。
       React.useEffect(() => {
         const element = wrapRef.current
         if (element === null) return
@@ -1571,19 +1591,43 @@ window.__ModuleLoader__.load({
         return () => observer.disconnect()
       }, [])
 
-      // 聚焦：null = 全局图；否则看这个节点的两跳子图
-      const [focusId, setFocusId] = React.useState(null)
+      // 页签切走 / 滚出视口时停掉动画：星图不该在后台一直烧 CPU
+      React.useEffect(() => {
+        const element = wrapRef.current
+        if (element === null) return
+        const observer = new IntersectionObserver((entries) => {
+          const entry = entries[0]
+          visibleRef.current = entry?.isIntersecting === true
+          if (visibleRef.current) {
+            // 重新可见：先把循环拉起来，再补画一帧（避免「切回来不自转」）
+            loopRef.current?.()
+            drawRef.current()
+          }
+        }, { threshold: 0.02 })
+        observer.observe(element)
+        return () => observer.disconnect()
+      }, [])
+
+      React.useEffect(() => {
+        orbitRef.current = orbit
+      }, [orbit])
+
+      // 预设相机：聚焦时拉近，返回全图时退回
+      React.useEffect(() => {
+        camRef.current = {
+          ...GALAXY_CAM,
+          dist: focusId === null ? GALAXY_CAM.dist : 880,
+        }
+        drawRef.current()
+      }, [focusId])
+
       const model = React.useMemo(() => {
         if (state.data === null) return null
-        if (focusId === null) {
-          return { graph: state.data, layout: layoutGraph(state.data, size.width, size.height), focused: null }
-        }
+        if (focusId === null) return { graph: state.data, layout: layoutGalaxy(state.data), focused: null }
         const sub = subgraphOf(state.data, focusId, 2)
-        return { graph: sub, layout: layoutFocus(sub, focusId, size.width, size.height), focused: focusId }
-      }, [state.data, focusId, size.width, size.height])
-      const layout = model?.layout ?? null
+        return { graph: sub, layout: layoutFocusGalaxy(sub), focused: focusId }
+      }, [state.data, focusId])
 
-      // 颜色按团序号：同一个领域同一个色，图标里 Fig. 用 clusters 顺序
       const colorMap = React.useMemo(() => {
         const map = new Map()
         const clusters = model?.graph.clusters ?? []
@@ -1591,123 +1635,303 @@ window.__ModuleLoader__.load({
         return map
       }, [model])
 
-      React.useEffect(() => {
+      /** 世界坐标 → 屏幕坐标。focal/dist 是透视，unit 让盘在任意画布上都差不多大。 */
+      const projectTo = (point) => {
+        const cam = camRef.current
+        const width = size.width
+        const height = size.height
+        const cy = Math.cos(cam.yaw)
+        const sy = Math.sin(cam.yaw)
+        const cp = Math.cos(cam.pitch)
+        const sp = Math.sin(cam.pitch)
+        // 先绕 Y 轴转 yaw
+        const x1 = point.x * cy - point.z * sy
+        const z1 = point.x * sy + point.z * cy
+        // 再绕 X 轴转 pitch
+        const y2 = point.y * cp - z1 * sp
+        const z2 = point.y * sp + z1 * cp
+        const persp = cam.focal / Math.max(120, cam.focal + z2 + cam.dist * 0.35)
+        const unit = Math.min(width, height) / 900
+        const k = persp * unit
+        return { x: width / 2 + x1 * k, y: height / 2 + y2 * k, z: z2, k }
+      }
+
+      const pickAt = (mx, my) => {
+        let best = null
+        let bestScore = Infinity
+        for (const hit of sceneRef.current.hits) {
+          const dist = Math.hypot(hit.x - mx, hit.y - my)
+          const reach = Math.max(16, hit.r + 11)
+          if (dist > reach) continue
+          // 近的（z 小）优先：重叠处点最前面的那颗
+          const score = dist - hit.z * 0.0004
+          if (score < bestScore) {
+            bestScore = score
+            best = hit
+          }
+        }
+        return best
+      }
+
+      drawRef.current = () => {
         const canvas = canvasRef.current
-        if (canvas === null || layout === null) return
+        if (canvas === null || model === null || !visibleRef.current) return
+        const width = size.width
+        const height = size.height
         const dpr = Math.min(2, window.devicePixelRatio || 1)
-        canvas.width = Math.round(size.width * dpr)
-        canvas.height = Math.round(size.height * dpr)
-        canvas.style.width = `${size.width}px`
-        canvas.style.height = `${size.height}px`
+        const pixelW = Math.max(1, Math.round(width * dpr))
+        const pixelH = Math.max(1, Math.round(height * dpr))
+        if (canvas.width !== pixelW || canvas.height !== pixelH) {
+          canvas.width = pixelW
+          canvas.height = pixelH
+          canvas.style.width = `${width}px`
+          canvas.style.height = `${height}px`
+          backdropRef.current = null
+        }
         const ctx = canvas.getContext('2d')
         if (ctx === null) return
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-        ctx.clearRect(0, 0, size.width, size.height)
+        ctx.globalAlpha = 1
+        ctx.globalCompositeOperation = 'source-over'
+
+        // 背景：尺寸不变就复用离屏缓存，不每帧重画渐变
+        let backdrop = backdropRef.current
+        if (backdrop === null || backdrop.width !== width || backdrop.height !== height) {
+          backdrop = buildGalaxyBackdrop(width, height, dpr)
+          backdropRef.current = backdrop
+        }
+        ctx.drawImage(backdrop.canvas, 0, 0, width, height)
 
         const graph = model.graph
         const now = Date.now()
-        const posOf = (id) => {
-          const point = layout.positions.get(id)
-          if (point === undefined) return undefined
-          return { x: point.x * view.k + view.x, y: point.y * view.k + view.y }
+        const points = []
+        for (const node of graph.nodes) {
+          const world = model.layout.positions.get(node.id)
+          if (world === undefined) continue
+          points.push({ node, world, screen: projectTo(world), color: colorMap.get(node.id) ?? '#6b8cff' })
         }
-        const depthOf = (id) => layout.positions.get(id)?.z ?? 0
-        // 伪 3D 的三件套：透视缩放、深度雾、由远及近的绘制顺序。
-        // 不引入 three.js —— 300 个点用不着相机，这三样就够撑出体积感。
-        const persp = (z) => 1 / (1 + Math.max(-0.85, Math.min(0.85, z)) * 0.26)
-        const fog = (z) => Math.max(0.2, Math.min(1, 0.9 - z * 0.36))
+        // 远的先画，近的盖上去
+        points.sort((a, b) => b.screen.z - a.screen.z)
 
-        // 深空底：中心亮、四周暗，给图一个"远近"的参照
-        const bg = ctx.createRadialGradient(size.width / 2, size.height / 2, 0, size.width / 2, size.height / 2, Math.max(size.width, size.height) * 0.72)
-        bg.addColorStop(0, 'rgba(52,70,112,.42)')
-        bg.addColorStop(0.55, 'rgba(24,30,48,.22)')
-        bg.addColorStop(1, 'rgba(10,12,18,0)')
-        ctx.fillStyle = bg
-        ctx.fillRect(0, 0, size.width, size.height)
+        const screenOf = new Map()
+        for (const item of points) screenOf.set(item.node.id, item.screen)
 
-        // 边：按两端平均深度由远及近画，弱边不抢注意力
-        const edgeOrder = [...graph.edges].sort(
-          (a, b) => (depthOf(a.source) + depthOf(a.target)) / 2 - (depthOf(b.source) + depthOf(b.target)) / 2,
-        )
-        for (const edge of edgeOrder) {
-          const a = posOf(edge.source)
-          const b = posOf(edge.target)
+        // 旋臂薄雾：跟着相机转，所以每帧重画（只有两条曲线，很便宜）
+        const unit = Math.min(width, height) / 900
+        ctx.globalCompositeOperation = 'lighter'
+        ctx.lineCap = 'round'
+        for (const pass of [{ color: 'rgba(120,165,255,1)', width: 58, alpha: 0.05 }, { color: 'rgba(255,170,205,1)', width: 22, alpha: 0.03 }]) {
+          ctx.globalAlpha = pass.alpha
+          ctx.strokeStyle = pass.color
+          ctx.lineWidth = pass.width * unit
+          for (let arm = 0; arm < 3; arm += 1) {
+            ctx.beginPath()
+            for (let i = 0; i <= 64; i += 1) {
+              const rr = 160 + (i / 64) * 980
+              const theta = (arm / 3) * Math.PI * 2 - 2.6 * Math.log(rr / 420 + 1)
+              const projected = projectTo({ x: Math.cos(theta) * rr, y: 0, z: Math.sin(theta) * rr })
+              if (i === 0) ctx.moveTo(projected.x, projected.y)
+              else ctx.lineTo(projected.x, projected.y)
+            }
+            ctx.stroke()
+          }
+        }
+
+        // 边：加色混合，弱边压得很低，避免 600 条线糊成一片
+        ctx.lineCap = 'round'
+        for (const edge of graph.edges) {
+          const a = screenOf.get(edge.source)
+          const b = screenOf.get(edge.target)
           if (a === undefined || b === undefined) continue
-          const depth = persp((depthOf(edge.source) + depthOf(edge.target)) / 2)
           const active = hover !== null && (hover === edge.source || hover === edge.target)
-          ctx.strokeStyle = active
-            ? 'rgba(150,180,255,.95)'
-            : `rgba(140,165,210,${(0.12 + edge.weight * 0.2) * fog((depthOf(edge.source) + depthOf(edge.target)) / 2)})`
-          ctx.lineWidth = (active ? 1.8 : 0.8) * Math.min(1.3, depth)
+          const fog = Math.max(0.18, Math.min(1, 0.95 - (a.z + b.z) * 0.00035))
+          ctx.globalAlpha = (active ? 0.7 : 0.05 + edge.weight * 0.13) * fog
+          ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(120,160,230,1)'
+          ctx.lineWidth = (active ? 1.7 : 0.55 + edge.weight * 0.9) * Math.min(1.6, (a.k + b.k) * 1.4)
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
           ctx.lineTo(b.x, b.y)
           ctx.stroke()
         }
 
-        // 节点：远的先画，近的盖上去；近处多一圈光晕
-        const nodeOrder = [...graph.nodes].sort((a, b) => depthOf(b.id) - depthOf(a.id))
-        for (const node of nodeOrder) {
-          const point = posOf(node.id)
-          if (point === undefined) continue
-          const z = depthOf(node.id)
-          const depth = persp(z)
+        // 节点：本体用正常混合保住领域色，只有光晕是半透明的径向渐变
+        ctx.globalCompositeOperation = 'source-over'
+        const hits = []
+        const labels = []
+        for (const item of points) {
+          const node = item.node
+          const screen = item.screen
           const age = node.updatedAt === '' ? 365 : Math.min(365, (now - Date.parse(node.updatedAt)) / 86400000)
-          const fresh = 1 - Math.min(1, age / 120) // 120 天以内线性衰减
-          const radius = (3.2 + Math.min(6, node.degree) * 0.9) * Math.min(1.6, view.k) * depth
+          const fresh = 1 - Math.min(1, age / 120)
+          const depth = Math.min(1.6, Math.max(0.55, screen.k * 1.15))
           const isHover = hover === node.id
-          const color = colorMap.get(node.id) ?? '#6b8cff'
-          const alpha = (isHover ? 1 : 0.35 + fresh * 0.65) * fog(z)
+          const isFocus = model.focused === node.id
+          const radius = (2.5 + Math.min(6, node.degree) * 0.72) * depth * (isHover || isFocus ? 1.25 : 1)
+          const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * (isHover ? 1.35 : 1))
 
-          // 光晕：越靠前越亮，模拟"离你更近的星"
-          if (depth > 1.02) {
+          hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
+
+          // 光晕只给"重要"的星：hub、悬停、选中。全给会糊成一片亮斑。
+          // 光晕与本体都走 source-over：加色叠加几层后颜色会冲成白，领域就认不出来了。
+          const glow = isHover || isFocus || node.degree >= 8
+          if (glow) {
+            const halo = ctx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, radius * (isHover || isFocus ? 4.2 : 3))
+            halo.addColorStop(0, hexToRgba(item.color, isHover || isFocus ? 0.42 : 0.2))
+            halo.addColorStop(1, hexToRgba(item.color, 0))
+            ctx.globalAlpha = 1
+            ctx.fillStyle = halo
             ctx.beginPath()
-            ctx.arc(point.x, point.y, radius * 2.3, 0, Math.PI * 2)
-            ctx.fillStyle = color
-            ctx.globalAlpha = alpha * 0.1 * (depth - 1) * 6
+            ctx.arc(screen.x, screen.y, radius * (isHover || isFocus ? 4.2 : 3), 0, Math.PI * 2)
             ctx.fill()
           }
 
-          ctx.beginPath()
-          ctx.arc(point.x, point.y, isHover ? radius + 2.5 : radius, 0, Math.PI * 2)
-          ctx.fillStyle = color
           ctx.globalAlpha = alpha
+          ctx.fillStyle = item.color
+          ctx.beginPath()
+          ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
           ctx.fill()
 
-          // 团队记忆画一圈描边：边只在同库内建，所以个人/团队天然各成一簇，
-          // 但界面上必须能分清（2026-11-01 用户问「哪个是团队哪个是私有」时补的）
+          // 团队记忆一圈白描边（个人 = 实心），两库不再同图混画但各自仍要能认
           if (node.scope === 'team') {
-            ctx.globalAlpha = Math.min(1, alpha + 0.2)
-            ctx.strokeStyle = 'rgba(255,255,255,.62)'
-            ctx.lineWidth = 1.1
+            ctx.globalAlpha = Math.min(1, alpha + 0.15)
+            ctx.strokeStyle = 'rgba(235,245,255,.7)'
+            ctx.lineWidth = Math.min(1.4, radius * 0.16)
+            ctx.beginPath()
+            ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
             ctx.stroke()
           }
-          if (isHover) {
-            ctx.globalAlpha = 1
-            ctx.strokeStyle = 'rgba(255,255,255,.9)'
-            ctx.lineWidth = 1.5
+          if (isHover || isFocus) {
+            ctx.globalAlpha = 0.95
+            ctx.strokeStyle = '#ffffff'
+            ctx.lineWidth = 1.3
+            ctx.beginPath()
+            ctx.arc(screen.x, screen.y, radius + 3.5, 0, Math.PI * 2)
             ctx.stroke()
           }
+
+          // 标签候选：悬停 / 选中 / 度数高的前几颗
+          if (isHover || isFocus || node.degree >= 6) labels.push({ item, radius, score: node.degree + fresh * 2 })
+        }
+
+        // 标签：白字 + 深底衬，按分数取前 10 个并做碰撞剔除，否则会糊成一团
+        ctx.globalCompositeOperation = 'source-over'
+        ctx.globalAlpha = 1
+        const placed = []
+        labels.sort((a, b) => b.score - a.score)
+        ctx.font = '12px "Microsoft YaHei", system-ui, sans-serif'
+        for (const entry of labels.slice(0, 8)) {
+          const text = String(entry.item.node.label).slice(0, 14)
+          const widthText = Math.min(150, ctx.measureText(text).width)
+          const boxX = entry.item.screen.x + entry.radius + 6
+          const boxY = entry.item.screen.y - 9
+          const box = [boxX - 4, boxY - 2, widthText + 10, 16]
+          if (box[0] + box[2] > width - 6 || box[1] < 2 || box[1] + box[3] > height - 2) continue
+          const collide = placed.some((other) => !(box[0] > other[0] + other[2] || box[0] + box[2] < other[0] || box[1] > other[1] + other[3] || box[1] + box[3] < other[1]))
+          if (collide) continue
+          placed.push(box)
+          ctx.globalAlpha = 0.82
+          ctx.fillStyle = 'rgba(5,9,18,.88)'
+          ctx.beginPath()
+          const rr = 4
+          const [bx, by, bw, bh] = box
+          ctx.moveTo(bx + rr, by)
+          ctx.lineTo(bx + bw - rr, by)
+          ctx.quadraticCurveTo(bx + bw, by, bx + bw, by + rr)
+          ctx.lineTo(bx + bw, by + bh - rr)
+          ctx.quadraticCurveTo(bx + bw, by + bh, bx + bw - rr, by + bh)
+          ctx.lineTo(bx + rr, by + bh)
+          ctx.quadraticCurveTo(bx, by + bh, bx, by + bh - rr)
+          ctx.lineTo(bx, by + rr)
+          ctx.quadraticCurveTo(bx, by, bx + rr, by)
+          ctx.closePath()
+          ctx.fill()
+          ctx.globalAlpha = 0.92
+          ctx.fillStyle = '#dce8ff'
+          ctx.fillText(text, boxX, entry.item.screen.y + 3)
         }
         ctx.globalAlpha = 1
-      }, [layout, view, hover, model, size, colorMap])
 
-      const hitTestAt = (px, py) => {
-        if (layout === null || model === null) return null
-        let best = null
-        let bestDist = 14
-        for (const node of model.graph.nodes) {
-          const point = layout.positions.get(node.id)
-          if (point === undefined) continue
-          const x = point.x * view.k + view.x
-          const y = point.y * view.k + view.y
-          const dist = Math.hypot(x - px, y - py)
-          if (dist < bestDist) {
-            bestDist = dist
-            best = node
+        sceneRef.current = { hits, screen: screenOf }
+      }
+
+      // 渲染循环：只有「自转开 + 页签可见」才持续跑，其余时候按需重画一帧
+      React.useEffect(() => {
+        const tick = () => {
+          rafRef.current = null
+          // 不可见就停下、不再调度；重新可见时由 IntersectionObserver 把循环拉起来
+          if (!visibleRef.current) return
+          if (orbitRef.current && dragRef.current === null) camRef.current.yaw += GALAXY_ORBIT_SPEED
+          drawRef.current()
+          if (orbitRef.current) rafRef.current = window.requestAnimationFrame(tick)
+        }
+        loopRef.current = () => {
+          if (rafRef.current === null && visibleRef.current) rafRef.current = window.requestAnimationFrame(tick)
+        }
+        if (orbit) {
+          loopRef.current()
+        } else {
+          drawRef.current()
+        }
+        return () => {
+          loopRef.current = null
+          if (rafRef.current !== null) {
+            window.cancelAnimationFrame(rafRef.current)
+            rafRef.current = null
           }
         }
-        return best
+      }, [orbit])
+
+      // 任何依赖变化（数据 / 尺寸 / 悬停 / 聚焦）都重画一帧；自转时循环会自己画
+      React.useEffect(() => {
+        drawRef.current()
+      }, [model, size, hover, colorMap, focusId])
+
+      // 拖动旋转 / 滚轮推拉都挂在 window 上：鼠标划出画布时不该断
+      React.useEffect(() => {
+        let frame = null
+        const flush = () => {
+          frame = null
+          const drag = dragRef.current
+          if (drag === null) return
+          const cam = camRef.current
+          const dx = drag.pendingX - drag.lastX
+          const dy = drag.pendingY - drag.lastY
+          drag.lastX = drag.pendingX
+          drag.lastY = drag.pendingY
+          cam.yaw += dx * 0.006
+          cam.pitch = Math.max(-1.42, Math.min(0.42, cam.pitch + dy * 0.005))
+          drawRef.current()
+        }
+        const onMove = (event) => {
+          const drag = dragRef.current
+          if (drag === null) return
+          if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4) drag.moved = true
+          if (!drag.moved) return
+          drag.pendingX = event.clientX
+          drag.pendingY = event.clientY
+          if (frame === null) frame = window.requestAnimationFrame(flush)
+        }
+        const onUp = () => {
+          if (frame !== null) {
+            window.cancelAnimationFrame(frame)
+            frame = null
+          }
+          dragRef.current = null
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+        window.addEventListener('blur', onUp)
+        return () => {
+          if (frame !== null) window.cancelAnimationFrame(frame)
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+          window.removeEventListener('blur', onUp)
+        }
+      }, [])
+
+      const resetCamera = () => {
+        camRef.current = { ...GALAXY_CAM, dist: focusId === null ? GALAXY_CAM.dist : 880 }
+        drawRef.current()
       }
 
       // 团队 / 个人切换（默认团队）。放在工具栏首位，加载态也保留，切换时控件不会闪没
@@ -1720,10 +1944,9 @@ window.__ModuleLoader__.load({
             onClick: () => {
               if (scope === value) return
               setScope(value)
-              // 聚焦点属于上一个库，切过去必然对不上，顺手清掉
               setFocusId(null)
               setHover(null)
-              setView({ k: 1, x: 0, y: 0 })
+              camRef.current = { ...GALAXY_CAM }
             },
           }, label),
         ),
@@ -1741,19 +1964,18 @@ window.__ModuleLoader__.load({
         return h('div', null, h('div', { style: S.toolbar }, scopeSwitch),
           h('p', { style: S.muted }, t('empty')))
       }
+
       const graph = model.graph
       const stats = graph.stats
       const focusNode = model.focused === null ? null : graph.nodes.find((node) => node.id === model.focused) ?? null
       const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
       const inFocus = model.focused !== null
 
-      // 画布跟着视口走：宽度铺满内容区，高度吃掉工具栏以下的剩余空间
-      // （固定 560 在宽屏上右边会空一大块，节点挤在中间反而看不清）
       return h('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100dvh - 180px)', minHeight: 420 } },
         h('div', { style: S.toolbar },
           inFocus
             ? h('span', { style: { ...S.muted, fontSize: 12 } },
-                `${t('graphFocus')}：${String(focusNode?.label ?? '').slice(0, 36)} · ` +
+                `${t('graphFocus')}：${String(focusNode?.label ?? '').slice(0, 22)} · ` +
                   `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')}`)
             : h('span', { style: S.muted, fontSize: 12 },
                 `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')} · ` +
@@ -1761,7 +1983,6 @@ window.__ModuleLoader__.load({
                   (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
                   (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
           scopeSwitch,
-          // 图例只说明当前范围：团队带描边、个人实心（两库不再同图混画）
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, ...S.muted } },
             h('span', {
               style: {
@@ -1772,13 +1993,19 @@ window.__ModuleLoader__.load({
             scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
           h('span', { style: { flex: 1 } }),
           h('span', { style: S.muted, fontSize: 12 }, inFocus ? t('graphFocusHint') : t('graphGlobalHint')),
+          h('button', {
+            type: 'button',
+            style: orbit ? { ...S.btn, borderColor: 'rgba(120,200,255,.6)', color: '#cfe8ff' } : S.btn,
+            onClick: () => setOrbit((prev) => !prev),
+            title: t('graphOrbitHint'),
+          }, t('graphOrbit')),
           inFocus
             ? h('button', {
                 type: 'button',
                 style: S.btn,
                 onClick: () => {
                   setFocusId(null)
-                  setView({ k: 1, x: 0, y: 0 })
+                  setHover(null)
                 },
               }, t('graphBack'))
             : null,
@@ -1786,10 +2013,8 @@ window.__ModuleLoader__.load({
             type: 'button',
             style: S.btn,
             onClick: () => {
-              const payload = buildCanvasJson(graph, layout)
+              const payload = buildCanvasJson(graph, { positions: sceneRef.current.screen })
               if (payload === null) return
-              // 打一条摘要：无头浏览器不落盘，靠这行能验证结构；真实浏览器同时会下载
-              // 序列化成字符串：控制台里对象会被折叠成 "Object"，看不到结构
               console.info('[memory-es] canvas export ' + JSON.stringify({
                 nodes: payload.nodes.length,
                 edges: payload.edges.length,
@@ -1801,64 +2026,54 @@ window.__ModuleLoader__.load({
             },
             title: t('graphExportHint'),
           }, t('graphExport')),
-          h('button', {
-            type: 'button',
-            style: S.btn,
-            onClick: () => setView({ k: 1, x: 0, y: 0 }),
-          }, t('graphReset')),
+          h('button', { type: 'button', style: S.btn, onClick: resetCamera }, t('graphReset')),
         ),
         h('div', {
           ref: wrapRef,
           style: {
             ...S.card, padding: 0, overflow: 'hidden', position: 'relative',
             width: '100%', flex: 1, minHeight: 0,
-            cursor: hover === null ? 'default' : 'pointer',
+            cursor: hover === null ? 'grab' : 'pointer',
+            background: '#03050b',
           },
           onMouseMove: (event) => {
-            // 拖动中不做过点检测：省一次全表扫描，也避免高亮跟着鼠标乱跳
             if (dragRef.current !== null) return
             const rect = event.currentTarget.getBoundingClientRect()
-            const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
+            const hit = pickAt(event.clientX - rect.left, event.clientY - rect.top)
             setHover(hit === null ? null : hit.id)
           },
           onMouseDown: (event) => {
-            // 阻止浏览器开始选择文本/原生拖拽，否则按住拖动会被浏览器抢走鼠标
+            if (event.button !== 0) return
             event.preventDefault()
             dragRef.current = {
               startX: event.clientX, startY: event.clientY,
               lastX: event.clientX, lastY: event.clientY,
-              moved: false, pending: null,
+              pendingX: event.clientX, pendingY: event.clientY,
+              moved: false,
             }
           },
           onMouseUp: (event) => {
-            // 点击判定在这里做（React 的事件委托早于 window 上的 mouseup，
-            // 所以此刻 dragRef 还在）；拖动结束的清理交给 window 监听。
+            // 点击判定在 React 侧做（早于 window 的 mouseup），拖动结束的清理交给 window
             const drag = dragRef.current
             if (drag === null || drag.moved) return
             dragRef.current = null
             const rect = event.currentTarget.getBoundingClientRect()
-            const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
+            const hit = pickAt(event.clientX - rect.left, event.clientY - rect.top)
             if (hit === null) {
               if (inFocus) setFocusId(null)
               return
             }
             setFocusId(hit.id)
-            setView({ k: 1, x: 0, y: 0 })
           },
           onMouseLeave: () => {
-            // 只清高亮，不清 dragRef：鼠标拖出画布后还应能继续拖
             setHover(null)
           },
           onWheel: (event) => {
-            const rect = event.currentTarget.getBoundingClientRect()
-            const cx = event.clientX - rect.left
-            const cy = event.clientY - rect.top
-            setView((prev) => {
-              const next = Math.min(4, Math.max(0.4, prev.k * (event.deltaY < 0 ? 1.12 : 0.89)))
-              const ratio = next / prev.k
-              // 以鼠标位置为锚缩放：光标下的点不动
-              return { k: next, x: cx - (cx - prev.x) * ratio, y: cy - (cy - prev.y) * ratio }
-            })
+            event.preventDefault()
+            const cam = camRef.current
+            const next = cam.dist * (event.deltaY > 0 ? 1.12 : 0.89)
+            cam.dist = Math.max(620, Math.min(5200, next))
+            if (!orbit) drawRef.current()
           },
         },
           h('canvas', { ref: canvasRef, style: { display: 'block' } }),
@@ -1867,19 +2082,19 @@ window.__ModuleLoader__.load({
             : h('div', {
                 style: {
                   position: 'absolute', left: 12, bottom: 12, maxWidth: '62%',
-                  background: 'var(--dsw-alias-bg-overlay, rgba(20,22,28,.92))',
-                  border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8,
-                  padding: '8px 10px', fontSize: 12, lineHeight: 1.6,
+                  background: 'rgba(8,13,24,.9)',
+                  border: '1px solid rgba(120,160,255,.22)', borderRadius: 10,
+                  padding: '8px 11px', fontSize: 12, lineHeight: 1.6,
+                  backdropFilter: 'blur(6px)',
                 },
               },
-                h('div', { style: { ...S.muted, fontSize: 11 } },
+                h('div', { style: { color: '#93a2c0', fontSize: 11 } },
                   `${hoverNode.domain} · ${hoverNode.type} · ${t('graphDegree')} ${hoverNode.degree}`),
-                h('div', { style: { color: 'var(--dsw-alias-label-primary)' } },
+                h('div', { style: { color: '#e3ecff' } },
                   String(hoverNode.label).slice(0, 120)),
               ),
         ),
       )
-
     }
 
     // ── 维护（P3：整理 dry-run / 镜像导出 / 快照与 cron 的静态事实）──────────
