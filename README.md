@@ -50,8 +50,18 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 
 **面板**
 
-设置 → 记忆库：概览 / 记忆浏览 / 自述 / 人格 / 审核台 / 维护 / 配置。
+侧栏「记忆库」，主区整页（不是设置里的小窗）：概览 / 记忆浏览 / 星图 / 自述 / 人格 / 审核台 / 维护 / 配置。
 删除、维护、改配置、编辑人格都过权限探测：权限由 `_has_privileges` 现问，不认配置声明。
+
+**星图**
+
+一条记忆一颗星。纯 Canvas 2D 手写 3D 投影，零依赖、不引 WebGL。
+
+- 星等按度数开方、亮度按新鲜度与 id 哈希抖动——少数亮星 + 大量小点，不是撒豆子
+- 个人库与团队库**各画一张盘**并标人数；两库之间不建边（同一知识在两库各有一份，连成一条反而藏住"这是两份独立记录"）
+- 点一颗星进入它的两跳局部图；全局只画短边、悬停才亮出全部边，没有选中时不画线
+- 氛围：旋臂薄雾、星尘底噪、远处景深（远星是糊开的光斑）、中心呼吸、四周暗角；首次进图有开场——黑场 → 星点逐个点亮 → 镜头推近 → 最新一条"叮"
+- 工具栏可导出 `.canvas`（JSON Canvas 1.0，Obsidian 等可直接打开）
 
 **隔离与身份**
 
@@ -64,24 +74,24 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 从 [Releases](https://github.com/xqh0405/dsh-memory-es/releases/latest) 下载 `dsh-memory-es-<版本>.tar.gz`，解包后一条命令安装——不需要克隆仓库，也不需要构建。**插件与面板在同一个包里**，只装一次；从旧版（面板是独立包）升级时脚本会自动移除旧面板：
 
 ```bash
-tar xzf dsh-memory-es-0.3.0.tar.gz
-cd dsh-memory-es-0.3.0
+tar xzf dsh-memory-es-<版本>.tar.gz
+cd dsh-memory-es-<版本>
 ./install.sh                        # 本机：DSH_HOME=~/.dsh，profile=web
 ./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
 ```
 
-装完重启 dsh web，再核对版本：插件日志 `ready: v0.3.0`、面板自检 `自检通过 v0.3.0`、面板页脚「版本 0.3.0」。
+装完重启 dsh web，再核对版本：插件日志 `ready: v<版本>`、面板自检 `自检通过 v<版本>`、面板页脚「版本 <版本>」。
 
 包里还带 `manifest.json`（版本、commit、构建时间）与 `SHA256SUMS`（`sha256sum -c SHA256SUMS`）。
 
 ## 版本
 
-当前 **0.3.0**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.6.15**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本
-scripts/version.sh bump patch   # 修 bug：0.3.0 → 0.3.1
-scripts/version.sh bump minor   # 新能力：0.3.1 → 0.4.0
+scripts/version.sh bump patch   # 日常改动：0.6.15 → 0.6.16（第三位允许两位数）
+scripts/version.sh bump minor   # 重大变动才动第二位：0.6.16 → 0.7.0
 ```
 
 运行态三处可核对：插件日志 `ready: vX.Y.Z`、面板自检 `自检通过 vX.Y.Z`、面板页脚「版本 X.Y.Z」。
