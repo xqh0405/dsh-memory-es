@@ -124,6 +124,7 @@ async function main(): Promise<void> {
 
   let promoted = 0
   let skippedDup = 0
+  let skippedAlready = 0
   let skippedNoSource = 0
   let failed = 0
 
@@ -153,6 +154,12 @@ async function main(): Promise<void> {
       if (o.status !== 'active') {
         console.log(`  -   ${tag} 原条目 status=${o.status}，跳过`)
         skippedNoSource++
+        continue
+      }
+      // 第一层防重复：已晋升过的直接跳过（团队库侧 kNN+字面判重是第二层兜底）
+      if (o.promote_state === 'promoted') {
+        console.log(`  -   ${tag} promote_state=promoted，已晋升过，跳过`)
+        skippedAlready++
         continue
       }
       if (!Array.isArray(o.embedding) || o.embedding.length !== DIMS) {
@@ -237,7 +244,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`done: promoted=${promoted} skippedDup=${skippedDup} skippedNoSource=${skippedNoSource} failed=${failed}${dry ? '（dry-run）' : ''}`)
+  console.log(`done: promoted=${promoted} skippedAlready=${skippedAlready} skippedDup=${skippedDup} skippedNoSource=${skippedNoSource} failed=${failed}${dry ? '（dry-run）' : ''}`)
 }
 
 main().catch((err) => {
