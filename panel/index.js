@@ -2160,6 +2160,15 @@ const EDITABLE = [
   //    · dims 必须与索引 mapping 一致，改错直接 400。
   //    和下面 es.url 同理：改完都要重启才生效，走 cordis.patch.yml 更安全。
   { path: ['embedding', 'model'], label: 'Embedding 模型', type: 'string', default: 'bge-m3' },
+  // 召回质量（2026-11-02）：低置信拒答只能给布尔开关；同义词表是字典，
+  // 面板表单表达不了，走 profile 的 cordis.patch.yml 配 retrieval.synonyms。
+  {
+    path: ['retrieval', 'abstainOnLowConfidence'],
+    label: '低置信拒答',
+    type: 'boolean',
+    default: false,
+    hint: '打开后「候选区分度不足」时返回空，而不是照给几条；实测 43 条契约 should 失败 10 → 3。同义词表 retrieval.synonyms 需在配置文件中配。',
+  },
   { path: ['defaults', 'domain'], label: '默认 domain', type: 'string', default: 'general' },
   // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用
   { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', default: false, hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },

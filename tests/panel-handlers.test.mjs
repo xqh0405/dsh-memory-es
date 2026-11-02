@@ -610,7 +610,7 @@ test('可编辑字段白名单：es.url / caCertPath 必须不可写（凭据外
     assert.equal(keys.includes(forbidden), false, `${forbidden} 不该出现在面板可写字段里`)
   }
   // 反面：其余字段仍在白名单里（别为了安全把整个配置面关死）
-  for (const needed of ['es.requestTimeoutMs', 'embedding.model', 'persona.seed', 'journal.at', 'traits.days']) {
+  for (const needed of ['es.requestTimeoutMs', 'embedding.model', 'persona.seed', 'journal.at', 'traits.days', 'retrieval.abstainOnLowConfidence']) {
     assert.ok(keys.includes(needed), `${needed} 应当仍可编辑`)
   }
 })
