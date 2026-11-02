@@ -1221,14 +1221,14 @@ window.__ModuleLoader__.load({
     /**
      * 银河盘布局（世界坐标 3D，确定性）。
      *
-     * 和第一版 2D 布局同一个骨架（连通分量 = 团，团内按 BFS 层铺开），
-     * 只是坐标搬进了 3D 世界：x/z 是盘面，y 是厚度。
-     *  · 最大的一团放盘心，其余按黄金角散到外圈（黄金角不会挤成一圈）；
-     *  · 团内仍是 BFS 环，半径归一到该团的尺度；
-     *  · y 按 id 哈希抖动，团越大越厚——侧着看才有体积。
+     * 核心是**面积均匀的螺旋**（Vogel / 向日葵排布）：
+     *   radius = sqrt((k+0.5)/n) * reach，angle = k * 黄金角
+     * 这样点的密度按面积走——盘心面积小、点就少，不会像 BFS 同心环那样
+     * 把 200 个点全压在同一个圆周上（2026-11-02 用户反馈"中心太密"）。
      *
-     * 相机（yaw / pitch / dist）只参与投影、不参与布局：
-     * 旋转永远是"转这张盘"，节点不会因为视角变化而换位置。
+     * 节点按 BFS 顺序编号，所以相连的邻居在螺旋上仍然挨着，边不会乱飞。
+     * 连通分量仍是一团：最大的铺满盘心，其余按黄金角散到外圈。
+     * y 轴给厚度，中心厚、外缘薄，侧着看才有体积。
      */
     function layoutGalaxy(graph) {
       const positions = new Map()
@@ -1266,22 +1266,14 @@ window.__ModuleLoader__.load({
       components.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1))
 
       const GOLDEN = Math.PI * (3 - Math.sqrt(5))
-      const CORE = 460 // 盘心那一团的目标半径（世界单位）
+      const CORE = 520 // 盘心那一团的半径（世界单位）
       let radius = CORE
 
-      for (const [index, members] of components.entries()) {
-        const reach = Math.max(42, Math.sqrt(members.length) * 30)
-        let cx = 0
-        let cz = 0
-        if (index > 0) {
-          // 外圈：黄金角 + sqrt 半径增量，既散得开又不会叠在一起
-          const angle = index * GOLDEN + hashUnit(components[index][0]) * 0.6
-          const dist = CORE + 190 + Math.sqrt(index) * 210
-          cx = Math.cos(angle) * dist
-          cz = Math.sin(angle) * dist
-          radius = Math.max(radius, dist + reach)
-        }
-
+      /** 一团内部：按 BFS 顺序铺成面积均匀的螺旋 */
+      const placeCluster = (members, cx, cz, reach) => {
+        const count = members.length
+        // 团越大越厚：268 个节点的主团约 76 世界单位，孤点只有 18
+        const thickness = Math.min(80, 18 + count * 0.4)
         // BFS：起点取度数最高、同度数按 id 稳定
         const start = members.slice().sort((a, b) => {
           const da = byId.get(a)?.degree ?? 0
@@ -1290,52 +1282,61 @@ window.__ModuleLoader__.load({
         })[0]
         const level = new Map([[start, 0]])
         const queue = [start]
+        const order = [start]
         while (queue.length > 0) {
           const id = queue.shift()
           const d = level.get(id)
           for (const next of adj.get(id) ?? []) {
             if (level.has(next)) continue
             level.set(next, d + 1)
+            order.push(next)
             queue.push(next)
           }
         }
-        const layers = new Map()
+        // 极端情况下 BFS 覆盖不全（理论上不会，分量是连通的）：补到队尾
         for (const id of members) {
-          const d = level.get(id) ?? 0
-          if (!layers.has(d)) layers.set(d, [])
-          layers.get(d).push(id)
+          if (!level.has(id)) {
+            level.set(id, 1)
+            order.push(id)
+          }
         }
-        const maxDepth = Math.max(1, ...[...layers.keys()])
-        // 团越大越厚：268 个节点的主团约 60 世界单位，孤点只有 16
-        const thickness = Math.min(78, 16 + members.length * 0.42)
-
-        for (const [d, ids] of layers) {
-          ids.sort()
-          // 层半径按**最大层数**归一化到团的尺度：否则 BFS 只有两三层时
-          // 所有点会挤在圆心一小圈里（2026-11-01 第一版就是这样）
-          const ringRadius = d === 0 ? 0 : (Math.sqrt(d) / Math.sqrt(maxDepth)) * reach * 0.94
-          ids.forEach((id, i) => {
-            const base = ids.length === 1 ? 0 : (Math.PI * 2 * i) / ids.length + d * 0.55
-            // 抖动让环散开、不像靶心；用 id 哈希，所以仍然确定性
-            const j1 = hashUnit(id)
-            const j2 = hashUnit(id + '#r')
-            const angle = base + (j1 - 0.5) * (ids.length > 3 ? 0.9 : 0.25)
-            const rr = ringRadius * (0.82 + j2 * 0.36)
-            positions.set(id, {
-              x: cx + Math.cos(angle) * rr,
-              // 中心厚、外缘薄：给出一个"盘"的轮廓
-              y: (hashUnit(id + '#y') - 0.5) * thickness * (index === 0 ? 1 : 0.7),
-              z: cz + Math.sin(angle) * rr,
-            })
+        order.forEach((id, k) => {
+          // 面积均匀：k/n 开方后才铺得匀；不开方会全挤在外圈
+          const radial = Math.sqrt((k + 0.5) / count)
+          // 黄金角错开：相邻的 k 不会叠在一条射线上
+          const theta = k * GOLDEN
+          // 一点哈希抖动，让螺旋不至于太"数学"
+          const jitter = 0.94 + hashUnit(id) * 0.12
+          const rr = radial * reach * jitter
+          positions.set(id, {
+            x: cx + Math.cos(theta) * rr,
+            // 中心厚、外缘薄：给出"盘"的轮廓
+            y: (hashUnit(id + '#y') - 0.5) * thickness * (1 - radial * 0.7),
+            z: cz + Math.sin(theta) * rr,
           })
+        })
+      }
+
+      for (const [index, members] of components.entries()) {
+        const reach = Math.max(38, Math.sqrt(members.length) * 34)
+        if (index === 0) {
+          placeCluster(members, 0, 0, CORE)
+          continue
         }
+        // 外圈：黄金角 + sqrt 半径增量，既散得开又不会叠在一起
+        const angle = index * GOLDEN + hashUnit(components[index][0]) * 0.6
+        const dist = CORE + 170 + Math.sqrt(index) * 200
+        const cx = Math.cos(angle) * dist
+        const cz = Math.sin(angle) * dist
+        placeCluster(members, cx, cz, reach)
+        radius = Math.max(radius, dist + reach)
       }
 
       return { positions, radius }
     }
 
-    /**
 
+    /**
      * 取以 `centerId` 为中心、`depth` 跳以内的子图。
      *
      * 用已取到的全局图算，不再打接口：图里已经有 300 个节点和它们的边，
@@ -1555,6 +1556,8 @@ window.__ModuleLoader__.load({
       const backdropRef = React.useRef(null)
       const dragRef = React.useRef(null)
       const camRef = React.useRef({ ...GALAXY_CAM })
+      // 投影用的画布尺寸：每帧从容器实时读，避免 state 落后于真实布局（画布比容器小一圈）
+      const viewportRef = React.useRef({ width: 900, height: 560 })
       const sceneRef = React.useRef({ hits: [], screen: new Map() })
       const drawRef = React.useRef(() => {})
       const orbitRef = React.useRef(true)
@@ -1638,8 +1641,8 @@ window.__ModuleLoader__.load({
       /** 世界坐标 → 屏幕坐标。focal/dist 是透视，unit 让盘在任意画布上都差不多大。 */
       const projectTo = (point) => {
         const cam = camRef.current
-        const width = size.width
-        const height = size.height
+        const width = viewportRef.current.width
+        const height = viewportRef.current.height
         const cy = Math.cos(cam.yaw)
         const sy = Math.sin(cam.yaw)
         const cp = Math.cos(cam.pitch)
@@ -1675,9 +1678,14 @@ window.__ModuleLoader__.load({
 
       drawRef.current = () => {
         const canvas = canvasRef.current
-        if (canvas === null || model === null || !visibleRef.current) return
-        const width = size.width
-        const height = size.height
+        const wrap = wrapRef.current
+        if (canvas === null || wrap === null || model === null || !visibleRef.current) return
+        // 容器尺寸每帧现读：ResizeObserver 的回调可能还没到，
+        // 用 state 里的旧值会让画布停在上一档尺寸、右下留一大块空
+        const rect = wrap.getBoundingClientRect()
+        const width = Math.max(1, Math.round(rect.width))
+        const height = Math.max(1, Math.round(rect.height))
+        viewportRef.current = { width, height }
         const dpr = Math.min(2, window.devicePixelRatio || 1)
         const pixelW = Math.max(1, Math.round(width * dpr))
         const pixelH = Math.max(1, Math.round(height * dpr))
