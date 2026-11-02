@@ -114,14 +114,14 @@ PY
   docker exec "$c" sh -c 'chown node:node /data/dsh/profiles/web/cordis.patch.yml && chmod 600 /data/dsh/profiles/web/cordis.patch.yml'
   rm -f "/tmp/$c.yml"
 
-  # 3) 表情包
+  # 3) 表情包：只补缺，不覆盖容器里已有的（用户可能改过图、加过自己的贴图）
   docker cp /tmp/stickers.tgz "$c":/tmp/stickers.tgz >/dev/null
   docker exec "$c" sh -c '
-    rm -rf /data/dsh/stickers && mkdir -p /data/dsh/stickers
-    tar -xzf /tmp/stickers.tgz -C /data/dsh
+    mkdir -p /data/dsh/stickers
+    tar -xzf /tmp/stickers.tgz -C /data/dsh --skip-old-files
     rm -f /tmp/stickers.tgz
     chown -R node:node /data/dsh/stickers
-    echo "  贴图 $(ls /data/dsh/stickers | wc -l) 个文件"
+    echo "  贴图 $(ls /data/dsh/stickers | wc -l) 个文件（只补缺，已有文件未动）"
   '
 
   # 4) 重启（lib 换了必须重启，进程持旧模块图）

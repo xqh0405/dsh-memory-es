@@ -9,6 +9,8 @@
  * @module dsh-memory-es/config
  */
 
+import { readFileSync } from 'node:fs'
+
 import z from '@deepseek-ai/schemastery'
 
 // 置信阈值的唯一来源在 search.ts（实现与默认值放在一起，避免两处漂移）
@@ -151,6 +153,22 @@ export interface ConfigType {
     dir: string
     /** 单次回复最多贴几张 */
     maxPerTurn: number
+  }
+}
+
+/**
+ * 内置人格：包根的 `persona/seed.md`（随发行包一起装）。
+ *
+ * 为什么做成默认值而不是「安装时写进配置」：
+ *  · 配置优先于默认值 → 用户改过的人格不会被升级覆盖（这正是「更新不要覆盖已有」）；
+ *  · 内置人格能随版本更新（改 seed.md 就更新），而写进配置后就永远停在装的那一刻；
+ *  · 读不到（例如有人只拷了 lib/）就当空串，不注入，也不阻断启动。
+ */
+function defaultPersonaSeed(): string {
+  try {
+    return readFileSync(new URL('../persona/seed.md', import.meta.url), 'utf8').trim()
+  } catch {
+    return ''
   }
 }
 
@@ -320,8 +338,8 @@ export const Config: z<ConfigType> = z.object({
   persona: z.object({
     enabled: z.boolean().default(true)
       .description('是否注入人格段。关掉等于这个插件不提供人格（行为与未安装此插件一致）。'),
-    seed: z.string().default('')
-      .description('基础人格（部署者写）：我是谁、什么口吻、守什么边界。空串 = 不注入，不留空段落。'),
+    seed: z.string().default(defaultPersonaSeed())
+      .description('基础人格（部署者写）：我是谁、什么口吻、守什么边界。默认取包内 persona/seed.md；写成空串 = 不注入。'),
   }),
   // 阶段 9.6：每日自动提炼。产物是 pending 候选，仍要人工审核才生效
   traits: z.object({

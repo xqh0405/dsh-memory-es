@@ -19,6 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_LIB="$ROOT/lib"
 SRC_PANEL="$ROOT/panel"
+SRC_PERSONA="$ROOT/persona"
 CHECK_ONLY=0
 if [ "${1:-}" = "--check" ]; then
   CHECK_ONLY=1
@@ -56,7 +57,8 @@ for dest in "${DESTS[@]}"; do
     # panel 里排除 cli/：那是同步时额外补进去的 CLI 源码副本，仓库本来就没有。
     if diff -rq "$SRC_LIB" "$dest/lib" >/dev/null 2>&1; then lib_ok=1; else lib_ok=0; fi
     if diff -rq --exclude=cli "$SRC_PANEL" "$dest/panel" >/dev/null 2>&1; then panel_ok=1; else panel_ok=0; fi
-    if [ "$lib_ok" = "1" ] && [ "$panel_ok" = "1" ]; then
+    if diff -rq "$SRC_PERSONA" "$dest/persona" >/dev/null 2>&1; then persona_ok=1; else persona_ok=0; fi
+    if [ "$lib_ok" = "1" ] && [ "$panel_ok" = "1" ] && [ "$persona_ok" = "1" ]; then
       if [ -f "$dest/panel/cli/consolidate/cli.ts" ]; then
         echo "  [ok]   $dest（一致）"
       else
@@ -64,22 +66,25 @@ for dest in "${DESTS[@]}"; do
         pending=1
       fi
     else
-      echo "  [diff] $dest（lib 一致=$lib_ok panel 一致=$panel_ok，index.js: lib=$dest_lib panel=$dest_panel）"
+      echo "  [diff] $dest（lib=$lib_ok panel=$panel_ok persona=$persona_ok，index.js: lib=$dest_lib panel=$dest_panel）"
       diff -rq "$SRC_LIB" "$dest/lib" 2>&1 | head -5 | sed 's/^/         /'
       diff -rq --exclude=cli "$SRC_PANEL" "$dest/panel" 2>&1 | head -5 | sed 's/^/         /'
+      diff -rq "$SRC_PERSONA" "$dest/persona" 2>&1 | head -5 | sed 's/^/         /'
       pending=1
     fi
     continue
   fi
-  rm -rf "$dest/lib" "$dest/panel"
+  rm -rf "$dest/lib" "$dest/panel" "$dest/persona"
   cp -a "$SRC_LIB" "$dest/lib"
   cp -a "$SRC_PANEL" "$dest/panel"
+  # 内置人格：persona.seed 的默认值读它（../persona/seed.md），漏同步会变成「没有内置人格」
+  cp -a "$SRC_PERSONA" "$dest/persona"
   # 仓库 panel/ 里不存 CLI 源码副本（打包时才生成）；本地同步也必须补上，
   # 否则面板「维护」页会报「未随带 CLI 源码，整理与导出不可用」
   mkdir -p "$dest/panel/cli"
   cp -a "$ROOT/consolidate" "$ROOT/src" "$dest/panel/cli/"
   cp -f "$ROOT/package.json" "$ROOT/cordis.patch.yml" "$dest"/
-  echo "  [sync] $dest（lib + panel + package.json + cordis.patch.yml）"
+  echo "  [sync] $dest（lib + panel + persona + package.json + cordis.patch.yml）"
 done
 
 if [ "$CHECK_ONLY" = "1" ]; then

@@ -73,6 +73,8 @@ mkdir -p "$STAGE/plugin/lib"
 echo '==> 收集文件'
 cp -a lib/. "$STAGE/plugin/lib/"
 cp -f package.json cordis.patch.yml "$STAGE/plugin/"
+# 内置人格：插件默认值会读它（persona.seed 的 default），所以必须跟 lib 一起进包
+if [ -d persona ]; then cp -a persona "$STAGE/plugin/persona"; fi
 
 mkdir -p "$STAGE/plugin/panel"
 cp -a panel/. "$STAGE/plugin/panel/"

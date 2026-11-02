@@ -128,15 +128,28 @@ else
   echo "    ! 找不到 node：请手工把 dsh-memory-es 加进 $PROFILE_PKG 的 dsh.profile.bundles，并删掉 dsh-memory-es-panel" >&2
 fi
 
+# 表情包：**只补缺**。用户可能改过某张图、加了自己的贴图、或删掉了不喜欢的，
+# 整目录替换会把这些全抹掉（旧版就是备份后覆盖），所以这里逐个文件判断存在性。
 if [ "$WITH_STICKERS" = "1" ] && [ -d "$HERE/stickers" ] && [ -f "$HERE/stickers/stickers.json" ]; then
-  echo "==> 4/4 表情包 → $DSH_HOME/stickers"
-  if [ -d "$DSH_HOME/stickers" ] && ! diff -rq "$HERE/stickers" "$DSH_HOME/stickers" >/dev/null 2>&1; then
-    BACKUP="$DSH_HOME/stickers.bak-$(date +%Y%m%d%H%M%S)"
-    echo "    已有目录内容不同，先备份到 $BACKUP"
-    run mv "$DSH_HOME/stickers" "$BACKUP"
-  fi
+  echo "==> 4/4 表情包 → $DSH_HOME/stickers（只补缺，已有文件不动）"
   run mkdir -p "$DSH_HOME/stickers"
-  run cp -a "$HERE/stickers/." "$DSH_HOME/stickers/"
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "    [dry-run] 补缺 $(cd "$HERE/stickers" && find . -type f | wc -l | tr -d ' ') 个文件"
+  else
+    added=0
+    kept=0
+    while IFS= read -r -d '' rel; do
+      rel="${rel#./}"
+      if [ -e "$DSH_HOME/stickers/$rel" ]; then
+        kept=$((kept + 1))
+        continue
+      fi
+      mkdir -p "$DSH_HOME/stickers/$(dirname "$rel")"
+      cp -a "$HERE/stickers/$rel" "$DSH_HOME/stickers/$rel"
+      added=$((added + 1))
+    done < <(cd "$HERE/stickers" && find . -type f -print0)
+    echo "    新增 ${added} 个；保留已有 ${kept} 个"
+  fi
 else
   echo "==> 4/4 表情包：跳过"
 fi
@@ -153,5 +166,7 @@ fi
 
 echo
 echo "完成：v${VERSION} 已就位（$PLUGIN_DEST，插件与面板同一个包）"
+echo "人格：内置在插件里（persona/seed.md），装完直接生效，不需要写配置"
+echo "      要换成自己的，就在 profile 的 cordis.patch.yml 里配 persona.seed —— 配置优先，升级不会覆盖"
 echo "生效：重启 dsh-web（本机：kill -TERM \$(systemctl show dsh-web -p MainPID --value)；容器：docker restart <容器名>）"
 echo "核对：插件日志 'ready: v${VERSION}'、面板自检 '自检通过 v${VERSION}'、面板页脚「版本 ${VERSION}」"
