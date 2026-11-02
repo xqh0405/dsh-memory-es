@@ -1566,6 +1566,29 @@ window.__ModuleLoader__.load({
     const GALAXY_CAM = { yaw: -0.55, pitch: -1.05, dist: 1040, focal: 1600 }
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
 
+    /** 光晕贴图缓存：每种颜色预渲染一张径向渐变，绘制时 drawImage 缩放 */
+    const GLOW_SPRITES = new Map()
+    function glowSprite(color) {
+      const cached = GLOW_SPRITES.get(color)
+      if (cached !== undefined) return cached
+      const size = 64
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const g = canvas.getContext('2d')
+      if (g !== null) {
+        const gradient = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
+        gradient.addColorStop(0, hexToRgba(color, 1))
+        gradient.addColorStop(0.28, hexToRgba(color, 0.5))
+        gradient.addColorStop(0.62, hexToRgba(color, 0.13))
+        gradient.addColorStop(1, hexToRgba(color, 0))
+        g.fillStyle = gradient
+        g.fillRect(0, 0, size, size)
+      }
+      GLOW_SPRITES.set(color, canvas)
+      return canvas
+    }
+
     /** #rrggbb → rgba(r,g,b,a)：画布渐变的色标只认 rgba 字符串 */
     function hexToRgba(hex, alpha) {
       const value = String(hex).replace('#', '')
@@ -1878,27 +1901,12 @@ window.__ModuleLoader__.load({
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
-          // 柔光：半径拉到 3.2 倍、alpha 压到 0.08——小半径高 alpha 会形成一圈能看见的环，
-          // 星星应该是"亮核 + 范围很大、几乎看不见边界的光"
-          ctx.globalAlpha = alpha * 0.08
-          ctx.fillStyle = item.color
-          ctx.beginPath()
-          ctx.arc(screen.x, screen.y, radius * 3.2, 0, Math.PI * 2)
-          ctx.fill()
-
-          // 强光晕只给"重要"的星：hub、悬停、选中
-          // 光晕与本体都走 source-over：加色叠加几层后颜色会冲成白，领域就认不出来了。
-          const glow = isHover || isFocus || node.degree >= 8
-          if (glow) {
-            const halo = ctx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, radius * (isHover || isFocus ? 4.2 : 3))
-            halo.addColorStop(0, hexToRgba(item.color, isHover || isFocus ? 0.42 : 0.2))
-            halo.addColorStop(1, hexToRgba(item.color, 0))
-            ctx.globalAlpha = 1
-            ctx.fillStyle = halo
-            ctx.beginPath()
-            ctx.arc(screen.x, screen.y, radius * (isHover || isFocus ? 4.2 : 3), 0, Math.PI * 2)
-            ctx.fill()
-          }
+          // 光晕用预渲染的径向渐变贴图：实心圆即使 alpha 很低，在暗背景上也能看到硬边，
+          // 会变成一颗颗"圆盘"。贴图边缘是真渐变到 0，叠多少层都不会有轮廓。
+          const sprite = glowSprite(item.color)
+          const glowSize = radius * (isHover || isFocus ? 9.5 : node.degree >= 8 ? 7 : 5.2)
+          ctx.globalAlpha = Math.min(1, alpha * (isHover || isFocus ? 1.05 : 0.72))
+          ctx.drawImage(sprite, screen.x - glowSize / 2, screen.y - glowSize / 2, glowSize, glowSize)
 
           ctx.globalAlpha = alpha
           ctx.fillStyle = item.color
