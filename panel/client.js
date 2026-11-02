@@ -1565,6 +1565,7 @@ window.__ModuleLoader__.load({
      */
     const GALAXY_CAM = { yaw: -0.62, pitch: -0.46, dist: 840, focal: 1600 }
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
+    const GALAXY_SHOW_LABELS = true // 截图配图时临时改成 false，可去掉项目名标签
 
     /** 光晕贴图缓存：每种颜色预渲染一张径向渐变，绘制时 drawImage 缩放 */
     const GLOW_SPRITES = new Map()
@@ -1932,8 +1933,8 @@ window.__ModuleLoader__.load({
             ctx.stroke()
           }
 
-          // 标签候选：悬停 / 选中 / 度数高的前几颗
-          if (isHover || isFocus || node.degree >= 6) labels.push({ item, radius, score: node.degree + fresh * 2 })
+          // 标签候选：悬停 / 选中 / 度数高的前几颗（截图时临时关掉，避免把内部项目名带进配图）
+          if (GALAXY_SHOW_LABELS && (isHover || isFocus || node.degree >= 6)) labels.push({ item, radius, score: node.degree + fresh * 2 })
         }
 
         // 标签：白字 + 深底衬，按分数取前 10 个并做碰撞剔除，否则会糊成一团
