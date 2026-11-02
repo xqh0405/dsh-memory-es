@@ -1218,17 +1218,29 @@ window.__ModuleLoader__.load({
       return (hash >>> 0) / 4294967295
     }
 
+    /** 旋臂参数：布局与背景旋臂共用同一条曲线，节点才会真的"贴"在臂上 */
+    const GALAXY_ARMS = 3
+    const GALAXY_R0 = 90 // 盘心半径
+    const GALAXY_R1 = 520 // 盘面外缘
+
+    /** 第 arm 条臂在半径 r 处的角度（对数螺旋，越往外臂越"甩"开） */
+    function galaxyArmAngle(arm, r) {
+      return (arm / GALAXY_ARMS) * Math.PI * 2 - 2.6 * Math.log(r / 420 + 1)
+    }
+
     /**
      * 银河盘布局（世界坐标 3D，确定性）。
      *
-     * 核心是**面积均匀的螺旋**（Vogel / 向日葵排布）：
-     *   radius = sqrt((k+0.5)/n) * reach，angle = k * 黄金角
-     * 这样点的密度按面积走——盘心面积小、点就少，不会像 BFS 同心环那样
-     * 把 200 个点全压在同一个圆周上（2026-11-02 用户反馈"中心太密"）。
+     * 节点**沿旋臂铺开**，不是摊成一个圆饼：每条臂按 domain 分段落，
+     * 同一领域成片、相邻领域首尾相接，整体顺着 `galaxyArmAngle` 的曲线走。
      *
-     * 节点按 BFS 顺序编号，所以相连的邻居在螺旋上仍然挨着，边不会乱飞。
-     * 连通分量仍是一团：最大的铺满盘心，其余按黄金角散到外圈。
-     * y 轴给厚度，中心厚、外缘薄，侧着看才有体积。
+     *  · 臂内位置 `t ∈ [0,1]`：半径 R0→R1，`t^0.85` 让内圈稍密；
+     *  · 臂宽随半径变大（外圈更蓬松），径向偏移用节点 id 哈希抖动；
+     *  · 角度再加一点抖动，臂才不会像画出来的细线；
+     *  · y 轴给厚度，中心厚、外缘薄；
+     *  · 最大连通分量之外的碎点（孤点）放到盘外的"晕"里。
+     *
+     * 全程用排序 + 哈希，所以同一份数据每次都是同一张盘。
      */
     function layoutGalaxy(graph) {
       const positions = new Map()
@@ -1241,10 +1253,8 @@ window.__ModuleLoader__.load({
         adj.get(edge.source)?.push(edge.target)
         adj.get(edge.target)?.push(edge.source)
       }
-      // 邻居也排序：BFS 的顺序必须可复现
       for (const list of adj.values()) list.sort()
 
-      const byId = new Map(nodes.map((node) => [node.id, node]))
       const seen = new Set()
       const components = []
       for (const node of nodes) {
@@ -1265,76 +1275,97 @@ window.__ModuleLoader__.load({
       }
       components.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1))
 
+      const byId = new Map(nodes.map((node) => [node.id, node]))
       const GOLDEN = Math.PI * (3 - Math.sqrt(5))
-      const CORE = 520 // 盘心那一团的半径（世界单位）
-      let radius = CORE
 
-      /** 一团内部：按 BFS 顺序铺成面积均匀的螺旋 */
-      const placeCluster = (members, cx, cz, reach) => {
-        const count = members.length
-        // 团越大越厚：268 个节点的主团约 76 世界单位，孤点只有 18
-        const thickness = Math.min(80, 18 + count * 0.4)
-        // BFS：起点取度数最高、同度数按 id 稳定
-        const start = members.slice().sort((a, b) => {
+      // ── 主盘：最大连通分量沿三条臂铺开 ──────────────────────────────
+      const core = components[0]
+      const byDomain = new Map()
+      for (const id of core) {
+        const domain = byId.get(id)?.domain ?? 'general'
+        if (!byDomain.has(domain)) byDomain.set(domain, [])
+        byDomain.get(domain).push(id)
+      }
+      // domain 按大小降序、同大小按名字，保证每次分组一致
+      const domains = [...byDomain.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))
+      const domainIndex = new Map(domains.map(([domain], index) => [domain, index]))
+      const domainSize = new Map(domains.map(([domain, ids]) => [domain, ids.length]))
+      // 一个 domain 就占了小半张图时，不能整条臂都给它——否则三条臂里只有一条有东西。
+      // 超过这个比例就按 id 哈希打散到各臂，保证每条臂的星量接近。
+      const heavy = core.length * 0.22
+
+      // 核球：度数最高的一小撮压在盘心，给整张图一个"亮核"
+      const degreeOf = (id) => byId.get(id)?.degree ?? 0
+      const corePick = core.slice().sort((a, b) => degreeOf(b) - degreeOf(a) || (a < b ? -1 : 1))
+        .slice(0, Math.max(3, Math.round(core.length * 0.05)))
+      const coreSet = new Set(corePick)
+      corePick.forEach((id, k) => {
+        const rr = Math.sqrt((k + 0.5) / corePick.length) * GALAXY_R0 * 0.9
+        const theta = k * Math.PI * (3 - Math.sqrt(5))
+        positions.set(id, {
+          x: Math.cos(theta) * rr,
+          y: (hashUnit(id + '#y') - 0.5) * 92,
+          z: Math.sin(theta) * rr,
+        })
+      })
+
+      const armBuckets = Array.from({ length: GALAXY_ARMS }, () => [])
+      for (const id of core) {
+        if (coreSet.has(id)) continue
+        const domain = byId.get(id)?.domain ?? 'general'
+        const size = domainSize.get(domain) ?? 0
+        const arm = size > heavy
+          ? Math.floor(hashUnit(id + '#arm') * GALAXY_ARMS) % GALAXY_ARMS
+          : (domainIndex.get(domain) ?? 0) % GALAXY_ARMS
+        armBuckets[arm].push(id)
+      }
+
+      armBuckets.forEach((ids, arm) => {
+        // 臂内按度数降序：hub 靠近盘心，叶子甩到臂的外段
+        const ordered = ids.slice().sort((a, b) => {
           const da = byId.get(a)?.degree ?? 0
           const db = byId.get(b)?.degree ?? 0
           return db - da || (a < b ? -1 : 1)
-        })[0]
-        const level = new Map([[start, 0]])
-        const queue = [start]
-        const order = [start]
-        while (queue.length > 0) {
-          const id = queue.shift()
-          const d = level.get(id)
-          for (const next of adj.get(id) ?? []) {
-            if (level.has(next)) continue
-            level.set(next, d + 1)
-            order.push(next)
-            queue.push(next)
-          }
-        }
-        // 极端情况下 BFS 覆盖不全（理论上不会，分量是连通的）：补到队尾
-        for (const id of members) {
-          if (!level.has(id)) {
-            level.set(id, 1)
-            order.push(id)
-          }
-        }
-        order.forEach((id, k) => {
-          // 面积均匀：k/n 开方后才铺得匀；不开方会全挤在外圈
-          const radial = Math.sqrt((k + 0.5) / count)
-          // 黄金角错开：相邻的 k 不会叠在一条射线上
+        })
+        const total = ordered.length
+        ordered.forEach((id, k) => {
+          const t = (k + 0.5) / Math.max(1, total)
+          const radial = Math.pow(t, 0.85)
+          const baseR = GALAXY_R0 + radial * (GALAXY_R1 - GALAXY_R0)
+          // 臂宽：外圈更蓬松，再叠一层 id 哈希，避免看起来像细线
+          const spread = (0.09 + 0.24 * t) * (GALAXY_R1 - GALAXY_R0)
+          const r = Math.max(36, baseR + (hashUnit(id + '#r') - 0.5) * spread)
+          const theta = galaxyArmAngle(arm, r) + (hashUnit(id + '#a') - 0.5) * (0.1 + 0.2 * t)
+          positions.set(id, {
+            x: Math.cos(theta) * r,
+            // 中心厚、外缘薄：给出"盘"的轮廓
+            y: (hashUnit(id + '#y') - 0.5) * 66 * (1 - t * 0.62),
+            z: Math.sin(theta) * r,
+          })
+        })
+      })
+
+      // ── 晕：主盘之外的碎点，散在盘外一圈 ───────────────────────────
+      let haloR = GALAXY_R1 + 70
+      components.slice(1).forEach((members, index) => {
+        const angle = index * GOLDEN + hashUnit(members[0]) * 0.6
+        const dist = GALAXY_R1 + 60 + (index % 4) * 46
+        const cx = Math.cos(angle) * dist
+        const cz = Math.sin(angle) * dist
+        members.forEach((id, k) => {
+          const rr = members.length > 1 ? Math.sqrt((k + 0.5) / members.length) * 26 : 0
           const theta = k * GOLDEN
-          // 一点哈希抖动，让螺旋不至于太"数学"
-          const jitter = 0.94 + hashUnit(id) * 0.12
-          const rr = radial * reach * jitter
           positions.set(id, {
             x: cx + Math.cos(theta) * rr,
-            // 中心厚、外缘薄：给出"盘"的轮廓
-            y: (hashUnit(id + '#y') - 0.5) * thickness * (1 - radial * 0.7),
+            y: (hashUnit(id + '#y') - 0.5) * 24,
             z: cz + Math.sin(theta) * rr,
           })
         })
-      }
+        haloR = Math.max(haloR, dist + 30)
+      })
 
-      for (const [index, members] of components.entries()) {
-        const reach = Math.max(38, Math.sqrt(members.length) * 34)
-        if (index === 0) {
-          placeCluster(members, 0, 0, CORE)
-          continue
-        }
-        // 外圈：黄金角 + sqrt 半径增量，既散得开又不会叠在一起
-        const angle = index * GOLDEN + hashUnit(components[index][0]) * 0.6
-        const dist = CORE + 170 + Math.sqrt(index) * 200
-        const cx = Math.cos(angle) * dist
-        const cz = Math.sin(angle) * dist
-        placeCluster(members, cx, cz, reach)
-        radius = Math.max(radius, dist + reach)
-      }
-
-      return { positions, radius }
+      return { positions, radius: haloR }
     }
-
 
     /**
      * 取以 `centerId` 为中心、`depth` 跳以内的子图。
@@ -1732,11 +1763,12 @@ window.__ModuleLoader__.load({
           ctx.globalAlpha = pass.alpha
           ctx.strokeStyle = pass.color
           ctx.lineWidth = pass.width * unit
-          for (let arm = 0; arm < 3; arm += 1) {
+          for (let arm = 0; arm < GALAXY_ARMS; arm += 1) {
             ctx.beginPath()
             for (let i = 0; i <= 64; i += 1) {
-              const rr = 160 + (i / 64) * 980
-              const theta = (arm / 3) * Math.PI * 2 - 2.6 * Math.log(rr / 420 + 1)
+              // 与布局共用 galaxyArmAngle：雾带和节点才会贴在同一条曲线上
+              const rr = GALAXY_R0 * 0.55 + (i / 64) * (GALAXY_R1 + 70 - GALAXY_R0 * 0.55)
+              const theta = galaxyArmAngle(arm, rr)
               const projected = projectTo({ x: Math.cos(theta) * rr, y: 0, z: Math.sin(theta) * rr })
               if (i === 0) ctx.moveTo(projected.x, projected.y)
               else ctx.lineTo(projected.x, projected.y)
@@ -1753,9 +1785,16 @@ window.__ModuleLoader__.load({
           if (a === undefined || b === undefined) continue
           const active = hover !== null && (hover === edge.source || hover === edge.target)
           const fog = Math.max(0.18, Math.min(1, 0.95 - (a.z + b.z) * 0.00035))
-          ctx.globalAlpha = (active ? 0.7 : 0.05 + edge.weight * 0.13) * fog
-          ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(120,160,230,1)'
-          ctx.lineWidth = (active ? 1.7 : 0.55 + edge.weight * 0.9) * Math.min(1.6, (a.k + b.k) * 1.4)
+          // 边的亮度按屏幕长度衰减：同臂的短边清楚，跨臂的长线自然淡掉。
+          // 否则 601 条长线叠起来会变成一层网，把星点和旋臂全盖住。
+          const span = Math.hypot(a.x - b.x, a.y - b.y)
+          // 跨臂的长边全局不画：601 条叠起来就是一层网。鼠标悬停某个节点时
+          // 才把它的全部边（含长边）亮出来，结构信息不丢，画面先干净。
+          if (!active && span > 170) continue
+          const near = Math.max(0.2, Math.min(1, 1 - span / 220))
+          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near)
+          ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(96,130,190,1)'
+          ctx.lineWidth = (active ? 1.7 : 0.45 + edge.weight * 0.45) * Math.min(1.6, (a.k + b.k) * 1.4)
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
           ctx.lineTo(b.x, b.y)
@@ -1774,7 +1813,7 @@ window.__ModuleLoader__.load({
           const depth = Math.min(1.6, Math.max(0.55, screen.k * 1.15))
           const isHover = hover === node.id
           const isFocus = model.focused === node.id
-          const radius = (2.5 + Math.min(6, node.degree) * 0.72) * depth * (isHover || isFocus ? 1.25 : 1)
+          const radius = (2.9 + Math.min(6, node.degree) * 0.78) * depth * (isHover || isFocus ? 1.25 : 1)
           const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * (isHover ? 1.35 : 1))
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
