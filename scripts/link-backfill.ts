@@ -59,7 +59,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const uid = args.user ?? ''
   if (!uid) {
-    console.error('用法: node scripts/link-backfill.ts --user <uid> [--since YYYY-MM-DD] [--dry]')
+    console.error('用法: node scripts/link-backfill.ts --user <uid> [--since ...] [--index team_knowledge --time-field updated_at] [--dry]')
     process.exit(2)
   }
   const since = args.since ?? '2026-01-01'
@@ -73,20 +73,23 @@ async function main(): Promise<void> {
     password: creds.password,
     requestTimeoutMs: 20_000,
   })
-  const index = `${PERSONAL_PREFIX}${uid}`
+  // --index 可覆盖目标索引（团队库传 team_knowledge），--time-field 配时间字段
+  // （个人库按 created_at、团队库没有该字段要按 updated_at/promoted_at）
+  const index = args.index ?? `${PERSONAL_PREFIX}${uid}`
+  const timeField = args['time-field'] ?? 'created_at'
 
   // 1. 找出该时间窗内 active 且 related 为空的条目（先不取 embedding，省流量）
   const found = await es.search(index, {
     query: {
       bool: {
         filter: [
-          { range: { created_at: { gte: since } } },
+          { range: { [timeField]: { gte: since } } },
           { term: { status: 'active' } },
           // related 是 enabled:false 的 object，空数组查不出来，用 exists 反选 + 人工筛
         ],
       },
     },
-    sort: [{ created_at: 'asc' }],
+    sort: [{ [timeField]: 'asc' }],
     size: 200,
     _source: { excludes: ['embedding'] },
   })
@@ -117,7 +120,10 @@ async function main(): Promise<void> {
       }
 
       // 3. kNN 找邻居（多取 3 倍候选过区间过滤，与 probeNeighbors 一致）
-      const topKProbe = Math.max(EDGE_CFG.topK * 3, EDGE_CFG.topK)
+      // 候选广度：topK*3 只够「库里同主题稀疏」的场景；同批晋升几十条后，
+      // kNN 前 15 名会被判重带（≥0.85）的兄弟挤满，[0.55,0.85) 的邻居进不了候选 → 0 边。
+      // 补边不是热路径，直接取 50 个候选再过区间过滤。
+      const topKProbe = Math.max(EDGE_CFG.topK * 10, 50)
       const neighbors = await es.search(index, knnBody(embedding, EDGE_CFG.dims, { status: 'active' }, topKProbe))
       const scored = neighbors.hits.map((h) => ({
         id: typeof (h.source as { memory_id?: string }).memory_id === 'string'
