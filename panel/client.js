@@ -1228,6 +1228,15 @@ window.__ModuleLoader__.load({
       return (arm / GALAXY_ARMS) * Math.PI * 2 - 2.6 * Math.log(r / 420 + 1)
     }
 
+    /** 角度差归一到 [-π, π]：两角之间走"近的那一侧" */
+    function wrapAngle(angle) {
+      const ring = Math.PI * 2
+      let value = angle % ring
+      if (value > Math.PI) value -= ring
+      if (value < -Math.PI) value += ring
+      return value
+    }
+
     /**
      * 银河盘布局（世界坐标 3D，确定性）。
      *
@@ -1321,7 +1330,7 @@ window.__ModuleLoader__.load({
       }
 
       armBuckets.forEach((ids, arm) => {
-        // 臂内按度数降序：hub 靠近盘心，叶子甩到臂的外段
+        // 臂内按度数降序：hub 靠近盘心，叶子甩到盘的外段
         const ordered = ids.slice().sort((a, b) => {
           const da = byId.get(a)?.degree ?? 0
           const db = byId.get(b)?.degree ?? 0
@@ -1330,16 +1339,21 @@ window.__ModuleLoader__.load({
         const total = ordered.length
         ordered.forEach((id, k) => {
           const t = (k + 0.5) / Math.max(1, total)
-          const radial = Math.pow(t, 0.85)
+          // 半径按面积均匀（sqrt），再给 ±17% 抖动——星点应该铺满盘面，不是排在一条弧上
+          const radial = Math.sqrt(t)
           const baseR = GALAXY_R0 + radial * (GALAXY_R1 - GALAXY_R0)
-          // 臂宽：外圈更蓬松，再叠一层 id 哈希，避免看起来像细线
-          const spread = (0.09 + 0.24 * t) * (GALAXY_R1 - GALAXY_R0)
-          const r = Math.max(36, baseR + (hashUnit(id + '#r') - 0.5) * spread)
-          const theta = galaxyArmAngle(arm, r) + (hashUnit(id + '#a') - 0.5) * (0.1 + 0.2 * t)
+          const r = Math.max(32, baseR * (0.84 + hashUnit(id + '#r') * 0.34))
+          // 自由角度：整张盘铺开
+          const free = k * Math.PI * (3 - Math.sqrt(5)) + hashUnit(id + '#a') * Math.PI * 2
+          // 朝所属臂拉：pull 用高次幂压小，多数节点保持散开，只有少数贴到臂上。
+          // 这样臂是"统计上更密"，而不是一条珠子串。
+          const pull = Math.pow(hashUnit(id + '#pull'), 2.6) * 0.92
+          const target = galaxyArmAngle(arm, r)
+          const theta = free + wrapAngle(target - free) * pull
           positions.set(id, {
             x: Math.cos(theta) * r,
             // 中心厚、外缘薄：给出"盘"的轮廓
-            y: (hashUnit(id + '#y') - 0.5) * 66 * (1 - t * 0.62),
+            y: (hashUnit(id + '#y') - 0.5) * 66 * (1 - radial * 0.55),
             z: Math.sin(theta) * r,
           })
         })
@@ -1517,7 +1531,7 @@ window.__ModuleLoader__.load({
      * 做法：世界坐标 3D → yaw/pitch 旋转 → 透视 → 屏幕。
      * 不引 three.js：300 个点和 600 条边用不着渲染管线，手写这套更轻。
      */
-    const GALAXY_CAM = { yaw: -0.55, pitch: -1.05, dist: 1180, focal: 1600 }
+    const GALAXY_CAM = { yaw: -0.55, pitch: -1.05, dist: 1040, focal: 1600 }
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
 
     /** #rrggbb → rgba(r,g,b,a)：画布渐变的色标只认 rgba 字符串 */
@@ -1813,8 +1827,10 @@ window.__ModuleLoader__.load({
           const depth = Math.min(1.6, Math.max(0.55, screen.k * 1.15))
           const isHover = hover === node.id
           const isFocus = model.focused === node.id
-          const radius = (2.9 + Math.min(6, node.degree) * 0.78) * depth * (isHover || isFocus ? 1.25 : 1)
-          const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * (isHover ? 1.35 : 1))
+          const radius = (2.3 + Math.min(6, node.degree) * 0.68) * depth * (isHover || isFocus ? 1.25 : 1)
+          // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
+          const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
+          const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
