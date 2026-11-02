@@ -35,6 +35,13 @@ jobs:
             @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 \
             @deepseek-ai/dsh-tools@0.2.1-rc.3
 
+      - name: 质量闸门（类型 + 单测）
+        run: |
+          # 之前只在本地手工跑，结果 typecheck 红了 3 个版本没人发现（2026-11-02 评审）。
+          # 发版前必须过这道闸；集成测试需要本机 ES，这里会 skip（文案会打印缺哪个键）。
+          npm run typecheck
+          npm test
+
       - name: 构建并打包
         run: |
           # 不走 scripts/build.sh：它的第二步 link-deps 要把宿主 dsh 的

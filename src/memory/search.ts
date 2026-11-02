@@ -21,6 +21,7 @@ import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
 import { applyRanking, buildHitReceipts, DETAIL_LEVELS, diversifyByDomain, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type DetailLevel, type HitReceipt, type RankingConfig, type ReceiptSource } from '../fragment.ts'
 import { NON_FACT_MEMORY_TYPES } from './common.ts'
+import { DEFAULT_TIMEZONE, zonedDayStart } from '../timezone.ts'
 import type { RecallCache } from './recallCache.ts'
 
 export const SCOPES = ['both', 'personal', 'team'] as const
@@ -237,8 +238,14 @@ export interface SearchResult {
   degraded: boolean
   /** true = 用了团队库的兜底时间窗（模型可据此知道自己没给收窄条件） */
   filtered: boolean
-  /** 阶段 13：传了 as_of 时回显生效的时间点（ISO）；没传则缺省 */
-  asOf?: string
+  /**
+   * 阶段 13：传了 as_of 时回显生效的时间点（ISO）；没传则缺省。
+   *
+   * 字段名必须与工具 output schema 一致（`as_of`）——2026-11-02 评审实测：这里原来返回
+   * `asOf`，schema 声明的是 `as_of`，DSH 的 `additionalProperties: false` 直接把整个结果
+   * 判为非法（`value.asOf is not a declared property`），功能自 v0.5.9 起从未成功执行过。
+   */
+  as_of?: string
   /** 给模型看的短文本 */
   text: string
 }
@@ -249,10 +256,20 @@ function clampLimit(requested: number | undefined, fallback: number): number {
   return Math.max(1, Math.min(MAX_RESULT_LIMIT, Math.trunc(value)))
 }
 
+/** 只有日期的写法（`2026-10-01`）——按配置时区当天 00:00 解释，不按 UTC */
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
 /** as_of 解析：空串视为未传，非法值直接报错（静默回落到"不过滤"会让时间点回看骗人） */
 function parseAsOf(raw?: string): Date | undefined {
   if (raw === undefined || raw.trim() === '') return undefined
-  const at = Date.parse(raw)
+  const text = raw.trim()
+  // 纯日期：`Date.parse('2026-10-01')` 会按 UTC 零点算，在北京时间等于 08:00
+  // —— 而全项目（日记/提炼）都按 Asia/Shanghai 理解「某一天」，这里必须一致，
+  // 否则传 date-only 的 as_of 会整体错位 8 小时（评审 2026-11-02 发现）。
+  if (DATE_ONLY_PATTERN.test(text)) {
+    return new Date(zonedDayStart(text, DEFAULT_TIMEZONE))
+  }
+  const at = Date.parse(text)
   if (!Number.isFinite(at)) {
     throw new Error(`memory_search: as_of 不是合法日期「${raw}」（支持 ISO 8601，如 2026-10-01）`)
   }
@@ -323,6 +340,10 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       ? meta
       : { ...meta, updatedWithinDays: TEAM_FALLBACK_WINDOW_DAYS }),
     domain: teamDomain,
+    // 团队索引**没有** created_at：晋升时写的是 source_created_at（个人原条目的创建时间）。
+    // 不显式指定的话，as_of 的 range(created_at) 会命中 0 条 → 团队知识被静默全部滤掉
+    // （2026-11-02 评审实测：同查询不带 as_of 命中 3 条、带上就 0 条，而库里 <= 该日期的有 228 条）。
+    asOfField: 'source_created_at',
   }
 
   // 团队库的审核闸（S9）：pending（待人工裁决）/ rejected（已驳回）都不该出现在检索结果里。
@@ -499,7 +520,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       note: 'no_match',
       degraded,
       filtered,
-      ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
+      ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
       text: '没有找到相关记忆。',
     }
   }
@@ -590,7 +611,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       note: 'low_confidence',
       degraded,
       filtered,
-      ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
+      ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
       text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${explainText}`,
     }
   }
@@ -610,7 +631,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     note: 'ok',
     degraded,
     filtered,
-    ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
+    ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
     text: `${renderText(hits)}${explainText}`,
   }
 }
@@ -695,7 +716,7 @@ export function defineSearchTool(deps: SearchDeps) {
       as_of: {
         type: 'string',
         description:
-          '阶段 13 时间点回看：只返回该时间点之前创建的记忆（ISO 8601，如 2026-10-01 或 2026-10-01T12:00:00Z）。近似语义——看到的是条目现在的内容，不是当时的旧版本。',
+          '阶段 13 时间点回看：只返回该时间点之前创建的记忆（ISO 8601，如 2026-10-01 或 2026-10-01T12:00:00Z；只写日期时按 Asia/Shanghai 当天 00:00 解释）。近似语义——看到的是条目现在的内容，不是当时的旧版本。',
       },
       detail: {
         type: 'string',

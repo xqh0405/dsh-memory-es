@@ -1,0 +1,36 @@
+name: CI
+
+# 每次 push / PR 都过类型与单测：这把闸之前不存在，typecheck 因此红了三个版本
+# （v0.6.12 → v0.6.14，2026-11-02 评审发现）。发版流程在 release.yml，这里是日常闸门。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: |
+          # 同 release.yml：npm 10 解析 `*` 形式的 peerDependencies 会崩，
+          # 跳过 peer 解算，再按宿主版本补装四个 peer（只用于编译与 .d.ts）。
+          npm ci --legacy-peer-deps
+          npm install --no-save --legacy-peer-deps \
+            @deepseek-ai/cordis@4.0.5 \
+            @deepseek-ai/schemastery@3.18.5 \
+            @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 \
+            @deepseek-ai/dsh-tools@0.2.1-rc.3
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单测
+        run: npm test

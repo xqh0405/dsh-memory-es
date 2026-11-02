@@ -16,17 +16,19 @@ import { Config } from '../src/config.ts'
 const seedFile = readFileSync(new URL('../persona/seed.md', import.meta.url), 'utf8').trim()
 
 test('persona.seed 默认取包内 persona/seed.md', () => {
-  const parsed = Config({ identity: { userId: 'u1' } })
+  // `as never` 与 apply.test.ts 同款：Config 的入参类型要求把带默认值的字段也写全，
+// 而运行时由 schema 补默认值。这里只关心 persona.seed 的取值来源。
+  const parsed = Config({ identity: { userId: 'u1' } } as never)
   assert.equal(parsed.persona.seed, seedFile)
   assert.ok(parsed.persona.seed.length > 200, '内置人格不该是空壳')
 })
 
 test('配置里写了 seed 就覆盖内置人格', () => {
-  const parsed = Config({ identity: { userId: 'u1' }, persona: { seed: '我自己的口吻' } })
+  const parsed = Config({ identity: { userId: 'u1' }, persona: { seed: '我自己的口吻' } } as never)
   assert.equal(parsed.persona.seed, '我自己的口吻')
 })
 
 test('显式空串 = 不注入人格', () => {
-  const parsed = Config({ identity: { userId: 'u1' }, persona: { seed: '' } })
+  const parsed = Config({ identity: { userId: 'u1' }, persona: { seed: '' } } as never)
   assert.equal(parsed.persona.seed, '')
 })

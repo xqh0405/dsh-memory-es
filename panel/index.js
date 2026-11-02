@@ -397,7 +397,9 @@ function projectHit(hit, scope) {
     status: str(source.status),
     reviewState: scope === 'team' ? str(source.review_state) : '',
     updatedAt: str(source.updated_at),
-    createdAt: str(source.created_at || source.promoted_at),
+    // 团队条目没有 created_at：它记的是 source_created_at（个人原条目的创建时间）；
+    // 原来直接回落 promoted_at，语义变成「什么时候晋升的」（2026-11-02 评审修正）
+    createdAt: str(source.created_at || source.source_created_at || source.promoted_at),
     topicKey: str(source.topic_key),
     sourceUser: str(source.source_user),
     sourceMemoryId: str(source.source_memory_id),

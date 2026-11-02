@@ -18,7 +18,7 @@ import { createEsClient } from '../src/es/http.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { searchMemories } from '../src/memory/search.ts'
 import { adminRequest, countByDomain, deleteByDomain, deleteDocsById, getAdminDoc } from './helpers/es-admin.ts'
-import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__consol_it'
 const CONFLICT_DOMAIN = '__consol_it_conflict'
@@ -30,7 +30,7 @@ const SECRET = '整理集成测试：数据库密码 password=Realsecret123 不�
 const env = loadEsTestEnv()
 
 if (!env) {
-  test('整理任务集成测试', { skip: '未找到 deploy/es/.env（先跑 scripts/es-up.sh 与 scripts/init-security.sh）' }, () => {})
+  test('整理任务集成测试', { skip: esSkipReason() }, () => {})
 } else if (!isLoopbackUrl(env.url)) {
   test('整理任务集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
 } else {

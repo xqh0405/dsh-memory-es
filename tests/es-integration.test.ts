@@ -19,7 +19,7 @@ import { createEsClient, EsError, formatEsError } from '../src/es/http.ts'
 import { normalizeContent, sha256Hex } from '../src/fragment.ts'
 import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
 import type { EsTestEnv } from './helpers/es-env.ts'
-import { isLoopbackUrl, loadEsTestEnv } from './helpers/es-env.ts'
+import { isLoopbackUrl, esSkipReason, loadEsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__it'
 
@@ -31,7 +31,7 @@ async function cleanupTestDocs(env: EsTestEnv): Promise<void> {
 const env = loadEsTestEnv()
 
 if (!env) {
-  test('ES 集成测试', { skip: '未找到 deploy/es/.env（先跑 scripts/es-up.sh 与 scripts/init-security.sh）' }, () => {})
+  test('ES 集成测试', { skip: esSkipReason() }, () => {})
 } else {
   defineReadOnlyTests(env)
   if (isLoopbackUrl(env.url)) {

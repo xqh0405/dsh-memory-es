@@ -275,6 +275,27 @@ describe('工具契约：receipts 必须过 DSH 的 output schema 校验', () =>
       await fake.close()
     }
   })
+
+  /**
+   * 2026-11-02 评审发现的 regression：`as_of` 曾返回成 `asOf`，
+   * schema 是 `additionalProperties: false` → 工具层直接把整个结果判非法，
+   * 阶段 13 的功能自 v0.5.9 起从未成功执行过。这条用例就是那个缺口的补丁。
+   */
+  test('as_of 的返回值通过 schema（字段名必须是 as_of，不是 asOf）', async () => {
+    const fake = await startSearchFake()
+    try {
+      const tool = defineSearchTool(makeDeps(fake))
+      const value = (await tool.execute(
+        { query: 'lot.bd_write_sync 北单同步', scope: 'personal', as_of: '2026-10-01T00:00:00.000Z' },
+        EXEC,
+      )) as Record<string, unknown>
+      assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [])
+      assert.equal(value.as_of, '2026-10-01T00:00:00.000Z')
+      assert.equal('asOf' in value, false, 'asOf 不在 schema 里，出现即整条结果非法')
+    } finally {
+      await fake.close()
+    }
+  })
 })
 
 describe('normalizeQueryKey（阶段 11 的簇键）', () => {

@@ -55,6 +55,13 @@ export interface MetaFilterOptions {
    * 语义写清楚比假装能版本回放更重要。
    */
   asOf?: Date | null
+  /**
+   * as_of 过滤用的时间字段，缺省 `created_at`。
+   *
+   * 团队索引没有 `created_at`：它记的是 `source_created_at`（个人原条目的创建时间）。
+   * 不按索引区分字段名，range 查询会命中 0 条 —— 而且不会报错，只会静默把整库滤空。
+   */
+  asOfField?: string
   memory_type?: FilterValue
   /** 明确排除的类型（阶段 7.1：普通检索默认排除 identity） */
   excludeMemoryTypes?: FilterValue
@@ -136,7 +143,9 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   pushValueFilter(filters, 'review_state', options.review_state ?? null)
 
   if (options.asOf !== undefined && options.asOf !== null) {
-    filters.push({ range: { created_at: { lte: options.asOf.toISOString() } } })
+    // 字段名按索引给（个人 created_at / 团队 source_created_at）：写错不会报错，只会查空。
+    const field = options.asOfField ?? 'created_at'
+    filters.push({ range: { [field]: { lte: options.asOf.toISOString() } } })
   }
   if (options.updatedWithinDays !== undefined) {
     assertPositiveInt(options.updatedWithinDays, 'updatedWithinDays')

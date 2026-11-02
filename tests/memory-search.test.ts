@@ -716,7 +716,47 @@ describe('阶段 13：as_of 入参', () => {
       })
       const body = h.bodyOf('personal_memory_xqh', 'bm25')
       assert.ok(JSON.stringify(body).includes('2026-10-01T00:00:00.000Z'), `过滤里没有 as_of：${JSON.stringify(body)}`)
-      assert.equal(result.asOf, '2026-10-01T00:00:00.000Z')
+      // 字段名必须与工具 output schema 一致（as_of）：
+      // 曾返回 asOf，导致 DSH 的 additionalProperties:false 判整个结果非法（2026-11-02 修复）
+      assert.equal(result.as_of, '2026-10-01T00:00:00.000Z')
+      assert.equal('asOf' in result, false, '不应再出现 asOf 字段')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('只写日期的 as_of 按 Asia/Shanghai 当天 00:00 解释（不是 UTC 零点）', async () => {
+    const h = await harness({
+      personal_memory_xqh: { bm25: [hit('m1', 5, { content: '一条事实' })], knn: [] },
+    })
+    try {
+      const result = await searchMemories(h.deps(), {
+        query: 'q',
+        scope: 'personal',
+        as_of: '2026-10-01',
+        detail: 'full',
+      })
+      // 北京 2026-10-01 00:00 = UTC 2026-09-30T16:00:00Z
+      assert.equal(result.as_of, '2026-09-30T16:00:00.000Z')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('团队库的 as_of 过滤走 source_created_at（团队索引没有 created_at）', async () => {
+    const h = await harness({
+      team_knowledge: { bm25: [hit('t1', 5, { content: '团队事实', source_user: 'xqh' })], knn: [] },
+    })
+    try {
+      await searchMemories(h.deps(), {
+        query: 'q',
+        scope: 'team',
+        as_of: '2026-10-01T00:00:00.000Z',
+        detail: 'full',
+      })
+      const body = JSON.stringify(h.bodyOf('team_knowledge', 'bm25'))
+      assert.ok(body.includes('source_created_at'), `团队路没用 source_created_at：${body}`)
+      assert.ok(!body.includes('"created_at"'), `团队路不该用 created_at：${body}`)
     } finally {
       await h.fake.close()
     }

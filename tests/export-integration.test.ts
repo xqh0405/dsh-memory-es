@@ -14,7 +14,7 @@ import { after, before, describe, test } from 'node:test'
 import { exportMirror, listExportable } from '../consolidate/export.ts'
 import { createEsClient } from '../src/es/http.ts'
 import { deleteByDomain } from './helpers/es-admin.ts'
-import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const D_A = '__export_it_a'
 const D_B = '__export_it_b'
@@ -22,7 +22,7 @@ const D_B = '__export_it_b'
 const env = loadEsTestEnv()
 
 if (!env) {
-  test('镜像导出集成测试', { skip: '未找到 deploy/es/.env（先跑 scripts/es-up.sh 与 scripts/init-security.sh）' }, () => {})
+  test('镜像导出集成测试', { skip: esSkipReason() }, () => {})
 } else if (!isLoopbackUrl(env.url)) {
   test('镜像导出集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
 } else {

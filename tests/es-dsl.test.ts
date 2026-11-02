@@ -159,4 +159,18 @@ describe('阶段 13：as-of 过滤', () => {
       false,
     )
   })
+
+  test('传 asOfField 时用该字段做时间点过滤（团队索引没有 created_at）', () => {
+    const at = new Date('2026-10-01T00:00:00.000Z')
+    const filters = buildFilters({ asOf: at, asOfField: 'source_created_at' })
+    const range = filters.find(
+      (f) => 'range' in f && 'source_created_at' in (f as { range: Record<string, unknown> }).range,
+    )
+    assert.ok(range !== undefined, `没生成 source_created_at 过滤：${JSON.stringify(filters)}`)
+    assert.equal(
+      filters.some((f) => 'range' in f && 'created_at' in (f as { range: Record<string, unknown> }).range),
+      false,
+      '指定了 asOfField 就不该再生成 created_at 过滤',
+    )
+  })
 })

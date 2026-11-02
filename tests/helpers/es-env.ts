@@ -58,15 +58,42 @@ export function isLoopbackUrl(url: string): boolean {
 /**
  * 读测试环境。返回 null 表示“这台机器没准备好”（.env 不存在或缺关键项），
  * 调用方据此 skip —— 但 skip 的原因必须打印出来，不能静默变绿。
+ *
+ * 两种账号形态都支持：
+ *  · 单账号（2026-10 起，一人一账号 `mem-user-<uid>`）：`MEM_USERNAME` + `MEM_PASSWORD`，
+ *    读写同一身份；缺团队写权限时相关用例会按权限失败，不会假装通过。
+ *  · 旧的多身份：`MEM_READER_PASSWORD` / `MEM_WRITER_PASSWORD` / `MEM_CONSOLIDATOR_PASSWORD` + `ELASTIC_PASSWORD`。
+ *
+ * 2026-11-02 评审：原来只认旧多身份，单账号迁移后所有集成用例**永久 skip，且 skip 文案
+ * 说「未找到 deploy/es/.env」——文件其实在**。现在缺项会把**具体缺哪个键**报出来。
  */
 export function loadEsTestEnv(): EsTestEnv | null {
   const fileVars = existsSync(ES_ENV_PATH) ? parseDotEnv(readFileSync(ES_ENV_PATH, 'utf8')) : {}
   const pick = (key: string): string => process.env[key] ?? fileVars[key] ?? ''
 
   const userId = pick('MEM_USER_ID') === '' ? 'xqh' : pick('MEM_USER_ID')
+  const adminPassword = pick('ELASTIC_PASSWORD')
+
+  // 单账号形态优先：一个身份读写自己的索引
+  const singleUser = pick('MEM_USERNAME')
+  const singlePassword = pick('MEM_PASSWORD')
+  if (singleUser !== '' && singlePassword !== '') {
+    const single = { username: singleUser, password: singlePassword }
+    return {
+      url: pick('MEM_ES_URL') || 'https://127.0.0.1:9200',
+      caCertPath: ES_CA_PATH,
+      userId,
+      reader: single,
+      writer: single,
+      consolidator: single,
+      admin: { username: 'elastic', password: adminPassword === '' ? singlePassword : adminPassword },
+      personalIndex: `personal_memory_${userId}`,
+      teamIndex: 'team_knowledge',
+    }
+  }
+
   const readerPassword = pick('MEM_READER_PASSWORD')
   const writerPassword = pick('MEM_WRITER_PASSWORD')
-  const adminPassword = pick('ELASTIC_PASSWORD')
   const consolidatorPassword = pick('MEM_CONSOLIDATOR_PASSWORD')
   if (readerPassword === '' || writerPassword === '' || adminPassword === '' || consolidatorPassword === '') {
     return null
@@ -83,4 +110,27 @@ export function loadEsTestEnv(): EsTestEnv | null {
     personalIndex: `personal_memory_${userId}`,
     teamIndex: 'team_knowledge',
   }
+}
+
+/**
+ * 集成为什么跑不了 —— 给 skip 文案用（**只列键名，不打印任何值**）。
+ *
+ * 旧文案「未找到 deploy/es/.env」在文件存在但账号形态变化时会指错方向，
+ * 让人误以为环境没起。
+ */
+export function esSkipReason(): string {
+  if (!existsSync(ES_ENV_PATH)) {
+    return `未找到 ${ES_ENV_PATH}（先跑 scripts/es-up.sh 与 scripts/init-security.sh）`
+  }
+  const fileVars = parseDotEnv(readFileSync(ES_ENV_PATH, 'utf8'))
+  const pick = (key: string): string => process.env[key] ?? fileVars[key] ?? ''
+  const missing: string[] = []
+  const singleOk = pick('MEM_USERNAME') !== '' && pick('MEM_PASSWORD') !== ''
+  if (!singleOk) {
+    for (const key of ['MEM_READER_PASSWORD', 'MEM_WRITER_PASSWORD', 'MEM_CONSOLIDATOR_PASSWORD', 'ELASTIC_PASSWORD']) {
+      if (pick(key) === '') missing.push(key)
+    }
+    return `${ES_ENV_PATH} 在，但缺少凭据键：${missing.join(' / ')}（单账号形态可只填 MEM_USERNAME + MEM_PASSWORD）`
+  }
+  return '凭据齐了但 loadEsTestEnv 返回空（不应发生，请查 tests/helpers/es-env.ts）'
 }

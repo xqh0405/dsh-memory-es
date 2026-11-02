@@ -13,7 +13,7 @@ import { createEmbedder } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
 import { searchMemories } from '../src/memory/search.ts'
 import { adminRequest, deleteByDomain, deleteDocsById } from './helpers/es-admin.ts'
-import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__review_it'
 const AUDIT_INDEX = 'memory_audit'
@@ -21,7 +21,7 @@ const AUDIT_INDEX = 'memory_audit'
 const env = loadEsTestEnv()
 
 if (!env) {
-  test('审核台集成测试', { skip: '未找到 deploy/es/.env（先跑 scripts/es-up.sh 与 scripts/init-security.sh）' }, () => {})
+  test('审核台集成测试', { skip: esSkipReason() }, () => {})
 } else if (!isLoopbackUrl(env.url)) {
   test('审核台集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
 } else {

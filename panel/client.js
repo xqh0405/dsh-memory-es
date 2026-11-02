@@ -922,8 +922,18 @@ window.__ModuleLoader__.load({
       return key ? t(key) : value
     }
 
+    /**
+     * 时间显示：ES 里的时间戳都是 UTC ISO（带 Z），直接切片等于把 UTC 当本地时间显示
+     * —— 北京时间会整整早 8 小时（2026-11-02 评审实测：20:56 的检索显示成 12:56）。
+     * 这里按浏览器本地时区渲染；纯日期（如日记的 day 字段）原样返回，避免被当成 UTC 零点。
+     */
     function shortTime(value) {
-      return typeof value === 'string' && value.length >= 16 ? `${value.slice(0, 10)} ${value.slice(11, 16)}` : value || '-'
+      if (typeof value !== 'string' || value === '') return value || '-'
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
+      const at = new Date(value)
+      if (!Number.isFinite(at.getTime())) return value
+      const pad = (n) => (n < 10 ? `0${n}` : String(n))
+      return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`
     }
 
     /**

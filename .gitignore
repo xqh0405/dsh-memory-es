@@ -219,3 +219,7 @@ tests/eval/baseline.json
 .research/
 scratch-research/
 .research-cache/
+
+# 本机实验脚本与临时凭据（评审 / 召回 A/B 用；.es.env 里是真实账号，绝不能入库）
+scratch-usage/
+scratch-recall/
