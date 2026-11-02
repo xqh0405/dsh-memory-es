@@ -146,6 +146,14 @@ window.__ModuleLoader__.load({
       fbCounts: '反馈：👍 {up} / 👎 {down}',
       fbEmpty: '还没有反馈',
       versionsTitle: '取代链',
+      scopeBoth: '全部',
+      graphDimTeam: '团队调暗',
+      graphHideTypes: '隐藏类型',
+      graphFilterActive: '过滤器生效中',
+      graphResetFilter: '清除过滤',
+      graphTruncatedSample: '候选未取全',
+      graphTruncatedLimit: '节点上限',
+      graphShowing: '显示',
       versionsCurrent: '当前',
       slUsedInEmpty: '还没有检索命中过这条',
       slStatusMiss: '没答上',
@@ -444,6 +452,14 @@ window.__ModuleLoader__.load({
       fbCounts: 'Feedback: 👍 {up} / 👎 {down}',
       fbEmpty: 'No feedback yet',
       versionsTitle: 'Version chain',
+      scopeBoth: 'All',
+      graphDimTeam: 'Dim team',
+      graphHideTypes: 'Hide types',
+      graphFilterActive: 'filters active',
+      graphResetFilter: 'Clear filters',
+      graphTruncatedSample: 'sampled',
+      graphTruncatedLimit: 'node limit',
+      graphShowing: 'shown',
       versionsCurrent: 'current',
       slUsedInEmpty: 'No search has matched this memory yet',
       slStatusMiss: 'never',
@@ -1664,6 +1680,9 @@ window.__ModuleLoader__.load({
       const [hover, setHover] = React.useState(null)
       const [size, setSize] = React.useState({ width: 900, height: 560 })
       const [focusId, setFocusId] = React.useState(null)
+      // 双透镜（2026-11-02）：来源=调暗、类型=隐藏。默认两个都不动，与之前看到的一样。
+      const [hiddenTypes, setHiddenTypes] = React.useState(() => new Set())
+      const [dimTeam, setDimTeam] = React.useState(false)
       // 自转默认开：转起来才有"星图"的感觉；切走页签会自动停
       const [orbit, setOrbit] = React.useState(true)
       const wrapRef = React.useRef(null)
@@ -1739,12 +1758,39 @@ window.__ModuleLoader__.load({
         drawRef.current()
       }, [focusId])
 
-      const model = React.useMemo(() => {
+      // 类型隐藏：先裁节点、再裁两端有点的边（连线不能存活在没有端点的图上）
+      const visibleData = React.useMemo(() => {
         if (state.data === null) return null
-        if (focusId === null) return { graph: state.data, layout: layoutGalaxy(state.data), focused: null }
-        const sub = subgraphOf(state.data, focusId, 2)
+        if (hiddenTypes.size === 0) return state.data
+        const nodes = state.data.nodes.filter((node) => !hiddenTypes.has(node.type))
+        const kept = new Set(nodes.map((node) => node.id))
+        const edges = state.data.edges.filter((edge) => kept.has(edge.source) && kept.has(edge.target))
+        const clusters = new Map()
+        for (const node of nodes) {
+          const entry = clusters.get(node.domain)
+          if (entry === undefined) clusters.set(node.domain, { domain: node.domain, count: 1 })
+          else entry.count += 1
+        }
+        return {
+          ...state.data,
+          nodes,
+          edges,
+          clusters: [...clusters.values()].sort((a, b) => b.count - a.count),
+          stats: {
+            ...state.data.stats,
+            nodes: nodes.length,
+            edges: edges.length,
+            orphans: nodes.filter((node) => node.degree === 0).length,
+          },
+        }
+      }, [state.data, hiddenTypes])
+
+      const model = React.useMemo(() => {
+        if (visibleData === null) return null
+        if (focusId === null) return { graph: visibleData, layout: layoutGalaxy(visibleData), focused: null }
+        const sub = subgraphOf(visibleData, focusId, 2)
         return { graph: sub, layout: layoutFocusGalaxy(sub), focused: focusId }
-      }, [state.data, focusId])
+      }, [visibleData, focusId])
 
       const colorMap = React.useMemo(() => {
         const map = new Map()
@@ -1872,6 +1918,8 @@ window.__ModuleLoader__.load({
 
         // 边：加色混合，弱边压得很低，避免 600 条线糊成一片
         ctx.lineCap = 'round'
+        // 双透镜的「团队调暗」：只看 team 边的两端是否都属于被调暗的一侧
+        const scopeOf = new Map(graph.nodes.map((node) => [node.id, node.scope]))
         for (const edge of graph.edges) {
           const a = screenOf.get(edge.source)
           const b = screenOf.get(edge.target)
@@ -1885,7 +1933,8 @@ window.__ModuleLoader__.load({
           // 才把它的全部边（含长边）亮出来，结构信息不丢，画面先干净。
           if (!active && span > 170) continue
           const near = Math.max(0.2, Math.min(1, 1 - span / 220))
-          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near)
+          const dimEdge = dimTeam && scopeOf.get(edge.source) === 'team' && scopeOf.get(edge.target) === 'team'
+          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near) * (dimEdge && !active ? 0.25 : 1)
           ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(96,130,190,1)'
           ctx.lineWidth = (active ? 1.7 : 0.45 + edge.weight * 0.45) * Math.min(1.6, (a.k + b.k) * 1.4)
           ctx.beginPath()
@@ -1912,7 +1961,8 @@ window.__ModuleLoader__.load({
           const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
-          const alpha = Math.min(1, (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
+          const dimNode = dimTeam && node.scope === 'team' && !isHover && !isFocus
+          const alpha = Math.min(1, (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1)) * (dimNode ? 0.3 : 1)
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
@@ -2074,7 +2124,7 @@ window.__ModuleLoader__.load({
 
       // 团队 / 个人切换（默认团队）。放在工具栏首位，加载态也保留，切换时控件不会闪没
       const scopeSwitch = h('div', { style: S.seg },
-        [['team', t('scopeTeam')], ['personal', t('scopePersonal')]].map(([value, label]) =>
+        [['team', t('scopeTeam')], ['personal', t('scopePersonal')], ['both', t('scopeBoth')]].map(([value, label]) =>
           h('button', {
             key: value,
             type: 'button',
@@ -2105,6 +2155,14 @@ window.__ModuleLoader__.load({
 
       const graph = model.graph
       const stats = graph.stats
+      const coverage = state.data?.coverage ?? null
+      // 双透镜：类型列表从当前数据里取（不猜有哪些 type）
+      const typeCounts = React.useMemo(() => {
+        const map = new Map()
+        for (const node of state.data?.nodes ?? []) map.set(node.type, (map.get(node.type) ?? 0) + 1)
+        return [...map.entries()].sort((a, b) => b[1] - a[1])
+      }, [state.data])
+      const filtersActive = hiddenTypes.size > 0 || dimTeam
       const focusNode = model.focused === null ? null : graph.nodes.find((node) => node.id === model.focused) ?? null
       const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
       const inFocus = model.focused !== null
@@ -2119,7 +2177,12 @@ window.__ModuleLoader__.load({
                 `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')} · ` +
                   `${graph.clusters.length} ${t('graphClusters')}` +
                   (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
-                  (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
+                  (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '') +
+                  // 截断诚实：别让人以为看到的就是全部（Zep 的 truncated 口径）
+                  (coverage !== null && coverage.truncated
+                    ? ` · ${t('graphShowing')} ${graph.nodes.length}/${coverage.totalCount}` +
+                      `（${coverage.reasons.map((reason) => (reason === 'sampled' ? t('graphTruncatedSample') : t('graphTruncatedLimit'))).join('、')}）`
+                    : '')),
           scopeSwitch,
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, ...S.muted } },
             h('span', {
@@ -2165,6 +2228,47 @@ window.__ModuleLoader__.load({
             title: t('graphExportHint'),
           }, t('graphExport')),
           h('button', { type: 'button', style: S.btn, onClick: resetCamera }, t('graphReset')),
+        ),
+        // 双透镜控制条：来源=调暗、类型=隐藏；有过滤器生效时给一个圆点提示
+        h('div', { style: { ...S.toolbar, gap: 6, flexWrap: 'wrap', borderTop: 'none', paddingTop: 0 } },
+          h('span', { style: { ...S.muted, fontSize: 12 } }, t('graphHideTypes')),
+          ...typeCounts.map(([type, count]) =>
+            h('button', {
+              key: type,
+              type: 'button',
+              title: `${type} · ${count}`,
+              style: hiddenTypes.has(type)
+                ? { ...S.btn, padding: '2px 8px', fontSize: 12, opacity: 0.55 }
+                : { ...S.btn, padding: '2px 8px', fontSize: 12, borderColor: 'rgba(120,200,255,.45)' },
+              onClick: () =>
+                setHiddenTypes((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(type)) next.delete(type)
+                  else next.add(type)
+                  return next
+                }),
+            }, `${type} ${count}`),
+          ),
+          scope === 'both'
+            ? h('button', {
+                type: 'button',
+                style: dimTeam ? { ...S.btn, borderColor: 'rgba(120,200,255,.6)', color: '#cfe8ff' } : S.btn,
+                onClick: () => setDimTeam((prev) => !prev),
+              }, t('graphDimTeam'))
+            : null,
+          filtersActive
+            ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, ...S.muted } },
+                h('span', { style: { width: 7, height: 7, borderRadius: 999, background: '#ffb454' } }),
+                t('graphFilterActive'),
+                h('button', {
+                  type: 'button',
+                  style: { ...S.btn, padding: '2px 8px', fontSize: 12 },
+                  onClick: () => {
+                    setHiddenTypes(new Set())
+                    setDimTeam(false)
+                  },
+                }, t('graphResetFilter')))
+            : null,
         ),
         h('div', {
           ref: wrapRef,

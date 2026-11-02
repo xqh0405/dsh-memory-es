@@ -572,6 +572,25 @@ const GRAPH_MAX_DEGREE = 10
  * 只读：把两个索引的 active 记忆与 `related` 拉回来，交给 buildGraph 裁成可画的图。
  * 取数按「更新时间倒序」多取一倍——孤立点会在裁剪里沉底，只取 limit 条会让图比预期稀。
  */
+/**
+ * 覆盖度：面板要能回答「你看到的这张图，是不是全部？」
+ *
+ * 三种口径分开说，别混成一句「已截断」：
+ *   · total   —— 索引里 active 的条数（track_total_hits 精确值）
+ *   · sampled —— 本次真正取到的候选数（受 fetchSize 限制）
+ *   · shown   —— 画出来的节点数（受节点上限 + 度数裁剪影响）
+ *
+ * 纯函数，单测钉住「哪一级截断」的口径（2026-11-02）。
+ */
+export function buildCoverage(total, sampled, shown) {
+  const totalCount = Object.values(total).reduce((sum, value) => sum + value, 0)
+  const sampledCount = Object.values(sampled).reduce((sum, value) => sum + value, 0)
+  const reasons = []
+  if (totalCount > sampledCount) reasons.push('sampled')
+  if (sampledCount > shown) reasons.push('limited')
+  return { total, sampled, shown, totalCount, sampledCount, truncated: reasons.length > 0, reasons }
+}
+
 async function handleGraph(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -594,12 +613,18 @@ async function handleGraph(ctx, res, url) {
   const fetchSize = Math.min(GRAPH_MAX_NODES * 2, Math.max(limit * 2, 200))
   const nodes = []
   const edges = []
+  // 两级截断都要如实报（Zep 的「truncated 诚实」）：
+  //   ① 取样上限 fetchSize —— 索引里 active 的比它多，说明「没取到」；
+  //   ② 节点上限 limit —— 取到了但画不下，说明「没画全」。
+  const sampled = {}
+  const total = {}
 
   for (const [scopeName, index] of targets) {
     let result
     try {
       result = await client.search(index, {
         size: fetchSize,
+        track_total_hits: true,
         sort: [{ updated_at: 'desc' }],
         query: { term: { status: 'active' } },
         _source: ['memory_id', 'summary', 'content', 'domain', 'memory_type', 'updated_at', 'status', 'related'],
@@ -607,6 +632,9 @@ async function handleGraph(ctx, res, url) {
     } catch (error) {
       return json(res, 503, { ok: false, error: String(error?.message ?? error) })
     }
+    sampled[scopeName] = result.hits?.hits?.length ?? 0
+    const totalHits = typeof result.hits?.total === 'number' ? result.hits.total : result.hits?.total?.value
+    total[scopeName] = Number.isFinite(totalHits) ? num(totalHits) : sampled[scopeName]
     // 面板的 search 返回 ES 原始响应（`{ hits: { hits: [...] } }`），不是数组
     for (const hit of result.hits?.hits ?? []) {
       const source = hit._source ?? {}
@@ -629,6 +657,7 @@ async function handleGraph(ctx, res, url) {
   }
 
   const graph = buildGraph(nodes, edges, { limit, maxDegree: GRAPH_MAX_DEGREE })
+
   return json(res, 200, {
     ok: true,
     value: {
@@ -636,6 +665,7 @@ async function handleGraph(ctx, res, url) {
       scope,
       limit,
       maxDegree: GRAPH_MAX_DEGREE,
+      coverage: buildCoverage(total, sampled, graph.nodes.length),
       ...graph,
     },
   })

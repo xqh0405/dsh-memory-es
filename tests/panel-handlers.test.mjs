@@ -728,6 +728,30 @@ test('写接口白名单：即便管理员也不能改 embedding.url / dims / in
   }
 })
 
+test('buildCoverage：三级口径分开说（2026-11-02 星图截断诚实）', async () => {
+  const { buildCoverage } = await import('../panel/index.js')
+
+  // 全取全画：不算截断
+  const full = buildCoverage({ personal: 5, team: 3 }, { personal: 5, team: 3 }, 8)
+  assert.equal(full.truncated, false)
+  assert.deepEqual(full.reasons, [])
+  assert.equal(full.totalCount, 8)
+
+  // 索引里有 20 条、只取到 8 条 → 「候选未取全」
+  const sampled = buildCoverage({ personal: 20 }, { personal: 8 }, 8)
+  assert.equal(sampled.truncated, true)
+  assert.deepEqual(sampled.reasons, ['sampled'])
+
+  // 取到 8 条、只画 5 个 → 「节点上限」
+  const limited = buildCoverage({ personal: 8 }, { personal: 8 }, 5)
+  assert.equal(limited.truncated, true)
+  assert.deepEqual(limited.reasons, ['limited'])
+
+  // 两级同时发生：两个原因都要报出来，不能只留一个
+  const both = buildCoverage({ personal: 50 }, { personal: 10 }, 4)
+  assert.deepEqual(both.reasons, ['sampled', 'limited'])
+})
+
 test('resolveStickerDir：~ 开头的按家目录展开，绝对路径原样', async () => {
   const { resolveStickerDir } = await import('../panel/index.js')
   const home = os.homedir()
