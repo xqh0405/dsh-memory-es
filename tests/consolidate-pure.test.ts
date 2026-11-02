@@ -212,6 +212,10 @@ describe('detectContradiction（§9.4 冲突判定）', () => {
     assert.equal(detectContradiction('禁止写 A', '不能写 A').contradiction, false)
     // 2026-11-02 审计：中文最常见的否定「不可以」不含「不能」，以前判不出来
     assert.equal(detectContradiction('可以删除旧索引', '不可以删除旧索引').contradiction, true)
+    // 2026-11-02 验收回归：单字 pos「要」会命中「要素」的组成部分，
+    // 再叠加否定前缀后把无关两条误判成冲突（宁可漏判「要X vs 不要X」，也不误报）
+    assert.equal(detectContradiction('要素：先备份再操作', '不要直接删除旧索引').contradiction, false)
+    assert.equal(detectContradiction('需要先开启鉴权', '不要开启鉴权').contradiction, true)
   })
 
   test('一边没表态 → 不判冲突（不能凭空造冲突）', () => {

@@ -240,7 +240,7 @@ function printHelp(): void {
 
 查看记忆（只读）:
   --ls                 列出记忆条目（个人库 + 团队库），最多 --limit 条
-  --scope <p|t|both>   只看 personal / team / 两者（默认 both）
+  --scope <personal|team|both>   只看个人 / 团队 / 两者（默认 both；不接受 p|t 短写）
   --domain <名字>      按 domain 过滤，可重复
   --status <状态>      默认 active；all=不过滤；也可传 superseded/expired/rejected
   --show-pending       团队库把 review_state=pending 的也列出来（默认不列，与检索口径一致）

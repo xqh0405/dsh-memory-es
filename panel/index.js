@@ -602,7 +602,10 @@ async function handleGraph(ctx, res, url) {
   const limit = Number.isFinite(rawLimit)
     ? Math.max(20, Math.min(GRAPH_MAX_NODES, Math.trunc(rawLimit)))
     : GRAPH_DEFAULT_NODES
-  const scope = str(url.searchParams.get('scope') ?? 'both')
+  // 未知 scope 不再「回显原值 + 按 both 查」（回显与实际不符，2026-11-02 验收发现）：
+  // 归一到合法值再回显，语义一致；前端只发 team/personal/both，归一不影响任何现有调用。
+  const rawScope = str(url.searchParams.get('scope') ?? 'both')
+  const scope = rawScope === 'team' || rawScope === 'personal' ? rawScope : 'both'
   const targets =
     scope === 'team'
       ? [['team', names.team]]

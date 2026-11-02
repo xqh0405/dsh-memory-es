@@ -1284,6 +1284,7 @@ window.__ModuleLoader__.load({
           z: Math.sin(theta) * r,
           size: 0.6 + hashUnit(`dust-s-${i}`) * 1.4,
           alpha: 0.12 + hashUnit(`dust-b-${i}`) * 0.38,
+          seed: hashUnit(`dust-intro-${i}`), // 开场逐个点亮用的稳定延迟
           tone: DUST_TONES[Math.floor(hashUnit(`dust-c-${i}`) * DUST_TONES.length) % DUST_TONES.length],
         })
       }
@@ -1651,6 +1652,24 @@ window.__ModuleLoader__.load({
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
     const GALAXY_SHOW_LABELS = true // 截图配图时临时改成 false，避免带出项目名
 
+    /**
+     * 开场时序（毫秒）：黑场 → 背景淡入 → 星点逐个点亮 → 镜头推近 → 最新一颗"叮"。
+     *
+     * 只在**本次页面生命周期内第一次**进星图跑一次。切换页签会卸载组件，
+     * 所以"看过没"这个标记必须放模块级——放 ref 里会随组件重挂而丢失、每次都重播。
+     */
+    const INTRO = {
+      black: 700, // 纯黑 → 背景淡出：宇宙还没亮起来
+      light: 1300, // 星点按各自哈希延迟，在这个窗口里一颗颗点亮（从 black 起铺开）
+      pushStart: 900, // 镜头开始推近
+      pushEnd: 2500, // 镜头推到位
+      flashStart: 2100,
+      flashEnd: 2700, // 最新一条记忆的过冲在这个窗口里
+      total: 2800,
+    }
+    const INTRO_PUSH = 1.55 // 起始视距 = 常态视距 × 1.55
+    let galaxyIntroSeen = false
+
     /** 光晕贴图缓存：每种颜色预渲染一张径向渐变，绘制时 drawImage 缩放 */
     const GLOW_SPRITES = new Map()
     function glowSprite(color) {
@@ -1727,6 +1746,69 @@ window.__ModuleLoader__.load({
       return { canvas, width, height }
     }
 
+    /**
+     * 星系核的呼吸光：暖白径向渐变，全生命周期只建一张。
+     *
+     * 每帧新建 createRadialGradient 会稳定产生垃圾，还会把 hub 那套渐变对象
+     * 变成每帧 N 个——贴图化之后只是 drawImage 缩放，代价可以忽略。
+     */
+    let CORE_SPRITE = null
+    function coreSprite() {
+      if (CORE_SPRITE !== null) return CORE_SPRITE
+      const size = 256
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const g = canvas.getContext('2d')
+      if (g !== null) {
+        const gradient = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
+        gradient.addColorStop(0, 'rgba(255,250,238,1)')
+        gradient.addColorStop(0.16, 'rgba(255,238,205,.6)')
+        gradient.addColorStop(0.44, 'rgba(255,214,158,.19)')
+        gradient.addColorStop(0.72, 'rgba(255,190,130,.05)')
+        gradient.addColorStop(1, 'rgba(255,180,120,0)')
+        g.fillStyle = gradient
+        g.fillRect(0, 0, size, size)
+      }
+      CORE_SPRITE = canvas
+      return canvas
+    }
+
+    /**
+     * 暗角：四条边向内压暗，把视线收在中心。
+     *
+     * 用四条线性渐变而不是一个圆形径向：宽画布上圆形暗角左右几乎压不到，
+     * 四角反而糊一大片。四条边能精确控制"越靠边越暗"，尺寸变了才重画。
+     */
+    function buildVignette(width, height, dpr) {
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(width * dpr))
+      canvas.height = Math.max(1, Math.round(height * dpr))
+      const ctx = canvas.getContext('2d')
+      if (ctx === null) return { canvas, width, height }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      const dark = 'rgba(2,4,10,.72)'
+      const clear = 'rgba(2,4,10,0)'
+      const bandX = Math.min(width * 0.3, 260)
+      const bandY = Math.min(height * 0.3, 200)
+      const bands = [
+        // [x0, y0, x1, y1, 矩形]
+        [0, 0, 0, bandY, [0, 0, width, bandY]], // 上
+        [0, height, 0, height - bandY, [0, height - bandY, width, bandY]], // 下
+        [0, 0, bandX, 0, [0, 0, bandX, height]], // 左
+        [width, 0, width - bandX, 0, [width - bandX, 0, bandX, height]], // 右
+      ]
+      for (const [x0, y0, x1, y1, rect] of bands) {
+        const gradient = ctx.createLinearGradient(x0, y0, x1, y1)
+        gradient.addColorStop(0, dark)
+        gradient.addColorStop(1, clear)
+        ctx.fillStyle = gradient
+        ctx.fillRect(rect[0], rect[1], rect[2], rect[3])
+      }
+      return { canvas, width, height }
+    }
+
     function GraphView({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       // 个人库与团队库分开画：默认团队，看个人要显式切换
@@ -1752,6 +1834,9 @@ window.__ModuleLoader__.load({
       const visibleRef = React.useRef(true)
       const rafRef = React.useRef(null)
       const loopRef = React.useRef(null)
+      // 开场状态放 ref、不放 state：它每帧都变，进 React 会变成每帧重渲染
+      const introRef = React.useRef({ active: false, done: false, startedAt: 0, flashId: null })
+      const vignetteRef = React.useRef(null)
 
       React.useEffect(() => {
         let alive = true
@@ -1863,6 +1948,20 @@ window.__ModuleLoader__.load({
         drawRef.current()
       }, [model])
 
+      /**
+       * 用户一动手，开场就立刻收尾。
+       *
+       * 别让 2.8 秒的动画挡在操作前面：想拖、想缩放、想点星的时候，
+       * 等它放完再响应会显得很迟钝。收尾是硬切（camDist 直接回到 cam.dist），
+       * 此刻注意力在鼠标上，跳变不明显。
+       */
+      const skipIntro = () => {
+        const intro = introRef.current
+        if (!intro.active) return
+        intro.active = false
+        intro.done = true
+      }
+
       /** 世界坐标 → 屏幕坐标。focal/dist 是透视，unit 让盘在任意画布上都差不多大。 */
       const pickAt = (mx, my) => {
         let best = null
@@ -1907,16 +2006,48 @@ window.__ModuleLoader__.load({
         ctx.globalAlpha = 1
         ctx.globalCompositeOperation = 'source-over'
 
+        // ── 开场动画（本次页面生命周期只播一次）────────────────────────────
+        // 黑场 → 背景淡入 → 星点按各自延迟逐个点亮 → 镜头推近 → 最新一颗"叮"
+        const intro = introRef.current
+        let introT = Infinity
+        if (intro.active) {
+          introT = performance.now() - intro.startedAt
+          if (introT >= INTRO.total) {
+            intro.active = false
+            intro.done = true
+          }
+        }
+        const introPlaying = intro.active
+        const clamp01 = (value) => Math.max(0, Math.min(1, value))
+        // 每颗星的点亮进度：用 id 哈希错开，才是一颗颗亮起来，而不是整体淡入
+        const litOf = (seed) => {
+          if (!introPlaying) return 1
+          return clamp01((introT - (INTRO.black + (seed ?? 0) * INTRO.light)) / 260)
+        }
+
         // 背景：尺寸不变就复用离屏缓存，不每帧重画渐变
         let backdrop = backdropRef.current
         if (backdrop === null || backdrop.width !== width || backdrop.height !== height) {
           backdrop = buildGalaxyBackdrop(width, height, dpr)
           backdropRef.current = backdrop
         }
+        if (introPlaying) {
+          // 黑场：先铺纯黑再让背景自己淡出来，否则半透明会透出上一帧的残影
+          ctx.fillStyle = '#000000'
+          ctx.fillRect(0, 0, width, height)
+          ctx.globalAlpha = clamp01(introT / INTRO.black)
+        }
         ctx.drawImage(backdrop.canvas, 0, 0, width, height)
+        ctx.globalAlpha = 1
 
         // 投影：三角函数一帧算一次。星尘有两千多个，逐点算 cos/sin 会明显掉帧。
         const cam = camRef.current
+        // 开场推镜：从远处缓缓推到常态视距。结束那一刻 ease 正好到 1，
+        // 与 cam.dist 连续，不会在动画结束的瞬间"啪"地跳一下。
+        const pushT = introPlaying ? clamp01((introT - INTRO.pushStart) / (INTRO.pushEnd - INTRO.pushStart)) : 1
+        const camDist = introPlaying
+          ? cam.dist * INTRO_PUSH + (cam.dist - cam.dist * INTRO_PUSH) * (1 - Math.pow(1 - pushT, 3))
+          : cam.dist
         const cy = Math.cos(cam.yaw)
         const sy = Math.sin(cam.yaw)
         const cp = Math.cos(cam.pitch)
@@ -1927,18 +2058,44 @@ window.__ModuleLoader__.load({
           const z1 = px * sy + pz * cy
           const y2 = py * cp - z1 * sp
           const z2 = py * sp + z1 * cp
-          const persp = cam.focal / Math.max(120, cam.focal + z2 + cam.dist * 0.35)
+          const persp = cam.focal / Math.max(120, cam.focal + z2 + camDist * 0.35)
           const k = persp * unit
           return { x: width / 2 + x1 * k, y: height / 2 + y2 * k, z: z2, k }
         }
+
+        // 星系核的呼吸：一涨一缩的暖光，把视线拉向中心。
+        // 双盘模式下每个盘心各有一颗、相位错开一点——像两颗各自跳着的心。
+        const pulsePhase = performance.now() * 0.0015
+        const coreImage = coreSprite()
+        const coreSpots = (model.layout.disks ?? []).map((disk, index) => ({
+          x: disk.x, z: disk.z, scale: disk.r, phase: index * 0.9,
+        }))
+        if (coreSpots.length === 0) coreSpots.push({ x: 0, z: 0, scale: GALAXY_R1, phase: 0 })
+        const coreWake = litOf(0.2)
+        ctx.globalCompositeOperation = 'lighter'
+        for (const spot of coreSpots) {
+          const center = project(spot.x, 0, spot.z)
+          const breathe = 0.5 + 0.5 * Math.sin(pulsePhase + spot.phase)
+          const coreSize = spot.scale * center.k * 1.9 * (0.9 + breathe * 0.16)
+          // 双盘时两个核会有一部分重叠，lighter 叠加容易过曝 → 单核 alpha 压到 0.07~0.14
+          ctx.globalAlpha = (0.07 + breathe * 0.07) * coreWake
+          ctx.drawImage(coreImage, center.x - coreSize / 2, center.y - coreSize / 2, coreSize, coreSize)
+        }
+        ctx.globalAlpha = 1
 
         // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆
         const dust = galaxyDust(3800)
         ctx.globalCompositeOperation = 'lighter'
         for (const mote of dust) {
           const projected = project(mote.x, mote.y, mote.z)
-          const size = Math.max(0.4, mote.size * projected.k * 1.7)
-          ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15)
+          // 景深：越远越糊。远处的星不画硬点，而是放大成一颗低 alpha 的光斑，
+          // 近处才是清楚的实心小点——这是"镜头感"里最有效的一步。
+          // 用 z/dist 而不是透视系数 k：k 里含画布尺寸的 unit，小画布上会把整盘误判成"远"。
+          const blur = clamp01((projected.z / camDist - 0.14) / 0.5)
+          // 星尘是 fillRect 画的实心小方块，不能像节点那样放大成光斑——放大会露出方角，
+          // 所以这里只让它"变大一点点 + 明显变淡"，糊的感觉交给 alpha 做
+          const size = Math.max(0.4, mote.size * projected.k * 1.7 * (1 + blur * 0.8))
+          ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15) * (1 - blur * 0.5) * litOf(mote.seed)
           ctx.fillStyle = mote.tone
           ctx.fillRect(projected.x, projected.y, size, size)
         }
@@ -1950,13 +2107,23 @@ window.__ModuleLoader__.load({
           const world = model.layout.positions.get(node.id)
           if (world === undefined) continue
           const projected = project(world.x, world.y, world.z)
-          points.push({ node, world, screen: projected, color: colorMap.get(node.id) ?? '#6b8cff' })
+          points.push({
+            node,
+            world,
+            screen: projected,
+            color: colorMap.get(node.id) ?? '#6b8cff',
+            seed: hashUnit(node.id + '#intro'), // 开场逐个点亮的稳定延迟
+          })
         }
         // 远的先画，近的盖上去
         points.sort((a, b) => b.screen.z - a.screen.z)
 
         const screenOf = new Map()
-        for (const item of points) screenOf.set(item.node.id, item.screen)
+        const seedOf = new Map()
+        for (const item of points) {
+          screenOf.set(item.node.id, item.screen)
+          seedOf.set(item.node.id, item.seed)
+        }
 
         // 旋臂薄雾：跟着相机转，所以每帧重画（只有两条曲线，很便宜）
         ctx.globalCompositeOperation = 'lighter'
@@ -1998,7 +2165,11 @@ window.__ModuleLoader__.load({
           if (!active && span > 170) continue
           const near = Math.max(0.2, Math.min(1, 1 - span / 220))
           const dimEdge = dimTeam && scopeOf.get(edge.source) === 'team' && scopeOf.get(edge.target) === 'team'
-          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near) * (dimEdge && !active ? 0.25 : 1)
+          // 边要等两端都亮起来才出现：一条连着还没亮的星的线，看着像凭空画上去的
+          const lit = introPlaying
+            ? Math.min(litOf(seedOf.get(edge.source) ?? 0), litOf(seedOf.get(edge.target) ?? 0))
+            : 1
+          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near) * (dimEdge && !active ? 0.25 : 1) * lit
           ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(96,130,190,1)'
           ctx.lineWidth = (active ? 1.7 : 0.45 + edge.weight * 0.45) * Math.min(1.6, (a.k + b.k) * 1.4)
           ctx.beginPath()
@@ -2022,11 +2193,27 @@ window.__ModuleLoader__.load({
           // 半径拉开层次：度数取 0.75 次幂后差距更明显，再叠 id 哈希（0.72~1.32），
           // 少数大亮星 + 大量小点才像星图，全都一样大就成撒豆子了
           const sizeJitter = 0.8 + hashUnit(node.id + '#sz') * 0.5
-          const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
+          // 景深：远处的星画小一圈，把"体量"让给放大的柔光，近处才是一颗硬点
+          const blur = clamp01((screen.z / camDist - 0.14) / 0.5)
+          const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth
+            * (isHover || isFocus ? 1.3 : 1) * (1 - blur * 0.42)
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
           const dimNode = dimTeam && node.scope === 'team' && !isHover && !isFocus
-          const alpha = Math.min(1, (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1)) * (dimNode ? 0.3 : 1)
+          // 开场：最新那条记忆在最后一拍单独亮起来（过冲一下再回落），像"叮"的一声
+          let flare = 0
+          let flareT = 0
+          if (introPlaying && node.id === intro.flashId) {
+            const ft = (introT - INTRO.flashStart) / (INTRO.flashEnd - INTRO.flashStart)
+            if (ft > 0 && ft < 1) {
+              flareT = ft
+              flare = Math.pow(Math.sin(ft * Math.PI), 0.65)
+            }
+          }
+          const alpha = Math.min(1,
+            (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1)
+              * (1 + flare * 0.9),
+          ) * (dimNode ? 0.3 : 1) * litOf(item.seed)
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
@@ -2034,7 +2221,9 @@ window.__ModuleLoader__.load({
           // 会变成一颗颗"圆盘"。贴图边缘是真渐变到 0，叠多少层都不会有轮廓。
           const sprite = glowSprite(item.color)
           const glowSize = radius * (isHover || isFocus ? 9.5 : node.degree >= 8 ? 7 : 5.2)
-          ctx.globalAlpha = Math.min(1, alpha * (isHover || isFocus ? 1.05 : 0.72))
+            * (1 + blur * 2.4) * (1 + flare * 1.8)
+          // 远处那颗的柔光更淡更散：光斑本来就该比硬点暗，不然远星反而更抢眼
+          ctx.globalAlpha = Math.min(1, alpha * (isHover || isFocus ? 1.05 : 0.72) * (1 - blur * 0.3))
           ctx.drawImage(sprite, screen.x - glowSize / 2, screen.y - glowSize / 2, glowSize, glowSize)
 
           ctx.globalAlpha = alpha
@@ -2060,10 +2249,31 @@ window.__ModuleLoader__.load({
             ctx.arc(screen.x, screen.y, radius + 3.5, 0, Math.PI * 2)
             ctx.stroke()
           }
+          // "叮"的外圈：一圈白光由内向外扩散、同时淡出。
+          // alpha 跟 flare 同相（sin 曲线）而不是 (1-flare)——后者会在星最亮的那一刻把圈灭掉。
+          if (flare > 0) {
+            ctx.globalAlpha = Math.sin(flareT * Math.PI) * 0.75
+            ctx.strokeStyle = 'rgba(255,255,255,1)'
+            ctx.lineWidth = 1.6
+            ctx.beginPath()
+            ctx.arc(screen.x, screen.y, radius + 5 + flareT * 34, 0, Math.PI * 2)
+            ctx.stroke()
+          }
 
           // 标签候选：悬停 / 选中 / 度数高的前几颗（截图时临时关掉，避免把内部项目名带进配图）
           if (GALAXY_SHOW_LABELS && (isHover || isFocus || node.degree >= 6)) labels.push({ item, radius, score: node.degree + fresh * 2 })
         }
+
+        // 暗角：四周压暗，视线收在中心。
+        // 放在标签之前——标签是要读的，不能被一起压暗。
+        ctx.globalCompositeOperation = 'source-over'
+        ctx.globalAlpha = 1
+        let vignette = vignetteRef.current
+        if (vignette === null || vignette.width !== width || vignette.height !== height) {
+          vignette = buildVignette(width, height, dpr)
+          vignetteRef.current = vignette
+        }
+        ctx.drawImage(vignette.canvas, 0, 0, width, height)
 
         // 标签：白字 + 深底衬，按分数取前 10 个并做碰撞剔除，否则会糊成一团
         ctx.globalCompositeOperation = 'source-over'
@@ -2129,7 +2339,8 @@ window.__ModuleLoader__.load({
           if (!visibleRef.current) return
           if (orbitRef.current && dragRef.current === null) camRef.current.yaw += GALAXY_ORBIT_SPEED
           drawRef.current()
-          if (orbitRef.current) rafRef.current = window.requestAnimationFrame(tick)
+          // 开场动画也要持续跑帧：自转关掉时它照样得把推镜和点亮画完
+          if (orbitRef.current || introRef.current.active) rafRef.current = window.requestAnimationFrame(tick)
         }
         loopRef.current = () => {
           if (rafRef.current === null && visibleRef.current) rafRef.current = window.requestAnimationFrame(tick)
@@ -2147,6 +2358,31 @@ window.__ModuleLoader__.load({
           }
         }
       }, [orbit])
+
+      // 开场：数据第一次到手时启动。
+      // 模块级的 galaxyIntroSeen 保证整个页面只播一次——切走页签会卸载组件，
+      // 靠 ref 记"看过没"会跟着重挂丢失，每次回来都重头放一遍。
+      React.useEffect(() => {
+        if (model === null || galaxyIntroSeen) return
+        const intro = introRef.current
+        if (intro.active) return
+        let flashId = null
+        let newest = -Infinity
+        for (const node of model.graph.nodes) {
+          const at = node.updatedAt === '' ? -Infinity : Date.parse(node.updatedAt)
+          if (at > newest) {
+            newest = at
+            flashId = node.id
+          }
+        }
+        galaxyIntroSeen = true
+        intro.active = true
+        intro.done = false
+        intro.startedAt = performance.now()
+        intro.flashId = flashId
+        loopRef.current?.()
+        drawRef.current()
+      }, [model])
 
       // 任何依赖变化（数据 / 尺寸 / 悬停 / 聚焦）都重画一帧；自转时循环会自己画
       React.useEffect(() => {
@@ -2197,6 +2433,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       const resetCamera = () => {
+        skipIntro()
         const dual = (model?.layout?.disks?.length ?? 0) > 0
         camRef.current = { ...GALAXY_CAM, dist: focusId === null ? GALAXY_CAM.dist * (dual ? 1.7 : 1) : 880 }
         drawRef.current()
@@ -2211,6 +2448,7 @@ window.__ModuleLoader__.load({
             style: S.segBtn(scope === value),
             onClick: () => {
               if (scope === value) return
+              skipIntro()
               setScope(value)
               setFocusId(null)
               setHover(null)
@@ -2368,6 +2606,7 @@ window.__ModuleLoader__.load({
           onMouseDown: (event) => {
             if (event.button !== 0) return
             event.preventDefault()
+            skipIntro()
             dragRef.current = {
               startX: event.clientX, startY: event.clientY,
               lastX: event.clientX, lastY: event.clientY,
@@ -2393,6 +2632,7 @@ window.__ModuleLoader__.load({
           },
           onWheel: (event) => {
             event.preventDefault()
+            skipIntro()
             const cam = camRef.current
             const next = cam.dist * (event.deltaY > 0 ? 1.12 : 0.89)
             cam.dist = Math.max(620, Math.min(5200, next))

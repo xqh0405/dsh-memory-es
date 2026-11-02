@@ -15,7 +15,7 @@ import { promoteMemory } from '../src/memory/promote.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { updateStatus } from '../src/memory/status.ts'
 import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
-import { isLoopbackUrl, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__status_it'
 const OLD_CONTENT = '状态集成测试：旧版本记忆 ZZZ-OLD-MARKER 这条要被新版本取代。'
@@ -25,7 +25,7 @@ const PROMOTE_CONTENT = '状态集成测试：这条值得进团队库 ZZZ-PROMO
 const env = loadEsTestEnv()
 
 if (!env) {
-  test('memory_update_status 集成测试', { skip: '未找到 deploy/es/.env（先跑 scripts/es-up.sh 与 scripts/init-security.sh）' }, () => {})
+  test('memory_update_status 集成测试', { skip: esSkipReason() }, () => {})
 } else if (!isLoopbackUrl(env.url)) {
   test('memory_update_status 集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
 } else {
