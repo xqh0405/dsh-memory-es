@@ -42,18 +42,22 @@ function assistantLine(time: number, text: string): string {
 }
 
 describe('dayRange', () => {
-  test('左闭右开，且是本地时区的 24 小时', () => {
+  // ⚠️ 这两条曾经按「进程本地时区」断言，在 Asia/Shanghai 下碰巧成立、
+  // 在 CI（ubuntu 跑 UTC）下必红。dayRange 从 8.18 起算的是**配置时区**
+  // （默认 Asia/Shanghai），所以断言必须写成绝对 UTC 时刻。
+  test('左闭右开，且是北京时间的 24 小时（与容器 TZ 无关）', () => {
     const range = dayRange('2026-10-31')
-    assert.equal(new Date(range.start).getDate(), 31)
-    assert.equal(new Date(range.start).getHours(), 0)
-    assert.equal(new Date(range.end).getDate(), 1)
+    // 北京 2026-10-31 00:00 = UTC 2026-10-30T16:00Z
+    assert.equal(range.start, Date.parse('2026-10-30T16:00:00Z'))
+    assert.equal(range.end, Date.parse('2026-10-31T16:00:00Z'))
     assert.equal(range.end - range.start, 24 * 3600 * 1000)
   })
 
-  test('dateKey 用本地日期，不会因 UTC 串天', () => {
-    // 本地 00:30（UTC 还是前一天）：toISOString 会给出前一天，dateKey 必须给当天
-    const at = new Date(2026, 9, 31, 0, 30, 0)
+  test('dateKey 按配置时区算日期，不会因容器 UTC 串天', () => {
+    // UTC 2026-10-30T16:30Z = 北京 2026-10-31 00:30：toISOString 给前一天，dateKey 必须给当天
+    const at = new Date('2026-10-30T16:30:00Z')
     assert.equal(dateKey(at), '2026-10-31')
+    assert.equal(dateKey(at, 'UTC'), '2026-10-30')
   })
 })
 
