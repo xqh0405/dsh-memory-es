@@ -1199,9 +1199,10 @@ window.__ModuleLoader__.load({
     // ── 星图（阶段 8 第六个页签）──────────────────────────────────────────
 
     /** 领域 → 颜色：同一个领域同一个色，图例与节点用它认亲。 */
+    // 星等色：抄的是参考图那种亮色（青绿/暖金/蓝/紫/粉/橙），不是暗色图表色
     const GRAPH_PALETTE = [
-      '#6b8cff', '#4c9a6a', '#c98a3f', '#b8623f', '#8e6bd8',
-      '#3f9ba8', '#c4508a', '#7a8f3f', '#5b7c99', '#a0663f',
+      '#96beff', '#82e6c8', '#ffd28c', '#c0a5ff',
+      '#ffa0d2', '#ffcd78', '#7fd8e0', '#ffb08a',
     ]
     function colorOfDomain(domain, clusters) {
       const index = clusters.findIndex((cluster) => cluster.domain === domain)
@@ -1234,6 +1235,7 @@ window.__ModuleLoader__.load({
      * 参考图之所以"协调"，很大原因是它有几万条消息铺成的小点当底噪；
      * 我们只有 268 个节点，光靠节点铺不出密度层次，就补一层确定性的星尘。
      */
+    const DUST_TONES = ['rgba(200,220,255,1)', 'rgba(160,230,220,1)', 'rgba(255,224,190,1)', 'rgba(212,192,255,1)']
     const GALAXY_DUST = []
     function galaxyDust(count) {
       if (GALAXY_DUST.length === count) return GALAXY_DUST
@@ -1252,7 +1254,7 @@ window.__ModuleLoader__.load({
           z: Math.sin(theta) * r,
           size: 0.6 + hashUnit(`dust-s-${i}`) * 1.4,
           alpha: 0.12 + hashUnit(`dust-b-${i}`) * 0.38,
-          warm: hashUnit(`dust-w-${i}`) > 0.84,
+          tone: DUST_TONES[Math.floor(hashUnit(`dust-c-${i}`) * DUST_TONES.length) % DUST_TONES.length],
         })
       }
       return GALAXY_DUST
@@ -1783,13 +1785,13 @@ window.__ModuleLoader__.load({
         }
 
         // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆
-        const dust = galaxyDust(2600)
+        const dust = galaxyDust(3200)
         ctx.globalCompositeOperation = 'lighter'
         for (const mote of dust) {
           const projected = project(mote.x, mote.y, mote.z)
           const size = Math.max(0.4, mote.size * projected.k * 1.7)
           ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15)
-          ctx.fillStyle = mote.warm ? 'rgba(255,226,192,1)' : 'rgba(176,202,255,1)'
+          ctx.fillStyle = mote.tone
           ctx.fillRect(projected.x, projected.y, size, size)
         }
 
@@ -1868,15 +1870,22 @@ window.__ModuleLoader__.load({
           const isFocus = model.focused === node.id
           // 半径拉开层次：度数取 0.75 次幂后差距更明显，再叠 id 哈希（0.72~1.32），
           // 少数大亮星 + 大量小点才像星图，全都一样大就成撒豆子了
-          const sizeJitter = 0.72 + hashUnit(node.id + '#sz') * 0.6
-          const radius = (1.6 + Math.pow(Math.min(8, node.degree), 0.75) * 1.3) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
+          const sizeJitter = 0.8 + hashUnit(node.id + '#sz') * 0.5
+          const radius = (1.5 + Math.pow(Math.min(8, node.degree), 0.7) * 1.05) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
-          const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
+          const alpha = Math.min(1, (0.34 + fresh * 0.64) * (0.55 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
-          // 光晕只给"重要"的星：hub、悬停、选中。全给会糊成一片亮斑。
+          // 柔光：参考图里每颗星外面都有一层淡淡的光，不只是 hub
+          ctx.globalAlpha = alpha * 0.2
+          ctx.fillStyle = item.color
+          ctx.beginPath()
+          ctx.arc(screen.x, screen.y, radius * 2.35, 0, Math.PI * 2)
+          ctx.fill()
+
+          // 强光晕只给"重要"的星：hub、悬停、选中
           // 光晕与本体都走 source-over：加色叠加几层后颜色会冲成白，领域就认不出来了。
           const glow = isHover || isFocus || node.degree >= 8
           if (glow) {
@@ -1890,10 +1899,8 @@ window.__ModuleLoader__.load({
             ctx.fill()
           }
 
-          // 少量暖色星：整盘全是蓝的会显得单调，掺一点淡金当"异类恒星"
-          const warmStar = hashUnit(node.id + '#hot') > 0.9
-          ctx.globalAlpha = alpha * (warmStar ? 1.15 : 1)
-          ctx.fillStyle = warmStar ? '#ffe6bf' : item.color
+          ctx.globalAlpha = alpha
+          ctx.fillStyle = item.color
           ctx.beginPath()
           ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
           ctx.fill()
