@@ -1487,6 +1487,8 @@ window.__ModuleLoader__.load({
      */
     function GraphView({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      // 个人库与团队库分开画：默认团队，看个人要显式切换（混画会让两个库的节点互相抢边）
+      const [scope, setScope] = React.useState('team')
       const [hover, setHover] = React.useState(null)
       const [view, setView] = React.useState({ k: 1, x: 0, y: 0 })
       const wrapRef = React.useRef(null)
@@ -1496,7 +1498,9 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
-        apiGet('/graph', { limit: 300 })
+        // 切范围时先回到加载态：旧图留在画布上会冒充新范围
+        setState({ loading: true, error: '', data: null })
+        apiGet('/graph', { limit: 300, scope })
           .then((data) => {
             if (alive) setState({ loading: false, error: '', data })
           })
@@ -1506,7 +1510,7 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
         }
-      }, [])
+      }, [scope])
 
       // 尺寸跟随容器（窗口变了图要跟着重排，否则会被裁掉）
       React.useEffect(() => {
@@ -1661,16 +1665,46 @@ window.__ModuleLoader__.load({
         return best
       }
 
-      if (state.loading) return h('p', { style: S.muted }, t('loading'))
-      if (state.error) return h('p', { style: S.err }, `${t('error')}: ${state.error}`)
-      if (model === null) return h('p', { style: S.muted }, t('empty'))
+      // 团队 / 个人切换（默认团队）。放在工具栏首位，加载态也保留，切换时控件不会闪没
+      const scopeSwitch = h('div', { style: S.seg },
+        [['team', t('scopeTeam')], ['personal', t('scopePersonal')]].map(([value, label]) =>
+          h('button', {
+            key: value,
+            type: 'button',
+            style: S.segBtn(scope === value),
+            onClick: () => {
+              if (scope === value) return
+              setScope(value)
+              // 聚焦点属于上一个库，切过去必然对不上，顺手清掉
+              setFocusId(null)
+              setHover(null)
+              setView({ k: 1, x: 0, y: 0 })
+            },
+          }, label),
+        ),
+      )
+
+      if (state.loading) {
+        return h('div', null, h('div', { style: S.toolbar }, scopeSwitch),
+          h('p', { style: S.muted }, t('loading')))
+      }
+      if (state.error) {
+        return h('div', null, h('div', { style: S.toolbar }, scopeSwitch),
+          h('p', { style: S.err }, `${t('error')}: ${state.error}`))
+      }
+      if (model === null) {
+        return h('div', null, h('div', { style: S.toolbar }, scopeSwitch),
+          h('p', { style: S.muted }, t('empty')))
+      }
       const graph = model.graph
       const stats = graph.stats
       const focusNode = model.focused === null ? null : graph.nodes.find((node) => node.id === model.focused) ?? null
       const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
       const inFocus = model.focused !== null
 
-      return h('div', null,
+      // 画布跟着视口走：宽度铺满内容区，高度吃掉工具栏以下的剩余空间
+      // （固定 560 在宽屏上右边会空一大块，节点挤在中间反而看不清）
+      return h('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100dvh - 180px)', minHeight: 420 } },
         h('div', { style: S.toolbar },
           inFocus
             ? h('span', { style: { ...S.muted, fontSize: 12 } },
@@ -1681,12 +1715,16 @@ window.__ModuleLoader__.load({
                   `${graph.clusters.length} ${t('graphClusters')}` +
                   (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
                   (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '')),
-          // 图例：实心=个人，带描边=团队
-          h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 10, fontSize: 12, ...S.muted } },
-            h('span', { style: { width: 8, height: 8, borderRadius: 999, background: '#6b8cff' } }),
-            t('scopePersonal'),
-            h('span', { style: { width: 8, height: 8, borderRadius: 999, background: '#6b8cff', border: '1px solid rgba(255,255,255,.7)', marginLeft: 4 } }),
-            t('scopeTeam')),
+          scopeSwitch,
+          // 图例只说明当前范围：团队带描边、个人实心（两库不再同图混画）
+          h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, ...S.muted } },
+            h('span', {
+              style: {
+                width: 8, height: 8, borderRadius: 999, background: '#6b8cff',
+                ...(scope === 'team' ? { border: '1px solid rgba(255,255,255,.7)' } : {}),
+              },
+            }),
+            scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
           h('span', { style: { flex: 1 } }),
           h('span', { style: S.muted, fontSize: 12 }, inFocus ? t('graphFocusHint') : t('graphGlobalHint')),
           inFocus
@@ -1726,7 +1764,11 @@ window.__ModuleLoader__.load({
         ),
         h('div', {
           ref: wrapRef,
-          style: { ...S.card, padding: 0, overflow: 'hidden', height: 560, position: 'relative', cursor: hover === null ? 'default' : 'pointer' },
+          style: {
+            ...S.card, padding: 0, overflow: 'hidden', position: 'relative',
+            width: '100%', flex: 1, minHeight: 0,
+            cursor: hover === null ? 'default' : 'pointer',
+          },
           onMouseMove: (event) => {
             const rect = event.currentTarget.getBoundingClientRect()
             const hit = hitTestAt(event.clientX - rect.left, event.clientY - rect.top)
