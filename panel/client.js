@@ -145,6 +145,8 @@ window.__ModuleLoader__.load({
       fbDone: '已记录',
       fbCounts: '反馈：👍 {up} / 👎 {down}',
       fbEmpty: '还没有反馈',
+      versionsTitle: '取代链',
+      versionsCurrent: '当前',
       slUsedInEmpty: '还没有检索命中过这条',
       slStatusMiss: '没答上',
       slStatusMixed: '有漏答',
@@ -441,6 +443,8 @@ window.__ModuleLoader__.load({
       fbDone: 'Recorded',
       fbCounts: 'Feedback: 👍 {up} / 👎 {down}',
       fbEmpty: 'No feedback yet',
+      versionsTitle: 'Version chain',
+      versionsCurrent: 'current',
       slUsedInEmpty: 'No search has matched this memory yet',
       slStatusMiss: 'never',
       slStatusMixed: 'missed some',
@@ -3586,6 +3590,8 @@ window.__ModuleLoader__.load({
       const [usedIn, setUsedIn] = React.useState(null)
       // 阶段 11 批 B：👍/👎 结果提示（成功/失败都显示，避免「点了没反应」）
       const [feedbackResult, setFeedbackResult] = React.useState(null)
+      // 2026-11-02：取代链（沿 supersedes / superseded_by 双向走）。团队条目没有这套字段，不请求。
+      const [versions, setVersions] = React.useState(null)
       const [delReason, setDelReason] = React.useState('')
       const [delBusy, setDelBusy] = React.useState(false)
       const [delResult, setDelResult] = React.useState(null)
@@ -3593,6 +3599,17 @@ window.__ModuleLoader__.load({
       const [targetUser, setTargetUser] = React.useState('')
       const [users, setUsers] = React.useState([])
       const size = 20
+
+      // 取代链：选中条目变化时按需拉（不随列表一起取，避免 N+1）
+      React.useEffect(() => {
+        setVersions(null)
+        if (selected === null || selected.scope === 'team') return undefined
+        let alive = true
+        apiGet('/memories/versions', { memory_id: selected.id })
+          .then((value) => { if (alive) setVersions(Array.isArray(value.rows) ? value.rows : []) })
+          .catch(() => { if (alive) setVersions([]) })
+        return () => { alive = false }
+      }, [selected === null ? '' : selected.id])
 
       // 过滤器候选值来自 /facets（后端聚合，前端不猜有哪些 domain）
       React.useEffect(() => {
@@ -3997,6 +4014,26 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
+              versions !== null && versions.length > 1
+                ? h('div', { style: { marginTop: 12 } },
+                    h('div', { style: { ...S.muted, marginBottom: 4 } }, t('versionsTitle')),
+                    versions.map((row) =>
+                      h('div', {
+                        key: row.memoryId,
+                        style: { display: 'flex', gap: 8, alignItems: 'baseline', ...S.rowTime },
+                      },
+                        h('span', { style: { ...S.mono, minWidth: 44 } },
+                          row.offset === 0 ? t('versionsCurrent') : `${row.offset > 0 ? '→' : '←'}${Math.abs(row.offset)}`),
+                        h('span', { style: { ...S.mono, minWidth: 72 } }, stateLabel(row.status, t)),
+                        h('span', { style: { ...S.mono, flex: 'none' } }, shortTime(row.createdAt)),
+                        h('span', {
+                          style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                          title: row.content,
+                        }, row.content),
+                      ),
+                    ),
+                  )
+                : null,
               restoreResult
                 ? h('div', {
                     style: {

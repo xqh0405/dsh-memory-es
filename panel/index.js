@@ -1908,6 +1908,12 @@ async function handleIdentityActive(ctx, res, url) {
 }
 
 /** 版本链（阶段 7.4）：沿 supersedes 向旧、superseded_by 向新，最多 10 跳 */
+/**
+ * 取代链：沿 `supersedes` / `superseded_by` 双向走，返回「前一版…当前…被取代为」。
+ *
+ * 名字带 identity 是历史（最初只给自述页用），实现与身份无关：
+ * 浏览页的详情抽屉复用同一份逻辑（路由 `/memories/versions`）。
+ */
 async function handleIdentityVersions(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -2785,7 +2791,11 @@ async function handle(ctx, req, res) {
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
     if (path === '/identity/active' && req.method === 'GET') return await handleIdentityActive(ctx, res, url)
-    if (path === '/identity/versions' && req.method === 'GET') return await handleIdentityVersions(ctx, res, url)
+    // `/identity/versions` 是历史路径（自述页在用）；实现本身只按 memory_id 走 supersedes 链，
+    // 与「身份」无关，所以对浏览页也开一个通用路径（2026-11-02 推广到所有记忆）。
+    if ((path === '/identity/versions' || path === '/memories/versions') && req.method === 'GET') {
+      return await handleIdentityVersions(ctx, res, url)
+    }
     if (path === '/config') return await handleConfigGet(ctx, res)
     return json(res, 404, { ok: false, error: `未知接口 ${path}` })
   } catch (error) {
