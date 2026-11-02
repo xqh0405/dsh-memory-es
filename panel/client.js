@@ -1563,7 +1563,7 @@ window.__ModuleLoader__.load({
      * 做法：世界坐标 3D → yaw/pitch 旋转 → 透视 → 屏幕。
      * 不引 three.js：300 个点和 600 条边用不着渲染管线，手写这套更轻。
      */
-    const GALAXY_CAM = { yaw: -0.55, pitch: -1.05, dist: 1040, focal: 1600 }
+    const GALAXY_CAM = { yaw: -0.62, pitch: -0.78, dist: 940, focal: 1600 }
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
 
     /** 光晕贴图缓存：每种颜色预渲染一张径向渐变，绘制时 drawImage 缩放 */
