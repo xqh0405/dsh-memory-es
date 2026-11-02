@@ -2395,9 +2395,6 @@ async function handleConfigWrite(ctx, res, req) {
     if (change.key === 'es.requestTimeoutMs' && (value < 500 || value > 60000)) {
       return json(res, 400, { ok: false, error: '请求超时应在 500~60000 毫秒之间' })
     }
-    if (change.key === 'embedding.dims' && (!Number.isInteger(value) || value <= 0)) {
-      return json(res, 400, { ok: false, error: '向量维度必须是正整数' })
-    }
     if (change.key === 'journal.at' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))) {
       return json(res, 400, { ok: false, error: `回顾时间要写成 HH:MM（00:00~23:59），现在是「${value}」` })
     }

@@ -42,6 +42,11 @@ export function polarityOf(text: string, pair: readonly [string, string]): Polar
   const lower = text.toLowerCase()
   const [pos, neg] = [pair[0].toLowerCase(), pair[1].toLowerCase()]
   if (lower.includes(neg)) return 'neg'
+  // 中文最常见的否定是「不 + 肯定词」：`不可以` 不含 `不能`，只看 neg 会把它判成 pos，
+  // 于是「可以删除旧索引」与「不可以删除旧索引」双双判 pos、不冲突（2026-11-02 审计实测）。
+  for (const prefix of ['不', '未', '禁', '勿', '别']) {
+    if (lower.includes(`${prefix}${pos}`)) return 'neg'
+  }
   if (lower.includes(pos)) return 'pos'
   return null
 }

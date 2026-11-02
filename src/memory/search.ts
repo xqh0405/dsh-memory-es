@@ -577,10 +577,41 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     deps.confidence,
   )
 
+  /**
+   * 逐库置信：abstain 只能因为「**所有**被检索的库都低置信」而拒答。
+   *
+   * 2026-11-02 审计实测的坑：scope=both 时只按个人库判，个人库两条窄候选就把
+   * 团队库里那条 knn 0.95 / bm25 40 的强命中一起吞掉了。
+   */
+  const confidenceOf = (target: Scope): ReturnType<typeof judgeConfidence> => {
+    if (target === primaryScope) return verdict
+    const scores = settled
+      .filter((item) => item.route === 'knn' && item.scope === target)
+      .flatMap((item) => item.hits.map((hit) => hit.score))
+      .sort((a, b) => b - a)
+    const bm25 = settled
+      .filter((item) => item.route === 'bm25' && item.scope === target)
+      .flatMap((item) => item.hits.map((hit) => hit.score))
+      .sort((a, b) => b - a)[0] ?? 0
+    return judgeConfidence({ top1: scores[0] ?? null, top2: scores[1] ?? null, bm25Top1: bm25 }, deps.confidence)
+  }
+  const searchedScopes: Scope[] = scope === 'both' ? ['personal', 'team'] : [scope]
+  const allScopesLow = searchedScopes.every((target) => confidenceOf(target).low)
+
   // 召回质量开关（默认关）：判成低置信就拒答，而不是「照给 5 条 + 一句提示」。
   // 2026-11-02 A/B：43 条契约里 should 失败 10 → 3（7 条噪声全修，零误伤）。
   // 仍记 search_log（note=no_match），面板的缺口清单会如实把它算成「问过但没答上」。
-  if (verdict.low && deps.retrieval.abstainOnLowConfidence === true) {
+  if (verdict.low && allScopesLow && deps.retrieval.abstainOnLowConfidence === true) {
+    // 三条出口（no_match / low_confidence / ok）都要有结构化日志，否则排查时少一条线索
+    log({
+      tool: 'search',
+      user: deps.userId,
+      event: 'abstained',
+      hits: 0,
+      degraded,
+      margin,
+      scopes: searchedScopes,
+    })
     record('no_match', [], margin === undefined ? {} : { margin })
     return {
       hits: [],

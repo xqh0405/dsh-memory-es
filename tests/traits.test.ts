@@ -190,6 +190,28 @@ describe('writeTraitCandidate：幂等', () => {
   })
 })
 
+describe('output schema：additionalProperties:false 下漏声明就是整条非法', () => {
+  // 2026-11-02 审计发现：runTraitsJob 返回新增的 blocked，但 schema 没声明 →
+  // memory_traits 真跑一次就会 `value.blocked is not a declared property`（与 asOf 同型）。
+  test('blocked 必须被 schema 声明', async () => {
+    const { defineTraitsTool } = await import('../src/memory/traits.ts')
+    const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
+    const tool = defineTraitsTool({} as never)
+    const value = {
+      sources: 1,
+      candidates: 1,
+      written: 0,
+      duplicates: 0,
+      quotaSkipped: 0,
+      concreteSkipped: 0,
+      blocked: 1,
+      skipped: '',
+      text: 'x',
+    }
+    assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [])
+  })
+})
+
 describe('runTraitsJob：编排与降级', () => {
   test('素材不足两条时跳过，不调用模型', async () => {
     const { runTraitsJob } = await import('../src/memory/traits.ts')

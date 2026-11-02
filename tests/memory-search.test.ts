@@ -762,6 +762,49 @@ describe('召回质量开关（2026-11-02，默认关）', () => {
     }
   })
 
+  // 2026-11-02 审计：scope=both 时只按个人库判置信，个人库两条窄候选会把团队库的强命中一起吞掉
+  test('abstain 不会因为个人库噪声吞掉团队库的强命中（scope=both）', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('n1', 11), hit('n2', 9)], knn: [hit('n1', 0.72), hit('n2', 0.711)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 40)], knn: [hit('t1', 0.95)] },
+    })
+    try {
+      const result = await searchMemories(
+        h.deps({ retrieval: { ...retrieval, abstainOnLowConfidence: true } }),
+        { query: '哪些告警归我发', scope: 'both' },
+      )
+      assert.ok(result.hits.length > 0, '团队库有强命中就不该拒答')
+      assert.ok(
+        result.hits.some((hit) => hit.source === 'team'),
+        `应保留团队命中：${JSON.stringify(result.hits.map((x) => x.source))}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('abstain 拒答时也要写 search_log（面板缺口清单靠它）', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: { bm25: [hit('n1', 11), hit('n2', 9)], knn: [hit('n1', 0.72), hit('n2', 0.711)] },
+    })
+    const docs: Array<Record<string, unknown>> = []
+    try {
+      await searchMemories(
+        h.deps({
+          retrieval: { ...retrieval, abstainOnLowConfidence: true },
+          searchLogIndex: 'search_log_xqh',
+          recorder: { index: async (_i: string, doc: Record<string, unknown>) => { docs.push(doc); return {} as never } },
+        } as never),
+        { query: 'PostgreSQL autovacuum 阈值', scope: 'personal' },
+      )
+      assert.equal(docs.length, 1, `应写一条埋点，实际 ${docs.length}`)
+      assert.equal(docs[0]?.note, 'no_match')
+      assert.equal(docs[0]?.hits, 0)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
   test('synonyms 为空表时不改写（默认行为不变）', async () => {
     const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('x1', 20)], knn: [] } })
     const embedded: string[] = []

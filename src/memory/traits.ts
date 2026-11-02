@@ -615,6 +615,9 @@ export function defineTraitsTool(deps: TraitsToolDeps) {
           duplicates: { type: 'number', required: true },
           quotaSkipped: { type: 'number', required: true },
           concreteSkipped: { type: 'number', required: true },
+          // 命中写入准入而未落库的条数（2026-11-02 新增；schema 是 additionalProperties:false，
+          // 漏声明就会让 memory_traits 真跑时整条输出被判非法 —— 与 asOf 那个 bug 同型）
+          blocked: { type: 'number' },
           // 只在「配额用完」时返回：output schema 是 additionalProperties:false，
           // 漏声明一个字段整个工具就报错（2026-11-01 实测）
           maxPerDay: { type: 'number' },

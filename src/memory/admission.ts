@@ -85,7 +85,10 @@ const ZERO_WIDTH = /[\u200b-\u200d\u2060\ufeff]/gu
 
 /** 扫描副本：去零宽 + NFKC（全角冒号/等号折成半角），原文不动，返回值只用脱敏片段 */
 function scanText(content: string): string {
-  return content.replace(PEM_PUBLIC_BLOCK, ' ').replace(ZERO_WIDTH, '').normalize('NFKC')
+  // 顺序有讲究：先归一化（剥零宽 + 全角折叠），**再**剔除公钥块。
+  // 反过来的话，`-----BEGIN\u200BPUBLIC KEY-----`（插了零宽的公钥）匹配不上 PEM 规则，
+  // 会被熵规则当成凭据隔离 —— 误杀方向的反向 bug（2026-11-02 审计实测）。
+  return content.replace(ZERO_WIDTH, '').normalize('NFKC').replace(PEM_PUBLIC_BLOCK, ' ')
 }
 
 /** 占位符 / 说明性取值：看到这些就不算「真的写了凭据」 */

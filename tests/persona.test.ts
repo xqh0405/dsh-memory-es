@@ -44,3 +44,22 @@ describe('buildPersonaSection：人格内核', () => {
     assert.ok(PERSONA_SECTION_ORDER < MEMORY_PROMPT_SECTION.order, '人格要先于「我知道什么」')
   })
 })
+
+describe('output schema：blocked 必须被声明（2026-11-02 审计）', () => {
+  // 同 traits：runPersonaJob 返回 blocked，但 schema 是 additionalProperties:false
+  test('带 blocked 的返回值通过 schema 校验', async () => {
+    const { definePersonaTool } = await import('../src/memory/persona.ts')
+    const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
+    const tool = definePersonaTool({} as never)
+    const value = {
+      sources: 1,
+      candidates: 1,
+      written: 0,
+      duplicates: 0,
+      blocked: 1,
+      skipped: '',
+      text: 'x',
+    }
+    assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [])
+  })
+})

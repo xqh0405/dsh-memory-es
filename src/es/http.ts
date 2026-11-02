@@ -8,6 +8,9 @@
  * 三条不变式（改代码时别破坏）：
  *  1. **永远不设 `rejectUnauthorized: false`**：自签 CA 通过 `caCertPath` 传进来校验。
  *  2. 401 / 403 / 404 / 5xx / 超时**一律不重试**；只有 409 与 429 各重试一次（文档 §15.5）。
+ *     退避：409（conflict）50ms、429（rate_limited）200ms —— 与 `RETRY_DELAY_MS` 一致。
+ *  3. `requestTimeoutMs` 走的是 **socket 空闲超时**（`req.setTimeout`），不是请求总时长；
+ *     服务端慢速滴流可以突破它。要硬上限得用 AbortController + 计时器（未做）。
  *  3. 错误信息里**不出现密码与 `Authorization` 头**（日志会和错误一起被打印出去）。
  *
  * 实测提醒（2026-10-25）：读者身份 `mem-reader-*` 没有 cluster 权限，连 `GET /` 都是 403。

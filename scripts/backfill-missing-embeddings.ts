@@ -39,8 +39,21 @@ const missingBody = {
   query: { bool: { must_not: [{ exists: { field: 'embedding' } }] } },
 }
 
-const result = await client.search(index, missingBody)
-const docs = result.hits
+/**
+ * 翻页取全量：ES 默认 `size` 上限 10000，单页固定 500 会在「缺向量很多」时静默截断
+ * （2026-11-02 审计指出：旧版只取一页，超 500 条就只补 500 条还说成功了）。
+ */
+const PAGE = 500
+const docs: Array<{ id: string; source: Record<string, unknown> }> = []
+for (let from = 0; ; from += PAGE) {
+  const page = await client.search(index, { ...missingBody, from, size: PAGE })
+  docs.push(...page.hits.map((hit) => ({ id: hit.id, source: hit.source as Record<string, unknown> })))
+  if (page.hits.length < PAGE) break
+  if (docs.length >= 10_000) {
+    console.log('⚠️ 缺向量超过 10000 条，只处理前 10000 条（请分批跑）')
+    break
+  }
+}
 console.log(`索引 ${index}：缺向量 ${docs.length} 条${apply ? '' : '（dry-run，加 --apply 才写）'}`)
 
 let done = 0

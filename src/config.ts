@@ -245,7 +245,7 @@ export const Config: z<ConfigType> = z.object({
     abstainOnLowConfidence: z.boolean().default(false)
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})
-      .description('查询扩展表（口语/中文 → 书面/英文），只作用于 BM25 一路。默认空；A/B 实测与拒答同开 should 失败 10 → 1。'),
+      .description('查询扩展表（口语/中文 → 书面/英文），BM25 与向量两路都用。默认空；A/B 实测单独开 should 失败 10 → 8，与拒答同开 10 → 1。'),
   }),
   /**
    * 置信判定（阶段 0.5）：分层规则，替代原来单一的 marginFloor。

@@ -489,6 +489,8 @@ export function definePersonaTool(deps: PersonaDeps & {
           candidates: { type: 'number', required: true },
           written: { type: 'number', required: true },
           duplicates: { type: 'number', required: true },
+          // 命中写入准入而未落库的条数（2026-11-02 新增，必须声明，理由同 traits）
+          blocked: { type: 'number' },
           skipped: { type: 'string', required: true },
           // 干跑且 0 条时带上模型原话：空数组（真看不出）与解析失败必须能区分
           rawPreview: { type: 'string' },
