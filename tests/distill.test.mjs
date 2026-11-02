@@ -75,6 +75,15 @@ test('超过上限拒绝（提炼不该变长）', async () => {
   )
 })
 
+test('改写结果含凭据 → 拒绝写入（准入不能在蒸馏这一步被绕过）', async () => {
+  const { deps, patches } = fakes({ content: '原始正文', user_id: USER })
+  await assert.rejects(
+    () => distillMemory(deps, { memory_id: 'm1', content: '部署口令是 Passw0rd123! 记一下' }),
+    /命中写入准入/,
+  )
+  assert.equal(patches.length, 0, '拒绝了就不该有写入')
+})
+
 test('embedding 不可用时降级：仍然写成 done，但不写 embedding', async () => {
   const { deps, patches } = fakes({ content: '原文', user_id: USER }, { embed: { async embed() { throw new Error('ollama down') } } })
   const result = await distillMemory(deps, { memory_id: 'm1', content: '改写后的内容' })

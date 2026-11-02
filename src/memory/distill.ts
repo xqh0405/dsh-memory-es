@@ -20,6 +20,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+import { checkAdmission } from './admission.ts'
 import type { MemoryStoreDeps } from './common.ts'
 import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
 
@@ -61,6 +62,13 @@ export async function distillMemory(deps: DistillDeps, input: DistillInput): Pro
   if (content === '') throw new Error('content 不能为空（蒸馏是改写，不是清空）')
   if (content.length > MAX_DISTILLED_CHARS) {
     throw new Error(`蒸馏后正文 ${content.length} 字符，超过上限 ${MAX_DISTILLED_CHARS}；这是提炼，不该变长`)
+  }
+
+  // 2026-11-02 评审：蒸馏是「改写」，改写结果同样可能把会话里的明文口令带进来。
+  // memory_save 的准入只在写入那一刻生效，之后被改写一遍就绕过了——这里补上复检。
+  const verdict = checkAdmission(content)
+  if (!verdict.allow) {
+    throw new Error(`蒸馏结果命中写入准入（${verdict.reason ?? '疑似凭据'}），已拒绝写入；原条目保持不变`)
   }
 
   const original = typeof current.source.content === 'string' ? current.source.content : ''

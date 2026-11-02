@@ -1582,6 +1582,8 @@ function timestampSuffix() {
  * 为什么「什么时候用」必填：模型就是靠这一句话决定贴哪张，缺了它这张图永远贴不出来。
  */
 async function handleStickerAdd(ctx, res, req) {
+  // 唯一写宿主磁盘的入口，同样要管理员（2026-11-02 评审）
+  if (!requireAdmin(ctx, res)) return
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
   const stickers = configRow.value.stickers ?? {}
@@ -2152,10 +2154,12 @@ async function handleReviewAction(ctx, res, docId, action, req) {
  */
 const EDITABLE = [
   { path: ['es', 'requestTimeoutMs'], label: '请求超时(ms)', type: 'number', default: 8000 },
-  { path: ['index', 'team'], label: '团队库索引名', type: 'string', default: 'team_knowledge' },
-  { path: ['embedding', 'url'], label: 'Embedding 地址', type: 'string', default: 'http://127.0.0.1:11434' },
+  // ⚠️ `index.team` / `embedding.url` / `embedding.dims` 也移出了可写面（2026-11-02 评审）：
+  //    · embedding.url 决定「查询与正文发给谁」，写它等于把记忆正文外发到任意主机；
+  //    · index.team 是租户开关，改错会把检索指向别的团队库；
+  //    · dims 必须与索引 mapping 一致，改错直接 400。
+  //    和下面 es.url 同理：改完都要重启才生效，走 cordis.patch.yml 更安全。
   { path: ['embedding', 'model'], label: 'Embedding 模型', type: 'string', default: 'bge-m3' },
-  { path: ['embedding', 'dims'], label: '向量维度', type: 'number', default: 1024 },
   { path: ['defaults', 'domain'], label: '默认 domain', type: 'string', default: 'general' },
   // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用
   { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', default: false, hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
@@ -2308,6 +2312,9 @@ async function handleConfigGet(ctx, res) {
 
 /** POST /config：只改白名单字段，走 configEditor.edit（校验 + Loader 正常路径落盘） */
 async function handleConfigWrite(ctx, res, req) {
+  // 2026-11-02 评审：这个接口原来只要 confirm:true 就写，任何登录会话都能改配置
+  // （而可写面里曾有 embedding.url = 记忆正文外发面）。与其它维护接口同样收口。
+  if (!requireAdmin(ctx, res)) return
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
@@ -3139,6 +3146,7 @@ export {
   buildGraph,
   handleExport,
   handleGraph,
+  handleConfigWrite,
   handleMaintenanceGet,
   handleMemories,
   handleSearchLog,

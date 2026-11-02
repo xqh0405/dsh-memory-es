@@ -17,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
+import { checkAdmission } from './admission.ts'
 import { NON_FACT_MEMORY_TYPES, personalIndexFor } from './common.ts'
 import { IDENTITY_MEMORY_TYPE } from './save.ts'
 
@@ -366,7 +367,14 @@ export async function writeTraitCandidate(
   deps: TraitsDeps,
   trait: TraitCandidate,
   days: number,
-): Promise<{ written: boolean; memory_id: string }> {
+): Promise<{ written: boolean; memory_id: string; quarantined?: boolean; reason?: string }> {
+  // 2026-11-02 评审：准入此前只挂在 memory_save 一条路上，LLM 产物（traits/persona）
+  // 直接写库且审核采纳后即 active —— 「明文口令被蒸馏进库」正是这条路径。补同一道闸。
+  const verdict = checkAdmission(trait.content)
+  if (!verdict.allow) {
+    deps.log?.({ tool: 'traits', event: 'quarantine_skipped', reason: verdict.reason })
+    return { written: false, memory_id: '', quarantined: true, reason: verdict.reason }
+  }
   const now = deps.now?.() ?? new Date()
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const memoryId = `trait-${hashContent(trait.content)}`
@@ -421,6 +429,8 @@ export interface TraitsResult {
   quotaSkipped: number
   /** 因「写得太具体」（含命令/路径/端口/字段名）而被丢弃的条数 */
   concreteSkipped: number
+  /** 因命中写入准入（疑似凭据/原样搬运）而未落库的条数 */
+  blocked?: number
   /** 当天配额上限：只在「配额用完」时带出来给文案用 */
   maxPerDay?: number
   skipped: string | null
@@ -495,6 +505,7 @@ export async function runTraitsJob(
   }
 
   let written = 0
+  let blocked = 0
   let duplicates = 0
   let quotaSkipped = 0
   let concreteSkipped = 0
@@ -525,8 +536,10 @@ export async function runTraitsJob(
       continue
     }
     const result = await writeTraitCandidate(deps, trait, input.days)
-    // 409 = 同一内容哈希已存在，也归入重复（不能静默算成「写了 0 条却不说为什么」）
+    // 409 = 同一内容哈希已存在，也归入重复（不能静默算成「写了 0 条却不说为什么」）；
+    // quarantined = 内容像凭据/原样搬运，根本没落库
     if (result.written) written += 1
+    else if (result.quarantined) blocked += 1
     else duplicates += 1
   }
   log({
@@ -535,12 +548,13 @@ export async function runTraitsJob(
     sources: sources.length,
     candidates: candidates.length,
     written,
+    blocked,
     duplicates,
     quotaSkipped,
     usedToday,
     maxPerDay,
   })
-  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, concreteSkipped, skipped: null }
+  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, concreteSkipped, blocked, skipped: null }
 }
 
 /** 与 save.ts 一致的内容归一化哈希口径（便于两边判重口径相同） */

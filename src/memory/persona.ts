@@ -25,6 +25,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
+import { checkAdmission } from './admission.ts'
 import { personalIndexFor } from './common.ts'
 import { hashContent } from './traits.ts'
 import { dshSessionsRoot } from '../sessions.ts'
@@ -373,7 +374,13 @@ export async function writePersonaCandidate(
   cand: PersonaCandidate,
   sources: readonly PersonaSource[],
   days: number,
-): Promise<{ written: boolean; memory_id: string }> {
+): Promise<{ written: boolean; memory_id: string; quarantined?: boolean; reason?: string }> {
+  // 与 traits 同一个理由：LLM 产物也必须过写入准入（2026-11-02 评审）
+  const verdict = checkAdmission(cand.content)
+  if (!verdict.allow) {
+    deps.log?.({ tool: 'persona', event: 'quarantine_skipped', reason: verdict.reason })
+    return { written: false, memory_id: '', quarantined: true, reason: verdict.reason }
+  }
   const now = deps.now?.() ?? new Date()
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const memoryId = `persona-${hashContent(cand.content)}`
@@ -529,6 +536,7 @@ export function definePersonaTool(deps: PersonaDeps & {
 
       let written = 0
       let duplicates = 0
+      let blocked = 0
       for (const cand of candidates) {
         const dup = await findPersonaDuplicate(deps, cand.content)
         if (dup !== null) {
@@ -538,13 +546,15 @@ export function definePersonaTool(deps: PersonaDeps & {
         }
         const result = await writePersonaCandidate(deps, cand, sources, days)
         if (result.written) written += 1
+        else if (result.quarantined) blocked += 1
         else duplicates += 1
       }
       const dupNote = duplicates > 0 ? `，跳过 ${duplicates} 条与已有条目同义` : ''
+      const blockedNote = blocked > 0 ? `，${blocked} 条命中写入准入未落库` : ''
       return {
-        sources: sources.length, candidates: candidates.length, written, duplicates, skipped: '',
+        sources: sources.length, candidates: candidates.length, written, duplicates, blocked, skipped: '',
         text: `最近 ${days} 天共 ${sources.length} 个会话片段，模型给出 ${candidates.length} 条候选，`
-          + `新写入 ${written} 条（pending，待审核）${dupNote}。`,
+          + `新写入 ${written} 条（pending，待审核）${dupNote}${blockedNote}。`,
       }
     },
   })

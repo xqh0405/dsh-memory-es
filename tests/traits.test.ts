@@ -168,6 +168,26 @@ describe('writeTraitCandidate：幂等', () => {
     assert.equal(second.written, false)
     assert.equal(second.memory_id, first.memory_id, '同一个内容 → 同一个 id')
   })
+
+  // 2026-11-02 评审：LLM 产物也必须过写入准入（此前只挂在 memory_save 上）
+  test('候选里含凭据 → 不落库、标 quarantined', async () => {
+    const { writeTraitCandidate } = await import('../src/memory/traits.ts')
+    const wrote: unknown[] = []
+    const deps = {
+      userId: 'u1',
+      personalPrefix: 'personal_memory_',
+      reader: { search: async () => ({ hits: [] }) },
+      writer: { index: async (_i: string, doc: unknown) => { wrote.push(doc); return { id: 'x', result: 'created', status: 200 } } },
+    }
+    const result = await writeTraitCandidate(
+      deps as never,
+      { content: '你常用口令是 Abcd1234ef', evidence_ids: [] },
+      14,
+    )
+    assert.equal(result.written, false)
+    assert.equal(result.quarantined, true)
+    assert.equal(wrote.length, 0, '命中准入就不该写库')
+  })
 })
 
 describe('runTraitsJob：编排与降级', () => {

@@ -68,12 +68,25 @@ const CREDENTIAL_WORDS =
  * 赋值式：`password: abcdef` / `密码是 abcdef` / `token=...`。
  *
  * 分隔符带上中文的「是 / 为」，因为中文会话里的口令几乎从不写成冒号。
- * 值取到空白、引号、逗号、分号为止——宁可截短，也不要把整句话当值。
+ *
+ * 2026-11-02 评审修：原来值只取「分隔符后第一个 token 且 ≥6 字符」，于是
+ * `password：ab cd12345678`、`这台机器密码是 a very secret thing` 全部放行；
+ * 关键词插零宽字符（`pass​word:`）也能绕过。现在改成：
+ *  · 先把零宽字符剔掉、全角折成半角再扫（见 `scanText`）；
+ *  · 值取到行尾/句末标点（最多 60 字），再判断「像不像一个值」。
  */
 const ASSIGN_PATTERN = new RegExp(
-  `(?:${CREDENTIAL_WORDS})\\s*(?:是|为|[:=：])\\s*["']?([^\\s"',;，；]{6,})`,
+  `(?:${CREDENTIAL_WORDS})\\s*(?:是|为|[:=])\\s*["']?([^\\n。；;]{2,60})`,
   'giu',
 )
+
+/** 剥掉零宽字符再扫描：`pass\u200Bword:` 与 `password:` 在语义上是同一个词 */
+const ZERO_WIDTH = /[\u200b-\u200d\u2060\ufeff]/gu
+
+/** 扫描副本：去零宽 + NFKC（全角冒号/等号折成半角），原文不动，返回值只用脱敏片段 */
+function scanText(content: string): string {
+  return content.replace(PEM_PUBLIC_BLOCK, ' ').replace(ZERO_WIDTH, '').normalize('NFKC')
+}
 
 /** 占位符 / 说明性取值：看到这些就不算「真的写了凭据」 */
 const PLACEHOLDER_PATTERN =
@@ -121,8 +134,8 @@ export function looksLikeOpaqueSecret(token: string): boolean {
 
 /** 扫正文里的凭据形态；命中返回脱敏片段，否则 null */
 export function detectSecret(content: string): { matched: string; reason: string } | null {
-  // 公钥/证书先剔除：它们的 base64 正文会被熵规则整片误判
-  const text = content.replace(PEM_PUBLIC_BLOCK, ' ')
+  // 公钥/证书先剔除（它们的 base64 正文会被熵规则整片误判），再去零宽、折全角
+  const text = scanText(content)
 
   if (PRIVATE_KEY_PATTERN.test(text)) {
     return {
@@ -145,10 +158,19 @@ export function detectSecret(content: string): { matched: string; reason: string
 
   ASSIGN_PATTERN.lastIndex = 0
   for (let m = ASSIGN_PATTERN.exec(text); m !== null; m = ASSIGN_PATTERN.exec(text)) {
-    const value = m[1] ?? ''
+    const raw = (m[1] ?? '').trim().replace(/^["'`]|["'`]$/gu, '').trim()
+    if (raw === '') continue
+    // 值后面常跟中文说明（"password: Passw0rd123! 记一下"）：在第一个中文字符处截断，
+    // 只看前缀——前缀为空说明这本来就是一句说明文字（"密码是见文档"），放过。
+    const value = raw.split(/[\u3400-\u9fff]/u)[0]?.trim() ?? ''
+    if (value === '') continue
     if (PLACEHOLDER_PATTERN.test(value)) continue
-    // 值必须像"东西"：含字母或数字（纯中文值基本是说明文字，如"密码是见文档"）
+    // 值必须像"东西"：含字母或数字
     if (!/[A-Za-z0-9]/.test(value)) continue
+    // 单 token 沿用原判据（≥6 字符）；多词组合只要不是占位符就判——
+    // `password: a very secret thing` 这种带空格的写法以前是完整的绕过路径。
+    const words = value.split(/\s+/u)
+    if (words.length === 1 && value.length < 6) continue
     return {
       matched: mask(value),
       reason: '命中赋值式凭证（形如 password: ...），已隔离待审',

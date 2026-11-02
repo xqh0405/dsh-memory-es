@@ -604,8 +604,13 @@ test('可编辑字段白名单：es.url / caCertPath 必须不可写（凭据外
   // 而且改完本来也要重启才生效，收益不比手改 profile 高。
   assert.equal(keys.includes('es.url'), false, 'es.url 不该出现在面板可写字段里')
   assert.equal(keys.includes('es.caCertPath'), false, 'caCertPath 不该出现在面板可写字段里')
+  // 2026-11-02 评审追加：embedding.url 是「正文发给谁」的开关、index.team 是租户开关、
+  // dims 必须与索引 mapping 一致 —— 三个都不能从面板改。
+  for (const forbidden of ['embedding.url', 'embedding.dims', 'index.team']) {
+    assert.equal(keys.includes(forbidden), false, `${forbidden} 不该出现在面板可写字段里`)
+  }
   // 反面：其余字段仍在白名单里（别为了安全把整个配置面关死）
-  for (const needed of ['es.requestTimeoutMs', 'embedding.dims', 'persona.seed', 'journal.at', 'traits.days']) {
+  for (const needed of ['es.requestTimeoutMs', 'embedding.model', 'persona.seed', 'journal.at', 'traits.days']) {
     assert.ok(keys.includes(needed), `${needed} 应当仍可编辑`)
   }
 })
@@ -635,7 +640,12 @@ function stickerCtx(dir) {
               {
                 entry: { id: 'dsh-memory-es' },
                 // findEntryRow 要「真的带 es.url + userId」的行才算数（空条目会被跳过）
-                inherited: { es: { url: 'https://example:9200' }, identity: { userId: 'xqh' }, stickers: { dir } },
+                // 写接口现在要求管理员（canReviewTeam）：给单账号 + teamWrite
+                inherited: {
+                  es: { url: 'https://example:9200' },
+                  identity: { userId: 'xqh', username: 'mem-user-xqh', password: 'x', teamWrite: true },
+                  stickers: { dir },
+                },
                 override: undefined,
               },
             ],
@@ -643,6 +653,39 @@ function stickerCtx(dir) {
         : undefined,
   }
 }
+
+test('写接口门禁：非管理员 POST /config 与新增表情包一律 403（2026-11-02 评审）', async () => {
+  const { handleConfigWrite, handleStickerAdd } = await import('../panel/index.js')
+  // 非管理员：单账号但没有 teamWrite，也没有 consolidator
+  const ctx = {
+    get: (name) =>
+      name === 'configEditor'
+        ? {
+            configuration: () => [
+              {
+                entry: { id: 'dsh-memory-es' },
+                inherited: { es: { url: 'https://example:9200' }, identity: { userId: 'xqh' } },
+                override: undefined,
+              },
+            ],
+          }
+        : undefined,
+  }
+  const body = (value) => ({ on() {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(value)) } })
+
+  const res1 = fakeRes()
+  await handleConfigWrite(ctx, res1, body({ confirm: true, changes: [{ key: 'persona.seed', value: 'x', type: 'string' }] }))
+  assert.equal(res1.statusCode, 403, `config 写接口应 403，实际 ${res1.statusCode}`)
+
+  const res2 = fakeRes()
+  await handleStickerAdd(ctx, res2, {
+    on() {},
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify({ label: 'x', when: 'y', file: '' }))
+    },
+  })
+  assert.equal(res2.statusCode, 403, `表情包新增应 403，实际 ${res2.statusCode}`)
+})
 
 test('resolveStickerDir：~ 开头的按家目录展开，绝对路径原样', async () => {
   const { resolveStickerDir } = await import('../panel/index.js')

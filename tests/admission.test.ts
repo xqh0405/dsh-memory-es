@@ -74,6 +74,40 @@ describe('detectSecret：凭据形态', () => {
   })
 })
 
+/**
+ * 2026-11-02 评审实测到的三种绕过：值里带空格、全角冒号、关键词插零宽字符。
+ * 这三条以前全部 `allow:true`，与「防明文口令进库」的目标直接冲突。
+ */
+describe('detectSecret：评审发现的绕过形态（回归）', () => {
+  const bypasses = [
+    ['值里带空格（英文）', '这台机器密码是 a very secret thing'],
+    ['值里带空格（全角冒号 + 短首词）', 'password：ab cd12345678'],
+    ['环境变量形态 + 空格', 'ELASTIC_PASSWORD=abc def ghi12345'],
+    ['关键词插零宽字符', 'pass\u200Bword: SecretValue12345678'],
+    ['值后跟中文说明', '生产库 password: Passw0rd123! 记一下'],
+  ] as const
+
+  for (const [name, content] of bypasses) {
+    test(`隔离：${name}`, () => {
+      const verdict = checkAdmission(content)
+      assert.equal(verdict.allow, false, `应隔离但放行了：${JSON.stringify(content)}`)
+      assert.equal(verdict.category, 'secret')
+    })
+  }
+
+  test('仍然放行说明性文字（不能为了堵绕过而滥杀）', () => {
+    for (const content of [
+      '密码是见文档',
+      'token: 有效期 24 小时',
+      'password: your_password_here',
+      '给部署机配置一个 Elasticsearch 账号，权限是索引级只读',
+      'api_key = ${MEM_KEY}',
+    ]) {
+      assert.equal(checkAdmission(content).allow, true, `不应隔离：${content}`)
+    }
+  })
+})
+
 describe('looksLikeOpaqueSecret', () => {
   test('base64 形态命中', () => {
     assert.equal(looksLikeOpaqueSecret('U2FsdGVkX1+AbCdEf0123456789/XyZ+AbCdEf0123456789'), true)
