@@ -1228,6 +1228,36 @@ window.__ModuleLoader__.load({
       return (arm / GALAXY_ARMS) * Math.PI * 2 - 2.6 * Math.log(r / 420 + 1)
     }
 
+    /**
+     * 星尘：纯装饰的微点，不参与交互、不对应任何记忆。
+     *
+     * 参考图之所以"协调"，很大原因是它有几万条消息铺成的小点当底噪；
+     * 我们只有 268 个节点，光靠节点铺不出密度层次，就补一层确定性的星尘。
+     */
+    const GALAXY_DUST = []
+    function galaxyDust(count) {
+      if (GALAXY_DUST.length === count) return GALAXY_DUST
+      GALAXY_DUST.length = 0
+      for (let i = 0; i < count; i += 1) {
+        const t = (i + 0.5) / count
+        const reach = GALAXY_R1 * (0.55 + hashUnit(`dust-r-${i}`) * 0.62)
+        const r = Math.max(24, GALAXY_R0 * 0.35 + Math.sqrt(t) * reach)
+        const free = hashUnit(`dust-a-${i}`) * Math.PI * 2
+        const pull = Math.pow(hashUnit(`dust-p-${i}`), 2.1) * 0.9
+        const arm = Math.floor(hashUnit(`dust-arm-${i}`) * GALAXY_ARMS) % GALAXY_ARMS
+        const theta = free + wrapAngle(galaxyArmAngle(arm, r) - free) * pull
+        GALAXY_DUST.push({
+          x: Math.cos(theta) * r,
+          y: (hashUnit(`dust-y-${i}`) - 0.5) * 46,
+          z: Math.sin(theta) * r,
+          size: 0.6 + hashUnit(`dust-s-${i}`) * 1.4,
+          alpha: 0.12 + hashUnit(`dust-b-${i}`) * 0.38,
+          warm: hashUnit(`dust-w-${i}`) > 0.84,
+        })
+      }
+      return GALAXY_DUST
+    }
+
     /** 角度差归一到 [-π, π]：两角之间走"近的那一侧" */
     function wrapAngle(angle) {
       const ring = Math.PI * 2
@@ -1684,26 +1714,6 @@ window.__ModuleLoader__.load({
       }, [model])
 
       /** 世界坐标 → 屏幕坐标。focal/dist 是透视，unit 让盘在任意画布上都差不多大。 */
-      const projectTo = (point) => {
-        const cam = camRef.current
-        const width = viewportRef.current.width
-        const height = viewportRef.current.height
-        const cy = Math.cos(cam.yaw)
-        const sy = Math.sin(cam.yaw)
-        const cp = Math.cos(cam.pitch)
-        const sp = Math.sin(cam.pitch)
-        // 先绕 Y 轴转 yaw
-        const x1 = point.x * cy - point.z * sy
-        const z1 = point.x * sy + point.z * cy
-        // 再绕 X 轴转 pitch
-        const y2 = point.y * cp - z1 * sp
-        const z2 = point.y * sp + z1 * cp
-        const persp = cam.focal / Math.max(120, cam.focal + z2 + cam.dist * 0.35)
-        const unit = Math.min(width, height) / 900
-        const k = persp * unit
-        return { x: width / 2 + x1 * k, y: height / 2 + y2 * k, z: z2, k }
-      }
-
       const pickAt = (mx, my) => {
         let best = null
         let bestScore = Infinity
@@ -1755,13 +1765,42 @@ window.__ModuleLoader__.load({
         }
         ctx.drawImage(backdrop.canvas, 0, 0, width, height)
 
+        // 投影：三角函数一帧算一次。星尘有两千多个，逐点算 cos/sin 会明显掉帧。
+        const cam = camRef.current
+        const cy = Math.cos(cam.yaw)
+        const sy = Math.sin(cam.yaw)
+        const cp = Math.cos(cam.pitch)
+        const sp = Math.sin(cam.pitch)
+        const unit = Math.min(width, height) / 900
+        const project = (px, py, pz) => {
+          const x1 = px * cy - pz * sy
+          const z1 = px * sy + pz * cy
+          const y2 = py * cp - z1 * sp
+          const z2 = py * sp + z1 * cp
+          const persp = cam.focal / Math.max(120, cam.focal + z2 + cam.dist * 0.35)
+          const k = persp * unit
+          return { x: width / 2 + x1 * k, y: height / 2 + y2 * k, z: z2, k }
+        }
+
+        // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆
+        const dust = galaxyDust(2600)
+        ctx.globalCompositeOperation = 'lighter'
+        for (const mote of dust) {
+          const projected = project(mote.x, mote.y, mote.z)
+          const size = Math.max(0.4, mote.size * projected.k * 1.7)
+          ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15)
+          ctx.fillStyle = mote.warm ? 'rgba(255,226,192,1)' : 'rgba(176,202,255,1)'
+          ctx.fillRect(projected.x, projected.y, size, size)
+        }
+
         const graph = model.graph
         const now = Date.now()
         const points = []
         for (const node of graph.nodes) {
           const world = model.layout.positions.get(node.id)
           if (world === undefined) continue
-          points.push({ node, world, screen: projectTo(world), color: colorMap.get(node.id) ?? '#6b8cff' })
+          const projected = project(world.x, world.y, world.z)
+          points.push({ node, world, screen: projected, color: colorMap.get(node.id) ?? '#6b8cff' })
         }
         // 远的先画，近的盖上去
         points.sort((a, b) => b.screen.z - a.screen.z)
@@ -1770,7 +1809,6 @@ window.__ModuleLoader__.load({
         for (const item of points) screenOf.set(item.node.id, item.screen)
 
         // 旋臂薄雾：跟着相机转，所以每帧重画（只有两条曲线，很便宜）
-        const unit = Math.min(width, height) / 900
         ctx.globalCompositeOperation = 'lighter'
         ctx.lineCap = 'round'
         // 雾带只求隐约可见：这里是 lighter 叠加，两层会累加，过亮会盖过星点
@@ -1784,7 +1822,7 @@ window.__ModuleLoader__.load({
               // 与布局共用 galaxyArmAngle：雾带和节点才会贴在同一条曲线上
               const rr = GALAXY_R0 * 0.55 + (i / 64) * (GALAXY_R1 + 70 - GALAXY_R0 * 0.55)
               const theta = galaxyArmAngle(arm, rr)
-              const projected = projectTo({ x: Math.cos(theta) * rr, y: 0, z: Math.sin(theta) * rr })
+              const projected = project(Math.cos(theta) * rr, 0, Math.sin(theta) * rr)
               if (i === 0) ctx.moveTo(projected.x, projected.y)
               else ctx.lineTo(projected.x, projected.y)
             }
@@ -1828,7 +1866,10 @@ window.__ModuleLoader__.load({
           const depth = Math.min(1.6, Math.max(0.55, screen.k * 1.15))
           const isHover = hover === node.id
           const isFocus = model.focused === node.id
-          const radius = (2.3 + Math.min(6, node.degree) * 0.68) * depth * (isHover || isFocus ? 1.25 : 1)
+          // 半径拉开层次：度数取 0.75 次幂后差距更明显，再叠 id 哈希（0.72~1.32），
+          // 少数大亮星 + 大量小点才像星图，全都一样大就成撒豆子了
+          const sizeJitter = 0.72 + hashUnit(node.id + '#sz') * 0.6
+          const radius = (1.6 + Math.pow(Math.min(8, node.degree), 0.75) * 1.3) * sizeJitter * depth * (isHover || isFocus ? 1.3 : 1)
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
           const alpha = Math.min(1, (0.28 + fresh * 0.62) * (0.55 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1))
@@ -1849,8 +1890,10 @@ window.__ModuleLoader__.load({
             ctx.fill()
           }
 
-          ctx.globalAlpha = alpha
-          ctx.fillStyle = item.color
+          // 少量暖色星：整盘全是蓝的会显得单调，掺一点淡金当"异类恒星"
+          const warmStar = hashUnit(node.id + '#hot') > 0.9
+          ctx.globalAlpha = alpha * (warmStar ? 1.15 : 1)
+          ctx.fillStyle = warmStar ? '#ffe6bf' : item.color
           ctx.beginPath()
           ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
           ctx.fill()
