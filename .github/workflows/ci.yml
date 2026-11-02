@@ -22,13 +22,19 @@ jobs:
         run: |
           # 同 release.yml：npm 10 解析 `*` 形式的 peerDependencies 会崩，跳过 peer 解算。
           npm ci --legacy-peer-deps
-          # 类型检查要的是**拼齐事件表**的包环境，而不是四个孤立包：
-          # cordis 的 Events 接口靠各子包 `declare module` 拼出来
-          # （例如 `agent/inbox/inserted` 来自 dsh-agent），只装 cordis / dsh-tools
-          # 会在 `ctx.on(...)` 处报 TS2345，看着像插件代码写错，其实是环境缺料。
-          # 所以整装一份 dsh——它自带全部子包，npm 会平铺到 node_modules。
-          # 版本必须与运行时宿主一致（见 scripts/link-deps.sh 的注释）。
-          npm install --no-save --legacy-peer-deps @deepseek-ai/dsh@0.2.1-rc.3
+          # 插件跑在宿主里，类型与运行时都依赖宿主的 @deepseek-ai/*。
+          # 这里用**全局布局**装一份 dsh 再软链进去（scripts/link-deps.sh 就是为
+          # 「宿主的 node_modules/@deepseek-ai 整个目录」写的），原因有两条：
+          #  · 四个孤立 peer 不够：cordis 的 Events 靠各子包 declare module 拼出来
+          #    （`agent/inbox/inserted` 来自 dsh-agent），缺了报 TS2345；
+          #  · 平铺装到本项目 node_modules 也不够：dsh-tools 运行时 import 了
+          #    dsh-scope / dsh-sandbox / dsh-llm，却没写进自己的 dependencies，
+          #    依赖被摊平到别处后单测会成片 ERR_MODULE_NOT_FOUND。
+          # 全局布局的目录结构与真实安装一致，兄弟包互相找得到。
+          npm install -g --prefix "$PWD/vendor-global" --no-audit --no-fund \
+            @deepseek-ai/dsh@0.2.1-rc.3
+          DSH_HOST_PKGS="$PWD/vendor-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai" \
+            bash scripts/link-deps.sh
 
       - name: 类型检查
         run: npm run typecheck

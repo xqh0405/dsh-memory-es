@@ -28,10 +28,13 @@ jobs:
           # npm 10 解析这些 `*` 形式的 peerDependencies 的 arborist 会崩
           # （Cannot read properties of null (reading 'children')），跳过 peer 解算。
           npm ci --legacy-peer-deps
-          # 整装一份 dsh（不是四个孤立 peer 包）：cordis 的 Events 接口靠各子包
-          # `declare module` 拼起来（`agent/inbox/inserted` 来自 dsh-agent），
-          # 只装 cordis / dsh-tools 会让 typecheck 报 TS2345。版本与运行宿主一致。
-          npm install --no-save --legacy-peer-deps @deepseek-ai/dsh@0.2.1-rc.3
+          # 用全局布局装一份 dsh 再软链进来（与 ci.yml 同因，详见那里）：
+          # 四个孤立 peer 缺事件表、平铺装又会让 dsh-tools 的兄弟包找不到。
+          # 版本必须与运行宿主一致。
+          npm install -g --prefix "$PWD/vendor-global" --no-audit --no-fund \
+            @deepseek-ai/dsh@0.2.1-rc.3
+          DSH_HOST_PKGS="$PWD/vendor-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai" \
+            bash scripts/link-deps.sh
 
       - name: 质量闸门（类型 + 单测）
         run: |
