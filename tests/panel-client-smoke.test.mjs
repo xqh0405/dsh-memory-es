@@ -147,3 +147,4 @@ if (full.disposed.length !== 2) throw new Error(`字典应释放 2 份，实际 
 
 console.log('  字典:', JSON.stringify(full.localeDictionaries))
 console.log('SMOKE OK')
+

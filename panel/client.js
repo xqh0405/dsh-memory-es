@@ -2156,12 +2156,13 @@ window.__ModuleLoader__.load({
       const graph = model.graph
       const stats = graph.stats
       const coverage = state.data?.coverage ?? null
-      // 双透镜：类型列表从当前数据里取（不猜有哪些 type）
-      const typeCounts = React.useMemo(() => {
-        const map = new Map()
-        for (const node of state.data?.nodes ?? []) map.set(node.type, (map.get(node.type) ?? 0) + 1)
-        return [...map.entries()].sort((a, b) => b[1] - a[1])
-      }, [state.data])
+      // 双透镜：类型列表从当前数据里取（不猜有哪些 type）。
+      // ⚠️ 这里**不能**用 React.useMemo：本组件在它之前有 loading/error 早退，
+      // 加载完成时 hook 数量变化 → React 抛 "Rendered more hooks than during the previous render"，
+      // 整个星图白掉（2026-11-02 实测踩过）。几百个节点的普通遍历，不值得为它破 hook 规则。
+      const typeCountsMap = new Map()
+      for (const node of state.data?.nodes ?? []) typeCountsMap.set(node.type, (typeCountsMap.get(node.type) ?? 0) + 1)
+      const typeCounts = [...typeCountsMap.entries()].sort((a, b) => b[1] - a[1])
       const filtersActive = hiddenTypes.size > 0 || dimTeam
       const focusNode = model.focused === null ? null : graph.nodes.find((node) => node.id === model.focused) ?? null
       const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
