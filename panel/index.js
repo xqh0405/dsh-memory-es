@@ -28,14 +28,18 @@ const AUDIT_INDEX = 'memory_audit'
  * 浏览器读不到文件系统，所以由 `/overview` 把版本回传给前端显示——
  * 页面上的版本号因此一定是「服务端真正加载的那份」，而不是 bundle 里过期的字符串。
  */
-const PANEL_VERSION = (() => {
+function readPanelVersion() {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
     return typeof pkg.version === 'string' && pkg.version.trim() !== '' ? pkg.version.trim() : 'unknown'
   } catch {
     return 'unknown'
   }
-})()
+}
+
+// 启动日志用一次（那时读到的就是本次加载的版本）；
+// 但 /overview 每次请求都现读——升级插件后页面不该还显示旧版本号，也不必为此重启整个 dsh web。
+const PANEL_VERSION = readPanelVersion()
 
 /** 配置默认值与 `src/config.ts` 保持一致（只用于面板兜底，不替代插件校验） */
 const DEFAULTS = {
@@ -724,7 +728,7 @@ async function handleOverview(ctx, res) {
     ok: true,
     value: {
       // 前端页脚显示它：部署后一眼能看出页面连的是哪一版服务端
-      version: PANEL_VERSION,
+      version: readPanelVersion(),
       es: {
         reachable: !health.error,
         // 读不到集群健康（权限不足），这里不编造状态；可达性由上面的索引读探测给出

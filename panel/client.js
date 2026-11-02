@@ -1565,7 +1565,7 @@ window.__ModuleLoader__.load({
      */
     const GALAXY_CAM = { yaw: -0.62, pitch: -0.46, dist: 840, focal: 1600 }
     const GALAXY_ORBIT_SPEED = 0.0009 // 每帧 0.0009 rad ≈ 两分钟一圈
-    const GALAXY_SHOW_LABELS = true // 截图配图时临时改成 false，可去掉项目名标签
+    const GALAXY_SHOW_LABELS = true // 截图配图时临时改成 false，避免带出项目名
 
     /** 光晕贴图缓存：每种颜色预渲染一张径向渐变，绘制时 drawImage 缩放 */
     const GLOW_SPRITES = new Map()
