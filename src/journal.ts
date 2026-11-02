@@ -16,6 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { EsClient } from './es/http.ts'
 import { personalIndexFor } from './memory/common.ts'
+import { dshSessionsRoot } from './sessions.ts'
 
 export const JOURNAL_MEMORY_TYPE = 'journal'
 /** 一段回顾的字符上限（模型偶尔会写长，截断而不是丢） */
@@ -164,7 +165,7 @@ function readLog(file: string): string {
  * 免得每次都把几个月的会话全解一遍。
  */
 export function collectDayTurns(
-  root = join(homedir(), '.dsh', 'sessions'),
+  root = dshSessionsRoot(),
   date: string,
   options: { maxTurns?: number } = {},
 ): { date: string; turns: DayTurn[]; sessions: number } {

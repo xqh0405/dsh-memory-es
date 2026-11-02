@@ -18,7 +18,6 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
@@ -28,6 +27,7 @@ import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { personalIndexFor } from './common.ts'
 import { hashContent } from './traits.ts'
+import { dshSessionsRoot } from '../sessions.ts'
 
 /** 人格条目的类型；与 `identity`（用户画像）严格区分 */
 export const PERSONA_MEMORY_TYPE = 'persona' as const
@@ -153,7 +153,7 @@ export function readSessionLog(file: string): string {
  * 最近说的话更能代表"现在的我"。
  */
 export function collectPersonaSources(
-  root = join(homedir(), '.dsh', 'sessions'),
+  root = dshSessionsRoot(),
   days = 14,
   maxSources = PERSONA_MAX_SOURCES,
 ): PersonaSource[] {
