@@ -6,7 +6,7 @@
  * `HOME=/home/node`、`DSH_HOME=/data/dsh`，而会话日志在 `/data/dsh/sessions`。
  * 只按 `homedir()` 拼出来的 `/home/node/.dsh/sessions` 根本不存在，
  * 于是 `readdirSync` 抛错被吞 → 当天 0 轮对话 → 日记与人格提炼**永远跳过**
- * （症状是「个人记忆有、日记和人格候选一直是空」，2026-11-02 在 dsh-zhongjinqi 查到）。
+ * （症状是「个人记忆有、日记和人格候选一直是空」，2026-11-02 在 某个成员容器 查到）。
  *
  * 所以优先认 `DSH_HOME`（容器里 entrypoint 会显式设它，本机则不设，
  * 本机 `~/.dsh` 正好就是 DSH_HOME，两条路等价）。

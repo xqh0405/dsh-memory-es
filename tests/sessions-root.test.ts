@@ -1,7 +1,7 @@
 /**
  * 会话日志根目录的推导：容器里 `HOME` 不是 `DSH_HOME`。
  *
- * 钉住的原因（2026-11-02 实测 dsh-zhongjinqi）：
+ * 钉住的原因（2026-11-02 实测 某个成员容器）：
  * 容器里 `HOME=/home/node`、`DSH_HOME=/data/dsh`，会话日志在 `/data/dsh/sessions`。
  * 只用 `homedir()` 拼成 `/home/node/.dsh/sessions`（不存在）→ 读不到当天对话
  * → 日记与人格提炼永远「跳过」，而个人记忆写入完全正常，症状很容易被误判成模型问题。
