@@ -410,7 +410,7 @@ describe('判重：同义候选不重复写入', () => {
 
 // ── 每日配额：候选攒到人手审不过来，是这一段的起因（2026-11-01 一天 22 条）──
 
-function quotaDeps(alreadyWrittenToday: number) {
+function quotaDeps(alreadyWrittenToday: number, pendingTotal = 0) {
   const written: string[] = []
   const deps = {
     userId: 'tester',
@@ -420,9 +420,11 @@ function quotaDeps(alreadyWrittenToday: number) {
         const text = JSON.stringify(body)
         // 判重用的 kNN：一律「没有相似条目」，把变量控制在配额这一条上
         if (text.includes('"knn"')) return { total: 0, hits: [] }
-        // 配额计数：唯一会查 status ∈ {pending, active} 的那条
-        //（不能用 memory_type=identity 判别——素材查询的 must_not 里也带 identity）
-        if (text.includes('"pending"')) return { total: alreadyWrittenToday, hits: [] }
+        // 两条计数查询都含 "pending"，靠 range 区分（存量闸门不带 created_at 范围）：
+        //  · 每日增量配额：status ∈ {pending,active} + created_at range
+        //  · 待审存量闸门（2026-11-03）：只 status=pending，无 range
+        if (text.includes('"pending"') && text.includes('"range"')) return { total: alreadyWrittenToday, hits: [] }
+        if (text.includes('"pending"')) return { total: pendingTotal, hits: [] }
         // 其余是素材查询：给两条真实 sense，否则 too_few_sources 会先挡住
         return {
           total: 2,
@@ -473,6 +475,72 @@ test('配额：今天还剩 3 个名额，只写 3 条，其余计入 quotaSkipp
   assert.equal(result.written, 3)
   assert.equal(result.quotaSkipped, 3)
   assert.equal(written.length, 3)
+})
+
+// ── 存量闸门：待审不能超过 maxPending（用户 2026-11-03 定：超过不继续增长）──
+// 与每日配额互补：每日闸管「今天写几条」，这个管「一共攒几条」。
+
+test('存量：待审达到 20 条，连模型都不调，一条不写', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(0, 20)
+  let summarizeCalled = 0
+  const result = await runTraitsJob(
+    { ...deps, maxPending: 20 } as never,
+    { days: 7, summarize: async () => { summarizeCalled += 1; return sixCandidates } },
+  )
+  assert.equal(result.skipped, 'pending_full')
+  assert.equal(result.written, 0)
+  assert.equal(written.length, 0)
+  assert.equal(summarizeCalled, 0, '满了不该调模型——LLM 是这条链上最贵的一步')
+  assert.equal(result.pendingCount, 20, '要把存量带出来，文案才能说清为什么没跑')
+  assert.equal(result.maxPending, 20)
+})
+
+test('存量：19 条时不拦（上限是「达到才停」，不是「到了就停」）', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps, written } = quotaDeps(0, 19)
+  const result = await runTraitsJob(
+    { ...deps, maxPending: 20, maxPerDay: 5 } as never,
+    { days: 7, summarize: async () => sixCandidates },
+  )
+  assert.notEqual(result.skipped, 'pending_full')
+  assert.ok(written.length > 0, '19 条还没满，应该继续写')
+})
+
+test('存量：dry_run 满了也停——写不进去，预演没有意义', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  const { deps } = quotaDeps(0, 25)
+  const result = await runTraitsJob(
+    { ...deps, maxPending: 20 } as never,
+    { days: 7, dryRun: true, summarize: async () => sixCandidates },
+  )
+  assert.equal(result.skipped, 'pending_full')
+  assert.equal(result.pendingCount, 25, '超上限的存量如实报出来，不是报 20')
+})
+
+test('存量与每日闸门互不干扰：存量没满时每日闸门照常生效', async () => {
+  const { runTraitsJob } = await import('../src/memory/traits.ts')
+  // 今日已写 5（每日满），存量只有 3（没满）→ 应该是 quota_exhausted 而不是 pending_full
+  const { deps, written } = quotaDeps(5, 3)
+  const result = await runTraitsJob(
+    { ...deps, maxPending: 20, maxPerDay: 5 } as never,
+    { days: 7, summarize: async () => sixCandidates },
+  )
+  assert.equal(result.skipped, 'quota_exhausted')
+  assert.equal(written.length, 0)
+})
+
+test('存量：默认上限 20（TRAITS_MAX_PENDING），配置没传也生效', async () => {
+  const { runTraitsJob, TRAITS_MAX_PENDING } = await import('../src/memory/traits.ts')
+  assert.equal(TRAITS_MAX_PENDING, 20, '用户定的数：待审核不能超过 20 条')
+  const { deps } = quotaDeps(0, 20)
+  // 不传 maxPending：应该回落到常量 20 并触发
+  const result = await runTraitsJob(
+    { ...deps } as never,
+    { days: 7, summarize: async () => sixCandidates },
+  )
+  assert.equal(result.skipped, 'pending_full')
+  assert.equal(result.maxPending, 20)
 })
 
 test('配额：maxPerDay 生效，单次模型吐 8 条也只写 5 条', async () => {

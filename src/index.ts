@@ -401,6 +401,8 @@ export function apply(ctx: Context, config: ConfigType): void {
     dims: config.embedding.dims,
     // 每天最多写几条候选（跨多次运行累计）：没有它，定时一次 + 手动几次就能攒十几条待审
     maxPerDay: config.traits.maxPerDay,
+    // 存量闸（待审不能超过 maxPending 条，超过不继续增长）
+    maxPending: config.traits.maxPending,
     // 单次模型返回上限与判重阈值
     maxOutput: config.traits.maxOutput,
     dedupMinScore: config.traits.dedupMinScore,

@@ -135,6 +135,12 @@ export interface ConfigType {
     days: number
     /** 每天最多写几条新候选（跨多次运行累计，按 created_at 算当天） */
     maxPerDay: number
+    /**
+     * 待审存量上限（用户 2026-11-03 定：超过 20 条就不再增长）。
+     * 与 maxPerDay 的区别：那是「今天写了几条」的增量闸，这是「一共攒了几条」的存量闸。
+     * 只有增量闸时，连写三天照样攒一堆没人审的候选。
+     */
+    maxPending: number
     /** 单次模型返回的候选上限（再多也只是排队等人工审） */
     maxOutput: number
     /** 同义判定的 kNN 余弦阈值，越高越严 */
@@ -376,6 +382,15 @@ export const Config: z<ConfigType> = z.object({
      */
     maxPerDay: z.number().step(1).min(1).max(50).default(5)
       .description('每天最多写几条新候选（跨多次运行累计）。默认 5。'),
+    /**
+     * 待审存量上限（用户 2026-11-03 定：待审核不能超过 20 条，超过不继续增长）。
+     *
+     * 与 maxPerDay 是两个方向的闸：每日闸管增量、这个管总量。
+     * 只靠每日闸，「一天 5 条 × 没人审三天」照样攒 15 条；2026-11-01 实测一天就到 22 条。
+     * 满了连模型调用都跳过（省 LLM），审掉几条低于上限后自动恢复。
+     */
+    maxPending: z.number().step(1).min(1).max(200).default(20)
+      .description('待审自述候选的存量上限；pending 达到它就不再提炼。默认 20。'),
     maxOutput: z.number().step(1).min(1).max(20).default(5)
       .description('单次模型返回的候选上限，超出部分丢弃。默认 5。'),
     dedupMinScore: z.number().min(0.7).max(0.99).default(0.88)

@@ -32,6 +32,14 @@ export const TRAITS_MAX_OUTPUT = 8
 export const TRAIT_MAX_CHARS = 300
 /** 证据条数下限：少于两条支撑的不叫"稳定" */
 export const TRAIT_MIN_EVIDENCE = 2
+/**
+ * 待审自述候选的存量上限（用户 2026-11-03 定：超过 20 条就不再增长）。
+ *
+ * 为什么是「存量」而不是「每日」：候选是给人审的，一天 5 条看着不多，
+ * 但没人连审三天就攒 15 条，而 2026-11-01 实测一天就攒到 22 条待审。
+ * 每日闸门（maxPerDay）管增量、这个管总量，两个都得有。
+ */
+export const TRAITS_MAX_PENDING = 20
 
 /**
  * 同义候选的判定阈值（kNN 余弦相似度）。
@@ -152,11 +160,23 @@ export interface TraitsDeps {
    * （kNN 只查得到有向量的文档）。不可用时跳过判重，**不能因此阻断写入**。
    */
   embed?: { embed(text: string, call?: { signal?: AbortSignal }): Promise<number[]> }
-  /** 索引的向量维度，与 `knnBody` 一致 */  /**
+  /** 索引的向量维度，与 `knnBody` 一致 */
+  dims?: number
+  /**
    * 每天最多写几条候选（跨多次运行累计）。不传就用 TRAITS_MAX_OUTPUT 的默认口径。
    * 定时任务一天跑一次、手动调一次也算一轮——没有这个上限，候选会越堆越多。
+   *
+   * ⚠️ 这是**增量**闸门（管「今天写了几条」）；管「一共攒了多少」的是 maxPending。
+   * 两个都得有：只有每日闸门，连写三天照样攒出一堆没人审的候选。
    */
   maxPerDay?: number
+  /**
+   * 待审存量上限（默认 20，用户 2026-11-03 定）：pending 总数达到它就不再写，
+   * **不继续增长**。这是存量口径，与 maxPerDay 的每日增量口径互补。
+   *
+   * 检查放在调模型之前：满了连 summarize 都不调，省一次 LLM。
+   */
+  maxPending?: number
   /** 单次模型返回的候选上限 */
   maxOutput?: number
   /** 同义判定阈值（kNN 余弦） */
@@ -164,7 +184,6 @@ export interface TraitsDeps {
   /** 锚定条目的同义判定阈值（更严，默认 0.82） */
   dedupMinScoreAnchored?: number
 
-  dims?: number
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
@@ -310,6 +329,39 @@ export async function countTraitsToday(deps: TraitsDeps): Promise<number> {
 }
 
 /**
+ * 当前**待审**自述候选的存量（`status=pending` 总数，不看 created_at）。
+ *
+ * 与 countTraitsToday 的区别（两个闸门口径不同，别混）：
+ *  · countTraitsToday = 今日增量（pending+active，限今天）→ 管「今天写了几条」；
+ *  · 本函数 = 待审存量（只 pending，不限时间）→ 管「一共攒了多少没人审的」。
+ * 每日闸门挡不住「连写三天攒 30 条」，存量闸门挡不住「一天写 25 条」——所以要两个。
+ *
+ * 查不到（ES 抖动）时返回 0：与每日配额同理，闸门自己挂了不该阻断提炼，
+ * 但会记 pending_count_failed 日志，便于发现。
+ */
+export async function countPendingTraits(deps: TraitsDeps): Promise<number> {
+  const index = personalIndexFor(deps.personalPrefix, deps.userId)
+  try {
+    const res = await deps.reader.search(index, {
+      size: 0,
+      track_total_hits: true,
+      query: {
+        bool: {
+          filter: [
+            { term: { memory_type: IDENTITY_MEMORY_TYPE } },
+            { term: { status: TRAIT_STATUS } },
+          ],
+        },
+      },
+    })
+    return typeof res.total === 'number' ? res.total : 0
+  } catch (err) {
+    deps.log?.({ tool: 'traits', event: 'pending_count_failed', error: formatEsError(err) })
+    return 0
+  }
+}
+
+/**
  * 查「是否已经有一条意思差不多的自述」。
  *
  * 只跟 `pending`（待审）与 `active`（已采纳）比：
@@ -433,6 +485,14 @@ export interface TraitsResult {
   blocked?: number
   /** 当天配额上限：只在「配额用完」时带出来给文案用 */
   maxPerDay?: number
+  /**
+   * 存量闸门（2026-11-03 用户要求：待审核不能超过 20 条，超过不继续增长）。
+   * 这是**存量**口径——不看今天写了多少，只看 pending 总数。
+   * 带出来给文案与日志用：满了时它是停下来的直接证据。
+   */
+  pendingCount?: number
+  /** 存量上限（默认 20）：只在「存量已满」时带出来 */
+  maxPending?: number
   skipped: string | null
   /** 干跑时有候选：直接列出它们的内容（干跑就是为了先看产出，只看数量没法评估） */
   candidatePreview?: string
@@ -455,6 +515,29 @@ export async function runTraitsJob(
   input: { days: number; summarize: (prompt: string) => Promise<string>; dryRun?: boolean },
 ): Promise<TraitsResult> {
   const log = deps.log ?? (() => {})
+
+  // ── 存量闸门（用户 2026-11-03 定：待审核不能超过 20 条，超过不继续增长）────
+  // 放在最前面：满了就连素材收集和模型调用都跳过（LLM 是这条链上最贵的一步）。
+  // dry_run 也停——写入已不可能，预演只会产出一批塞不进去的候选；
+  // 返回值带 pendingCount，文案能直接说清「为什么这次没跑」。
+  // 与每日配额的关系：这是存量（pending 总数），那是增量（今天写了几条），互补不重叠。
+  const maxPending = deps.maxPending ?? TRAITS_MAX_PENDING
+  const pendingCount = await countPendingTraits(deps)
+  if (pendingCount >= maxPending) {
+    log({ tool: 'traits', event: 'pending_full', pendingCount, maxPending })
+    return {
+      sources: 0,
+      candidates: 0,
+      written: 0,
+      duplicates: 0,
+      quotaSkipped: 0,
+      concreteSkipped: 0,
+      pendingCount,
+      maxPending,
+      skipped: 'pending_full',
+    }
+  }
+
   const sources = await collectTraitSources(deps, input.days)
   if (sources.length < TRAIT_MIN_EVIDENCE) {
     log({ tool: 'traits', skipped: 'too_few_sources', sources: sources.length })
@@ -553,8 +636,22 @@ export async function runTraitsJob(
     quotaSkipped,
     usedToday,
     maxPerDay,
+    // 本次跑完之后的待审存量：起始 + 真正落库的（被准入拦下的不算）
+    pendingAfter: pendingCount + written,
+    maxPending,
   })
-  return { sources: sources.length, candidates: candidates.length, written, duplicates, quotaSkipped, concreteSkipped, blocked, skipped: null }
+  return {
+    sources: sources.length,
+    candidates: candidates.length,
+    written,
+    duplicates,
+    quotaSkipped,
+    concreteSkipped,
+    blocked,
+    pendingCount: pendingCount + written,
+    maxPending,
+    skipped: null,
+  }
 }
 
 /** 与 save.ts 一致的内容归一化哈希口径（便于两边判重口径相同） */
@@ -668,6 +765,9 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
     }
     return base
   }
+  if (result.skipped === 'pending_full') {
+    return `待审的自述候选已有 ${result.pendingCount ?? '?'} 条，达到上限 ${result.maxPending ?? 20} 条，本次不再提炼（不继续增长）。\n先在「自述」页签审掉几条，低于上限后会自动恢复；想放宽就调 traits.maxPending。`
+  }
   if (result.skipped === 'quota_exhausted') {
     return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，但今天的名额已用完（每天上限 ${result.maxPerDay ?? '?'} 条），本次一条都没写。\n想立刻写就先审掉今天的候选，或者把 traits.maxPerDay 调大。`
   }
@@ -678,5 +778,8 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
   const concreteNote = result.concreteSkipped > 0
     ? `，丢弃 ${result.concreteSkipped} 条写得太具体的（含命令/路径/字段名，那属于项目操作不是做事方式）`
     : ''
-  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${concreteNote}${quotaNote}。`
+  const pendingNote = result.pendingCount !== undefined && result.maxPending !== undefined
+    ? `；当前待审 ${result.pendingCount}/${result.maxPending} 条`
+    : ''
+  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${concreteNote}${quotaNote}${pendingNote}。`
 }
