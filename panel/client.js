@@ -16,6 +16,75 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-memory-es'
     const API = '/memory-es/api'
 
+    // ── 面板状态 ↔ URL（阶段 16 收尾）────────────────────────────────────
+    //
+    // 刷新页面、把链接发给别人、从别的会话切回来——都不该丢掉「我在看哪一页」。
+    // 用 hash 而不是 query：hash 不参与服务端路由，dsh 自己的路由不受影响；
+    // 前缀带命名空间，别的插件也用 hash 时互不干扰。
+    //
+    // 写回用 `replaceState` 而不是 `pushState`：切一次页签不该在浏览器历史里多一条，
+    // 否则「后退」要在十几个页签之间倒着走，那比不能还原还难用。
+    const URL_STATE_KEY = 'memory-es'
+
+    /** 读面板状态；前缀不匹配（别的路由占用 hash）时返回空表 */
+    function readUrlState() {
+      if (typeof location === 'undefined') return new URLSearchParams()
+      const raw = location.hash
+      if (!raw.startsWith(`#${URL_STATE_KEY}`)) return new URLSearchParams()
+      const index = raw.indexOf('?')
+      return new URLSearchParams(index < 0 ? '' : raw.slice(index + 1))
+    }
+
+    /**
+     * 合并写回（只改自己那几个键）。
+     *
+     * 合并而不是覆盖：星图的 scope 和浏览页的 status 由不同组件各自维护，
+     * 谁先挂载都不该把对方的键清掉。
+     */
+    function writeUrlState(patch) {
+      if (typeof history === 'undefined' || typeof location === 'undefined') return
+      const params = readUrlState()
+      for (const [key, value] of Object.entries(patch)) {
+        const empty = value === null || value === undefined || value === ''
+          || (Array.isArray(value) && value.length === 0)
+        if (empty) params.delete(key)
+        else params.set(key, Array.isArray(value) ? value.join(',') : String(value))
+      }
+      const query = params.toString()
+      const next = query === '' ? '' : `#${URL_STATE_KEY}?${query}`
+      if (location.hash === next) return
+      try {
+        history.replaceState(history.state ?? null, '', `${location.pathname}${location.search}${next}`)
+      } catch {
+        // 某些环境（沙箱 iframe / file:）会禁 replaceState：静默放弃，面板照常可用
+      }
+    }
+
+    /** 从 URL 读一个白名单内的枚举值；不在白名单就返回兜底值 */
+    function readUrlEnum(key, allowed, fallback) {
+      const raw = readUrlState().get(key)
+      return raw !== null && allowed.includes(raw) ? raw : fallback
+    }
+
+    /** 从 URL 读一个逗号分隔的多选值（交集白名单，避免脏数据进 state） */
+    function readUrlList(key, allowed) {
+      const raw = readUrlState().get(key)
+      if (raw === null || raw === '') return []
+      const seen = new Set()
+      for (const item of raw.split(',')) {
+        const value = item.trim()
+        if (value !== '' && (allowed === undefined || allowed.includes(value))) seen.add(value)
+      }
+      return [...seen]
+    }
+
+    /** 从 URL 读一个数字（不在白名单就兜底） */
+    function readUrlNumber(key, allowed, fallback) {
+      const raw = readUrlState().get(key)
+      const value = raw === null ? Number.NaN : Number(raw)
+      return allowed.includes(value) ? value : fallback
+    }
+
     const ZH = {
       sectionLabel: '记忆库',
       title: '记忆库',
@@ -1839,13 +1908,21 @@ window.__ModuleLoader__.load({
     function GraphView({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       // 个人库与团队库分开画：默认团队，看个人要显式切换
-      const [scope, setScope] = React.useState('team')
+      const [scope, setScope] = React.useState(() => readUrlEnum('graphScope', ['team', 'personal', 'both'], 'team'))
       const [hover, setHover] = React.useState(null)
       const [size, setSize] = React.useState({ width: 900, height: 560 })
       const [focusId, setFocusId] = React.useState(null)
       // 双透镜（2026-11-02）：来源=调暗、类型=隐藏。默认两个都不动，与之前看到的一样。
-      const [hiddenTypes, setHiddenTypes] = React.useState(() => new Set())
-      const [dimTeam, setDimTeam] = React.useState(false)
+      // 三项都进 URL：双透镜是「看完图之后的结论状态」，刷新丢掉等于白调一遍。
+      const [hiddenTypes, setHiddenTypes] = React.useState(() => new Set(readUrlList('graphHidden')))
+      const [dimTeam, setDimTeam] = React.useState(() => readUrlState().get('graphDim') === '1')
+      React.useEffect(() => {
+        writeUrlState({
+          graphScope: scope,
+          graphHidden: [...hiddenTypes],
+          graphDim: dimTeam ? '1' : '',
+        })
+      }, [scope, hiddenTypes, dimTeam])
       // 自转默认开：转起来才有"星图"的感觉；切走页签会自动停
       const [orbit, setOrbit] = React.useState(true)
       const wrapRef = React.useRef(null)
@@ -3958,7 +4035,11 @@ window.__ModuleLoader__.load({
      * 呈现纪律：没有数据就显示「—」，不要把 0 当成"有人问过但没答案"。
      */
     function SearchLog({ t }) {
-      const [days, setDays] = React.useState(7)
+      // 时间窗进 URL：分享「最近 90 天」的视图时对方看到的该是同一个窗口
+      const [days, setDays] = React.useState(() => readUrlNumber('logDays', [7, 30, 90], 7))
+      React.useEffect(() => {
+        writeUrlState({ logDays: days === 7 ? '' : days })
+      }, [days])
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       const load = React.useCallback(() => {
         setState((prev) => ({ ...prev, loading: true, error: '' }))
@@ -4104,13 +4185,23 @@ window.__ModuleLoader__.load({
 
     // ── 记忆浏览 ─────────────────────────────────────────────────────────
     function Browse({ t, caps }) {
-      const [scope, setScope] = React.useState('both')
+      // 四个筛选进 URL（不含搜索词与页码：前者是临时输入、进了链接又长又容易把旧词带回来，
+      // 后者是临时位置）。默认值不写进 URL，保持链接干净。
+      const [scope, setScope] = React.useState(() => readUrlEnum('browseScope', ['both', 'personal', 'team'], 'both'))
       const [query, setQuery] = React.useState('')
-      const [status, setStatus] = React.useState('active')
+      const [status, setStatus] = React.useState(() => readUrlEnum('browseStatus', ['active', 'quarantine', 'all'], 'active'))
       const [includePending, setIncludePending] = React.useState(true)
-      const [domains, setDomains] = React.useState([])
-      const [types, setTypes] = React.useState([])
+      const [domains, setDomains] = React.useState(() => readUrlList('browseDomains'))
+      const [types, setTypes] = React.useState(() => readUrlList('browseTypes'))
       const [page, setPage] = React.useState(0)
+      React.useEffect(() => {
+        writeUrlState({
+          browseScope: scope === 'both' ? '' : scope,
+          browseStatus: status === 'active' ? '' : status,
+          browseDomains: domains,
+          browseTypes: types,
+        })
+      }, [scope, status, domains, types])
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       const [selected, setSelected] = React.useState(null)
       // 删除：物理删除不可恢复，所以要点一下按钮 → 在下方展开确认区 → 再确认
@@ -4647,7 +4738,14 @@ window.__ModuleLoader__.load({
      * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
      */
     function MemoryPanel({ t, onStatus }) {
-      const [tab, setTab] = React.useState('overview')
+      const TAB_ORDER = ['overview', 'browse', 'searchlog', 'graph', 'identity', 'persona', 'review', 'maint', 'config']
+      // 页签从 URL 还原：刷新/分享链接/从别的会话切回来都停在同一页
+      const [tab, setTab] = React.useState(() => readUrlEnum('tab', TAB_ORDER, 'overview'))
+      // 状态写回 URL。放进 effect 而不是 setTab 里，是因为概览页的「记忆浏览 →」也调 setTab，
+      // 一处 effect 覆盖所有入口，不用每处记得同时写 URL。
+      React.useEffect(() => {
+        writeUrlState({ tab })
+      }, [tab])
       // 工具条要显示 ES 状态与版本：由这里回报（它本来就要拉 overview），
       // 用 ref 存回调，免得把 onStatus 塞进 loadOverview 的依赖里导致重复请求。
       const statusRef = React.useRef(onStatus)
@@ -4671,6 +4769,14 @@ window.__ModuleLoader__.load({
           }))
           .catch(() => setCaps({ loaded: true, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false }))
       }, [])
+
+      // URL 里的页签可能在当前身份下不可见（审核台/维护）：权限到了就回退概览。
+      // 不这么做会出现「页签栏里没有这一项、内容区却渲染它」的错位。
+      React.useEffect(() => {
+        if (!caps.loaded) return
+        const allowed = caps.canReview ? TAB_ORDER : TAB_ORDER.filter((value) => value !== 'review' && value !== 'maint')
+        if (!allowed.includes(tab)) setTab('overview')
+      }, [caps.loaded, caps.canReview, tab])
       const [overview, setOverview] = React.useState({ loading: true, error: '', data: null })
 
       const [mood, setMood] = React.useState(null)
