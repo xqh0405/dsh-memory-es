@@ -55,8 +55,18 @@ window.__ModuleLoader__.load({
       if (location.hash === next) return
       try {
         history.replaceState(history.state ?? null, '', `${location.pathname}${location.search}${next}`)
-      } catch {
-        // 某些环境（沙箱 iframe / file:）会禁 replaceState：静默放弃，面板照常可用
+        // 诊断行（2026-11-03：实测「读取还原生效、写回没生效」，留证据定位）
+        console.log('[记忆库] replaceState 后 hash=', JSON.stringify(location.hash), '目标=', JSON.stringify(next))
+      } catch (error) {
+        console.warn('[记忆库] replaceState 失败:', String(error))
+        // 降级：replaceState 被禁（沙箱/权限）时用 hash 赋值，仍能改地址；
+        // 代价是多一条历史记录——比状态丢掉强
+        try {
+          location.hash = next
+          console.log('[记忆库] 降级 hash 赋值后 hash=', JSON.stringify(location.hash))
+        } catch (error2) {
+          console.warn('[记忆库] hash 赋值也失败:', String(error2))
+        }
       }
     }
 
