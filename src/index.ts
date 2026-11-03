@@ -32,6 +32,7 @@ import { definePersonaTool, loadActivePersona, type PersonaDeps } from './memory
 import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SECTION_NAME, CITATION_SECTION_ORDER, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
+import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -41,7 +42,7 @@ import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
-import { defineSearchTool } from './memory/search.ts'
+import { defineSearchTool, searchMemories } from './memory/search.ts'
 import { defineGetTool } from './memory/get.ts'
 import { createRecallCache } from './memory/recallCache.ts'
 import { defineStatusTool } from './memory/status.ts'
@@ -698,6 +699,55 @@ export function apply(ctx: Context, config: ConfigType): void {
         pushMoodEvent(signal.kind, signal.note, `agent:${String(agent?.id ?? 'default')}`)
       }),
     'dsh-memory-es.mood-user',
+  )
+
+  /*
+   * 阶段 16 P0：影子召回——每条用户消息后台跑一次「假如注入会注入什么」，
+   * **只落本地 JSONL，不注入、不碰会话历史**。数据够了再决定要不要真注入。
+   *
+   * 为什么即发即忘：这是个旁路观测，任何一次慢检索都不该拖住消息主流程；
+   * 超时（默认 800ms）由 observe 内部 abort，异常也已在内部收敛成 outcome=error。
+   */
+  ctx.effect(
+    () => {
+      const shadow = config.recallShadow
+      if (!shadow.enabled) return () => {}
+      const shadowPath = resolveShadowPath(shadow.path)
+      const writer = createShadowWriter(shadowPath)
+      const observe = createRecallObserver({
+        config: shadow,
+        writer,
+        search: async (query, signal) =>
+          await searchMemories(
+            {
+              userId,
+              personalPrefix,
+              teamIndex: config.index.team,
+              reader,
+              embed,
+              dims: config.embedding.dims,
+              retrieval,
+              confidence: config.confidence,
+              ranking: config.ranking,
+              mood: () => mood.state,
+              signal,
+              // 故意不给 hitRecorder / recorder / searchLogIndex / recallCache：
+              // 影子不是真实使用——不能抬高热度（会污染排序）、不该写检索埋点，
+              // 更不能进 recallCache，否则「检索原文再摄取」的准入会把影子查询
+              // 当成「用户刚搜过又抄回来」而误隔离。
+            },
+            // detail=summary 与真注入的口径一致：注入不会塞全文，影子也不该按全文估体积
+            { query, limit: shadow.maxItems + 2, detail: 'summary' },
+          ),
+      })
+      logger.info('影子召回已开：%s（只观测，不注入）', shadowPath)
+      return ctx.on('agent/inbox/inserted', ({ agent, message }: { agent: { id: string }; message: unknown }) => {
+        const text = extractUserText(message)
+        if (text.trim() === '') return
+        void observe({ text, agent: String(agent?.id ?? 'default') }).catch(() => {})
+      })
+    },
+    'dsh-memory-es.recall-shadow',
   )
 
   ctx.effect(

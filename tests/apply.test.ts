@@ -114,9 +114,13 @@ describe('apply', () => {
       harness.registered.map((tool) => tool.name).sort(),
       ['doc_search', 'memory_distill', 'memory_get', 'memory_history', 'memory_journal', 'memory_persona', 'memory_promote', 'memory_review', 'memory_save', 'memory_search', 'memory_traits', 'memory_update_status'],
     )
-    assert.equal(harness.logs.length, 1)
+    assert.equal(harness.logs.length, 2, 'ready 行 + 影子召回开启行（阶段 16 P0）')
     // 版本号在 ready 行里：部署后靠它判断「加载的是哪一版」（格式由 version.test.ts 守）
-    assert.match(harness.logs[0], /ready: v\d+\.\d+\.\d+ user=xqh index=personal_memory_xqh/)
+    // 不取 logs[0]：effect 在 apply 过程中执行，影子那行会先打出来
+    assert.ok(
+      harness.logs.some((line) => /ready: v\d+\.\d+\.\d+ user=xqh index=personal_memory_xqh/.test(line)),
+      `ready 行缺失：${JSON.stringify(harness.logs)}`,
+    )
   })
 
   test('引用要求默认不注入；prompt.citation=true 才注入（阶段 12）', () => {
@@ -146,8 +150,8 @@ describe('apply', () => {
     assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      21,
-      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 两个事件监听，都走 ctx.effect',
+      22,
+      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 三个事件监听（心情 / 工具结果 / 影子召回），都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)

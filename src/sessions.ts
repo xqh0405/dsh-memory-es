@@ -23,3 +23,17 @@ export function dshSessionsRoot(): string {
   if (home !== undefined && home !== '') return join(home, 'sessions')
   return join(homedir(), '.dsh', 'sessions')
 }
+
+/**
+ * 本插件私有数据目录（本地文件，不进 ES）：`$DSH_HOME/memory-es`。
+ *
+ * 为什么不放 ES：影子召回（阶段 16 P0）每轮都要落一条观测，字段还会变。
+ * ES 索引是 `dynamic: strict`，加字段必须先跑迁移脚本再上代码——
+ * 为一份**观测数据**去动 10 个索引的 mapping 不值得，本地 JSONL 删起来也干净。
+ */
+export function dshMemoryDataDir(): string {
+  const home = process.env.DSH_HOME?.trim()
+  if (home !== undefined && home !== '') return join(home, 'memory-es')
+  return join(homedir(), '.dsh', 'memory-es')
+}
+

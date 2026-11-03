@@ -158,6 +158,16 @@ export interface ConfigType {
     /** 单次回复最多贴几张 */
     maxPerTurn: number
   }
+  /** 阶段 16 P0：影子召回（只观测、不注入；用来拿「该不该开自动注入」的数据） */
+  recallShadow: {
+    enabled: boolean
+    maxItems: number
+    maxChars: number
+    timeoutMs: number
+    minIntervalMs: number
+    queryMaxChars: number
+    path: string
+  }
 }
 
 /**
@@ -395,6 +405,28 @@ export const Config: z<ConfigType> = z.object({
       .description('表情包目录：需要包含 stickers.json 与图片文件。支持 ~ 展开。'),
     maxPerTurn: z.number().step(1).min(1).max(5).default(1)
       .description('单次回复最多贴几张（默认 1，防止刷屏）。'),
+  }),
+  /*
+   * 阶段 16 P0 影子召回。
+   *
+   * **默认开**：影子不注入、不碰历史、不计费，开着才有数据。真注入是另一个开关，
+   * 等这批数据说话再决定（默认关的通用护栏适用于「改检索行为」的开关，不适用于旁路观测）。
+   */
+  recallShadow: z.object({
+    enabled: z.boolean().default(true)
+      .description('影子召回：每轮用户消息后跑一次「假如注入会注入什么」，只记本地 JSONL，不注入。默认开。'),
+    maxItems: z.number().step(1).min(1).max(10).default(3)
+      .description('「会注入」的条数上限；与真注入的预算保持一致，否则影子会高估。'),
+    maxChars: z.number().step(1).min(100).default(600)
+      .description('「会注入」的字符预算（按检索顺序累加）。估算 token ≈ 字符 / 2。'),
+    timeoutMs: z.number().step(1).min(100).max(10_000).default(800)
+      .description('单次影子检索超时（毫秒）。超时只记 outcome=timeout，不影响消息主流程。'),
+    minIntervalMs: z.number().step(1).min(0).default(0)
+      .description('两次观测的最小间隔（毫秒）；0 = 每条用户消息都观察。'),
+    queryMaxChars: z.number().step(1).min(10).max(2_000).default(400)
+      .description('拿消息前多少个字符当检索 query。'),
+    path: z.string().default('')
+      .description('JSONL 输出路径；留空 = $DSH_HOME/memory-es/recall-shadow.jsonl。'),
   }),
 })
 

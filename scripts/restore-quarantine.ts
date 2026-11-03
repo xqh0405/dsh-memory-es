@@ -74,8 +74,11 @@ async function main(): Promise<void> {
     return
   }
 
-  const hasVec = Array.isArray(source.embedding) && source.embedding.length === DIMS
-  console.log(`现有向量: ${hasVec ? `len=${source.embedding.length}` : '无（按设计隔离不写向量）'}`)
+  // 存局部变量而不是反复读 source.embedding：TS 不会因为 hasVec 为 true 就收窄可选字段，
+  // 直接写 source.embedding.length 会报 TS18048（2026-11-03 类型闸门抓到）
+  const existingVector = Array.isArray(source.embedding) ? source.embedding : undefined
+  const hasVec = existingVector !== undefined && existingVector.length === DIMS
+  console.log(`现有向量: ${hasVec ? `len=${existingVector.length}` : '无（按设计隔离不写向量）'}`)
   if (dry) {
     console.log('dry-run：将置 active + 清 reason + 补向量（隔离条目本就无向量）')
     return
