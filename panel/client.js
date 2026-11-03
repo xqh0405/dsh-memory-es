@@ -55,17 +55,14 @@ window.__ModuleLoader__.load({
       if (location.hash === next) return
       try {
         history.replaceState(history.state ?? null, '', `${location.pathname}${location.search}${next}`)
-        // 诊断行（2026-11-03：实测「读取还原生效、写回没生效」，留证据定位）
-        console.log('[记忆库] replaceState 后 hash=', JSON.stringify(location.hash), '目标=', JSON.stringify(next))
       } catch (error) {
-        console.warn('[记忆库] replaceState 失败:', String(error))
-        // 降级：replaceState 被禁（沙箱/权限）时用 hash 赋值，仍能改地址；
-        // 代价是多一条历史记录——比状态丢掉强
+        // replaceState 被禁（沙箱/权限）时降级用 hash 赋值：代价是多一条历史记录，比状态丢掉强。
+        // 只在真失败时留一行 warn——正常路径不打日志（2026-11-03 的临时诊断行已撤）。
+        console.warn('[记忆库] replaceState 失败，改用 hash 赋值:', String(error))
         try {
           location.hash = next
-          console.log('[记忆库] 降级 hash 赋值后 hash=', JSON.stringify(location.hash))
         } catch (error2) {
-          console.warn('[记忆库] hash 赋值也失败:', String(error2))
+          console.warn('[记忆库] hash 赋值也失败，本次状态不写回地址:', String(error2))
         }
       }
     }
