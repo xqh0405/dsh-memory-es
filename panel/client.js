@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
       tabBrowse: '记忆浏览',
       tabGraph: '星图',
       graphNodes: '节点',
+      graphBright: '可交互',
+      graphBrightHint: '只有亮星可点开两跳；其余是星点，只用来看分布',
       graphEdges: '边',
       graphClusters: '簇',
       graphOrphans: '孤点',
@@ -333,6 +335,8 @@ window.__ModuleLoader__.load({
       tabBrowse: 'Browse',
       tabGraph: 'Constellation',
       graphNodes: 'nodes',
+      graphBright: 'interactive',
+      graphBrightHint: 'Only bright stars open a two-hop view; dots are for distribution only',
       graphEdges: 'edges',
       graphClusters: 'clusters',
       graphOrphans: 'orphans',
@@ -1666,6 +1670,16 @@ window.__ModuleLoader__.load({
     const GALAXY_LOD_BRIGHT = 500
 
     /**
+     * 星图数据缓存（阶段 15 P2）。
+     *
+     * 切页签会卸载 GraphView，所以缓存必须放模块级才跨得过重挂——放 useRef 里会随组件
+     * 一起丢掉，等于每次都重查。60s 是权衡：记忆写得不算频，但「刚存完就去看」要对得上，
+     * 窗口太长会让人以为图没更新。
+     */
+    const GRAPH_CACHE_TTL_MS = 60_000
+    const GRAPH_CACHE = new Map()
+
+    /**
      * 开场时序（毫秒）：黑场 → 背景淡入 → 星点逐个点亮 → 镜头推近 → 最新一颗"叮"。
      *
      * 只在**本次页面生命周期内第一次**进星图跑一次。切换页签会卸载组件，
@@ -1856,12 +1870,23 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
+        // 缓存命中就直接用：切页签会卸载本组件，重挂时不该再打一次 ES。
+        // 60s 的窗口是权衡结果——记忆写得不算频，但「刚存完就去看」要对得上。
+        const cached = GRAPH_CACHE.get(scope)
+        if (cached !== undefined && Date.now() - cached.at < GRAPH_CACHE_TTL_MS) {
+          setState({ loading: false, error: '', data: cached.data })
+          return () => {
+            alive = false
+          }
+        }
         setState({ loading: true, error: '', data: null })
-        // 不传 limit：由后端 GRAPH_DEFAULT_NODES 决定（阶段 15 起是单盘 1000）。
+        // 不传 limit：由后端 GRAPH_DEFAULT_NODES 决定（阶段 15 起是单盘 5000）。
         // 上限从「前端写死 300」移到后端常量后，调上限不用再动前端。
         apiGet('/graph', { scope })
           .then((data) => {
-            if (alive) setState({ loading: false, error: '', data })
+            if (!alive) return
+            GRAPH_CACHE.set(scope, { data, at: Date.now() })
+            setState({ loading: false, error: '', data })
           })
           .catch((error) => {
             if (alive) setState({ loading: false, error: String(error.message ?? error), data: null })
@@ -2531,6 +2556,9 @@ window.__ModuleLoader__.load({
       const graph = model.graph
       const stats = graph.stats
       const coverage = state.data?.coverage ?? null
+      // 可交互的只有亮星（LOD 第一层）：顶栏必须写出来，
+      // 否则「几千个点里只有 500 个点得动」会被当成 bug（阶段 15 定案）。
+      const brightShown = Math.min(GALAXY_LOD_BRIGHT, graph.nodes.length)
       // 双透镜：类型列表从当前数据里取（不猜有哪些 type）。
       // ⚠️ 这里**不能**用 React.useMemo：本组件在它之前有 loading/error 早退，
       // 加载完成时 hook 数量变化 → React 抛 "Rendered more hooks than during the previous render"，
@@ -2549,8 +2577,9 @@ window.__ModuleLoader__.load({
             ? h('span', { style: { ...S.muted, fontSize: 12 } },
                 `${t('graphFocus')}：${String(focusNode?.label ?? '').slice(0, 22)} · ` +
                   `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')}`)
-            : h('span', { style: S.muted, fontSize: 12 },
-                `${graph.nodes.length} ${t('graphNodes')} · ${graph.edges.length} ${t('graphEdges')} · ` +
+            : h('span', { style: S.muted, fontSize: 12, title: t('graphBrightHint') },
+                `${graph.nodes.length} ${t('graphNodes')} · ${brightShown} ${t('graphBright')} · ` +
+                  `${graph.edges.length} ${t('graphEdges')} · ` +
                   `${graph.clusters.length} ${t('graphClusters')}` +
                   (stats.orphans > 0 ? ` · ${stats.orphans} ${t('graphOrphans')}` : '') +
                   (stats.unresolved > 0 ? ` · ${stats.unresolved} ${t('graphUnresolved')}` : '') +

@@ -562,16 +562,17 @@ function buildGraph(nodeList, edgeList, options = {}) {
 }
 
 /**
- * 星图默认与上限（阶段 15）。
+ * 星图默认与上限（阶段 15 定案：单盘 5000）。
  *
  * 文档 8.4 原本定的是 300/400（防毛球）；阶段 15 把毛球问题交给前端 LOD 解决
- * （亮星画光晕、其余退化成小点），于是上限可以放开到「单盘 1000」。
+ * （top 500 画光晕、其余退化成小点），于是上限放开到单盘 5000、双盘合计最多 10000。
  *
- * ⚠️ fetchSize = GRAPH_MAX_NODES * 2。抬到 5000 时是 10000，**正好压在 ES
- * `index.max_result_window` 默认值上**；再往上必须改 search_after 分批（阶段 15 不做）。
+ * ⚠️ `fetchSize = GRAPH_MAX_NODES * 2 = 10000`，**正好压在 ES `index.max_result_window`
+ * 默认值上**（要求 from + size ≤ 10000）。这是刻意的安全边界：单盘超 10000 条时
+ * 必须改 `search_after` 游标分批，属于下一轮架构，不在阶段 15 范围内。
  */
-const GRAPH_DEFAULT_NODES = 1000
-const GRAPH_MAX_NODES = 1000
+const GRAPH_DEFAULT_NODES = 5000
+const GRAPH_MAX_NODES = 5000
 const GRAPH_MAX_DEGREE = 10
 
 /**
