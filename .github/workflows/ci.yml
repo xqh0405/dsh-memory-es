@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手动触发：想单独跑一次这道闸时不用空推一个 commit
+  workflow_dispatch:
 
 jobs:
   check:
