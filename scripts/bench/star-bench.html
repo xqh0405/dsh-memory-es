@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>星图渲染压测 · 阶段 15</title>
+<style>
+  html, body { margin: 0; background: #05060b; color: #cfe0ff; font: 13px/1.6 system-ui, sans-serif; }
+  #wrap { padding: 12px; }
+  canvas { display: block; border-radius: 8px; background: radial-gradient(circle at 50% 45%, #0b1226, #04050a 70%); }
+  #out { margin-top: 10px; white-space: pre; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="out">采样中…</div>
+</div>
+<script>
+/**
+ * 星图渲染压测页（阶段 15.9 验收 + P3）。
+ *
+ * ⚠️ 口径说明：这不是面板的像素级复刻，测的是**绘制路径随点数增长的缩放特性**。
+ * 与面板一致的部分：画布 900×560 + DPR 2、yaw/pitch 透视投影、每帧按 z 排序、
+ *   64px 径向渐变光晕贴图 + drawImage 缩放、fillRect 画星点、边按屏幕跨度裁剪、
+ *   LOD 亮星阈值与亮度自适应公式（sqrt(500/n)，下限 0.18）。
+ * 不一致的部分：布局形状（这里用确定性伪随机盘，面板是螺旋盘）与标签/暗角等装饰。
+ *
+ * 用法：?mode=lod|full&n=5000&bright=500&edges=2000
+ * 结果写到 window.__benchResult 并 console.log 一行 JSON，供 browser_console 抓。
+ */
+const params = new URLSearchParams(location.search)
+const MODE = params.get('mode') === 'full' ? 'full' : 'lod'
+const N = Math.max(20, Math.min(10000, Number(params.get('n') ?? 5000)))
+const BRIGHT = Math.max(0, Math.min(N, Number(params.get('bright') ?? 500)))
+const EDGE_COUNT = Math.max(0, Number(params.get('edges') ?? Math.round(N * 0.4)))
+// 排序策略：默认 bucket（与面板一致，阶段 15 验收后从全排序改成分桶）。
+// &sort=full 回到旧的全排序、&sort=none 完全不排，两个都是诊断口（15.7 风险 4）。
+const SORT_MODE = params.get('sort') === 'full' ? 'full' : params.get('nosort') === '1' || params.get('sort') === 'none' ? 'none' : 'bucket'
+const W = 900
+const H = 560
+const DPR = 2
+const CAM_DIST = 900
+const FOCAL = 700
+
+const canvas = document.getElementById('c')
+canvas.width = W * DPR
+canvas.height = H * DPR
+canvas.style.width = `${W}px`
+canvas.style.height = `${H}px`
+const ctx = canvas.getContext('2d')
+ctx.scale(DPR, DPR)
+
+// ── 确定性伪随机：同一 URL 每次跑出同一张图，帧时间才可比 ──────────────────
+let seed = 123456789
+function rnd() {
+  seed = (seed * 1664525 + 1013904223) % 4294967296
+  return seed / 4294967296
+}
+function hashUnit(str) {
+  let h = 2166136261
+  for (let i = 0; i < str.length; i += 1) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) }
+  return (h >>> 0) / 4294967296
+}
+
+// ── 造节点：极坐标铺盘，度数用「连到更早的随机邻居」累加 ──────────────────
+const nodes = []
+for (let i = 0; i < N; i += 1) {
+  const r = Math.sqrt(i / N) * 340 + rnd() * 26
+  const theta = i * 0.38 + rnd() * 0.5
+  nodes.push({
+    id: `n-${i}`,
+    x: Math.cos(theta) * r,
+    y: (rnd() - 0.5) * 46,
+    z: Math.sin(theta) * r,
+    degree: 0,
+    color: ['#6b8cff', '#ff9ec7', '#8ef2c9', '#ffd479', '#b79bff'][i % 5],
+    updatedAt: Date.now() - Math.floor(rnd() * 200) * 86400000,
+  })
+}
+const edges = []
+for (let e = 0; e < EDGE_COUNT; e += 1) {
+  const a = Math.floor(rnd() * N)
+  const b = Math.floor(rnd() * N)
+  if (a === b) continue
+  const weight = 0.55 + rnd() * 0.3
+  edges.push({ source: nodes[a].id, target: nodes[b].id, weight })
+  nodes[a].degree += 1
+  nodes[b].degree += 1
+}
+
+// ── 亮星集合：与 panel/client.js 同口径（度数降序取前 BRIGHT）─────────────
+const brightIds = new Set()
+{
+  const ranked = [...nodes].sort((a, b) => b.degree - a.degree)
+  for (let i = 0; i < BRIGHT && i < ranked.length; i += 1) brightIds.add(ranked[i].id)
+}
+
+// ── 预渲染贴图：光晕与中心核（与面板同样 64px 径向渐变）────────────────────
+const spriteCache = new Map()
+function glowSprite(color) {
+  let sprite = spriteCache.get(color)
+  if (sprite !== undefined) return sprite
+  const size = 64
+  const off = document.createElement('canvas')
+  off.width = size
+  off.height = size
+  const g = off.getContext('2d')
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
+  grad.addColorStop(0, color)
+  grad.addColorStop(0.28, color)
+  grad.addColorStop(1, 'rgba(0,0,0,0)')
+  g.fillStyle = grad
+  g.fillRect(0, 0, size, size)
+  sprite = off
+  spriteCache.set(color, sprite)
+  return sprite
+}
+
+// 背景星尘：与面板同样 3800 颗 fillRect（不随节点数变化，作为固定底噪）
+const dust = Array.from({ length: 3800 }, () => ({
+  x: (rnd() - 0.5) * 1200,
+  y: (rnd() - 0.5) * 700,
+  z: (rnd() - 0.5) * 1200,
+  size: 0.4 + rnd() * 1.2,
+  alpha: 0.05 + rnd() * 0.28,
+}))
+
+let yaw = 0
+let pitch = -0.32
+function project(x, y, z) {
+  const cy = Math.cos(yaw)
+  const sy = Math.sin(yaw)
+  const cp = Math.cos(pitch)
+  const sp = Math.sin(pitch)
+  const x1 = x * cy - z * sy
+  const z1 = x * sy + z * cy
+  const y2 = y * cp - z1 * sp
+  const z2 = y * sp + z1 * cp
+  const persp = FOCAL / Math.max(120, FOCAL + z2 + CAM_DIST * 0.35)
+  return { x: W / 2 + x1 * persp, y: H / 2 + y2 * persp, z: z2, k: persp }
+}
+
+const alphaScale = N <= BRIGHT ? 1 : Math.max(0.18, Math.min(1, Math.sqrt(BRIGHT / N)))
+const screenOf = new Map()
+
+function frame() {
+  yaw += 0.0016
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.clearRect(0, 0, W, H)
+
+  // 背景星尘（固定成本，两个模式都一样）
+  ctx.globalCompositeOperation = 'lighter'
+  for (const mote of dust) {
+    const p = project(mote.x, mote.y, mote.z)
+    const blur = Math.max(0, Math.min(1, (p.z / CAM_DIST - 0.14) / 0.5))
+    const size = Math.max(0.4, mote.size * p.k * 1.7 * (1 + blur * 0.8))
+    ctx.globalAlpha = mote.alpha * Math.min(1, p.k * 1.15) * (1 - blur * 0.5)
+    ctx.fillStyle = 'rgba(140,175,255,1)'
+    ctx.fillRect(p.x, p.y, size, size)
+  }
+
+  // 投影 + 按 z 排序（面板每帧都做，5000 点时 O(n log n)）
+  const points = []
+  for (const node of nodes) {
+    const screen = project(node.x, node.y, node.z)
+    points.push({ node, screen, seed: hashUnit(node.id) })
+  }
+  // 远的先画、近的盖上去。面板用 256 个 z 桶（O(n)）代替全排序。
+  if (SORT_MODE === 'full') {
+    points.sort((a, b) => b.screen.z - a.screen.z)
+  } else if (SORT_MODE === 'bucket') {
+    let zMin = Infinity
+    let zMax = -Infinity
+    for (const item of points) {
+      if (item.screen.z < zMin) zMin = item.screen.z
+      if (item.screen.z > zMax) zMax = item.screen.z
+    }
+    const span = zMax - zMin
+    if (span > 0) {
+      const BUCKETS = 256
+      const buckets = Array.from({ length: BUCKETS }, () => [])
+      for (const item of points) {
+        const index = Math.min(BUCKETS - 1, Math.floor(((zMax - item.screen.z) / span) * BUCKETS))
+        buckets[index].push(item)
+      }
+      points.length = 0
+      for (const bucket of buckets) for (const item of bucket) points.push(item)
+    }
+  }
+  screenOf.clear()
+  for (const item of points) screenOf.set(item.node.id, item.screen)
+
+  // 边：只画屏幕跨度 ≤ 170 的（与面板同口径）
+  for (const edge of edges) {
+    const a = screenOf.get(edge.source)
+    const b = screenOf.get(edge.target)
+    if (a === undefined || b === undefined) continue
+    const span = Math.hypot(a.x - b.x, a.y - b.y)
+    if (span > 170) continue
+    ctx.globalAlpha = 0.01 + edge.weight * 0.035
+    ctx.strokeStyle = 'rgba(96,130,190,1)'
+    ctx.lineWidth = 0.45 + edge.weight * 0.45
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.stroke()
+  }
+
+  // 节点：两种模式的唯一差别就在这里
+  ctx.globalCompositeOperation = 'source-over'
+  for (const item of points) {
+    const node = item.node
+    const screen = item.screen
+    const blur = Math.max(0, Math.min(1, (screen.z / CAM_DIST - 0.14) / 0.5))
+    const sizeJitter = 0.8 + hashUnit(node.id + '#sz') * 0.5
+    const depth = Math.min(1.6, Math.max(0.55, screen.k * 1.15))
+    const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth * (1 - blur * 0.42)
+    const fresh = 1 - Math.min(1, (Date.now() - node.updatedAt) / 86400000 / 120)
+    const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
+
+    // full 模式 = 阶段 15 之前的画法（每个点都画光晕），用于对照
+    const isBright = MODE === 'full' || brightIds.has(node.id)
+    if (!isBright) {
+      const dot = Math.max(0.6, radius * 0.9)
+      ctx.globalAlpha = Math.min(1, (0.2 + fresh * 0.34) * (0.7 + depth * 0.3) * (1 - blur * 0.45)) * alphaScale
+      ctx.fillStyle = node.color
+      ctx.fillRect(screen.x - dot / 2, screen.y - dot / 2, dot, dot)
+      continue
+    }
+
+    const alpha = Math.min(1, (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle)
+      * (alphaScale === 1 ? 1 : Math.max(0.55, alphaScale))
+
+    // 光晕：贵操作，LOD 只给亮星画
+    const sprite = glowSprite(node.color)
+    const glowSize = radius * (node.degree >= 8 ? 7 : 5.2) * (1 + blur * 2.4)
+    ctx.globalAlpha = Math.min(1, alpha * 0.72 * (1 - blur * 0.3))
+    ctx.drawImage(sprite, screen.x - glowSize / 2, screen.y - glowSize / 2, glowSize, glowSize)
+
+    ctx.globalAlpha = alpha
+    ctx.fillStyle = node.color
+    ctx.beginPath()
+    ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+// ── 采样：预热 8 帧，再记 30 帧 ────────────────────────────────────────
+const WARMUP = 8
+const SAMPLES = 30
+let frameIndex = 0
+const times = []
+function tick() {
+  const t0 = performance.now()
+  frame()
+  const t1 = performance.now()
+  if (frameIndex >= WARMUP) times.push(t1 - t0)
+  frameIndex += 1
+  if (times.length < SAMPLES) {
+    requestAnimationFrame(tick)
+    return
+  }
+  const sorted = [...times].sort((a, b) => a - b)
+  const avg = times.reduce((sum, t) => sum + t, 0) / times.length
+  const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))]
+  const result = {
+    mode: MODE,
+    sort: SORT_MODE,
+    n: N,
+    bright: MODE === 'full' ? N : Math.min(BRIGHT, N),
+    edges: edges.length,
+    alphaScale: Math.round(alphaScale * 1000) / 1000,
+    frames: times.length,
+    avg: Math.round(avg * 100) / 100,
+    p95: Math.round(p95 * 100) / 100,
+    min: Math.round(sorted[0] * 100) / 100,
+    max: Math.round(sorted[sorted.length - 1] * 100) / 100,
+  }
+  window.__benchResult = result
+  document.getElementById('out').textContent = JSON.stringify(result, null, 2)
+  console.log('BENCH ' + JSON.stringify(result))
+}
+requestAnimationFrame(tick)
+</script>
+</body>
+</html>
