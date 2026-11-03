@@ -419,8 +419,10 @@ export const Config: z<ConfigType> = z.object({
       .description('「会注入」的条数上限；与真注入的预算保持一致，否则影子会高估。'),
     maxChars: z.number().step(1).min(100).default(600)
       .description('「会注入」的字符预算（按检索顺序累加）。估算 token ≈ 字符 / 2。'),
-    timeoutMs: z.number().step(1).min(100).max(10_000).default(800)
-      .description('单次影子检索超时（毫秒）。超时只记 outcome=timeout，不影响消息主流程。'),
+    timeoutMs: z.number().step(1).min(100).max(10_000).default(3_000)
+      .description('单次影子检索超时（毫秒）。超时只记 outcome=timeout，不影响消息主流程。'
+        + '默认 3000 而不是 800：实测 Ollama bge-m3 冷启动要 1.87s、热调用 0.08s，'
+        + '800ms 只够热路径，进程刚重启那一次必然 timeout（2026-11-03 实测）。'),
     minIntervalMs: z.number().step(1).min(0).default(0)
       .description('两次观测的最小间隔（毫秒）；0 = 每条用户消息都观察。'),
     queryMaxChars: z.number().step(1).min(10).max(2_000).default(400)

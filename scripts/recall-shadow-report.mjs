@@ -115,3 +115,4 @@ if (byAgent.size > 1) {
 }
 console.log('')
 console.log('判读提示：命中率明显偏低时先看 timeout / error 占比——通道没跑起来和「真的没记忆」是两件事。')
+console.log('          timeout 集中在进程启动后的头几条 = Ollama 冷启动（实测 1.87s，热调用 0.08s），不是检索坏了。')
