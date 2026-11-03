@@ -1653,6 +1653,19 @@ window.__ModuleLoader__.load({
     const GALAXY_SHOW_LABELS = true // 截图配图时临时改成 false，避免带出项目名
 
     /**
+     * LOD 分层阈值（阶段 15）。
+     *
+     * 只有度数最高的这么多颗走「完整星」路径（光晕贴图 + 描边 + label + 可拾取），
+     * 其余全部退化成 fillRect 小点。为什么必须分：
+     * 压测里 5000 点全画径向渐变光晕是 676ms/帧，同样 5000 点改小点只要 2.36ms
+     * （差 286 倍）——瓶颈是加色混合的填充面积，不是点数本身。
+     *
+     * 节点数 ≤ 这个阈值时**全体都算亮星**，绘制路径与引入 LOD 之前一模一样，
+     * 所以当前 300 个节点的观感不会有任何变化（P0 的硬要求）。
+     */
+    const GALAXY_LOD_BRIGHT = 500
+
+    /**
      * 开场时序（毫秒）：黑场 → 背景淡入 → 星点逐个点亮 → 镜头推近 → 最新一颗"叮"。
      *
      * 只在**本次页面生命周期内第一次**进星图跑一次。切换页签会卸载组件，
@@ -1829,6 +1842,9 @@ window.__ModuleLoader__.load({
       // 投影用的画布尺寸：每帧从容器实时读，避免 state 落后于真实布局（画布比容器小一圈）
       const viewportRef = React.useRef({ width: 900, height: 560 })
       const sceneRef = React.useRef({ hits: [], screen: new Map() })
+      // LOD 亮星集合按 graph 引用缓存：每帧重排 5000 个节点是白烧 CPU，
+      // 只有取到新数据（graph 换引用）时才重算一次
+      const lodRef = React.useRef({ graph: null, brightIds: new Set() })
       const drawRef = React.useRef(() => {})
       const orbitRef = React.useRef(true)
       const visibleRef = React.useRef(true)
@@ -2182,6 +2198,27 @@ window.__ModuleLoader__.load({
         ctx.globalCompositeOperation = 'source-over'
         const hits = []
         const labels = []
+        // ── LOD 分层（阶段 15）─────────────────────────────────────────────
+        // 亮星集合：度数降序取前 GALAXY_LOD_BRIGHT 颗。缓存按 graph 引用判断，
+        // 数据没换就不重排（5000 点每帧重排约 0.5ms，不值得）。
+        if (lodRef.current.graph !== graph) {
+          const bright = new Set()
+          if (graph.nodes.length > GALAXY_LOD_BRIGHT) {
+            const ranked = [...graph.nodes].sort((a, b) => b.degree - a.degree)
+            for (let i = 0; i < GALAXY_LOD_BRIGHT && i < ranked.length; i += 1) bright.add(ranked[i].id)
+          }
+          // 空集合 = 「所有节点都是亮星」：节点数没超阈值，走原来的路径
+          lodRef.current = { graph, brightIds: bright }
+        }
+        const brightIds = lodRef.current.brightIds
+        const allBright = brightIds.size === 0
+        const nodeCount = points.length
+        // 亮度自适应：点越多，单点越暗，否则加色混合会把盘心叠成白团。
+        // 用 sqrt 而不是线性——线性在 5000 点就压到下限、层次会塌。
+        // 没超阈值时恒为 1，等于完全不介入。
+        const alphaScale = nodeCount <= GALAXY_LOD_BRIGHT
+          ? 1
+          : Math.max(0.18, Math.min(1, Math.sqrt(GALAXY_LOD_BRIGHT / nodeCount)))
         for (const item of points) {
           const node = item.node
           const screen = item.screen
@@ -2197,6 +2234,21 @@ window.__ModuleLoader__.load({
           const blur = clamp01((screen.z / camDist - 0.14) / 0.5)
           const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth
             * (isHover || isFocus ? 1.3 : 1) * (1 - blur * 0.42)
+
+          // ── L2 星点：不画光晕、不进拾取、不出标签，只用 fillRect 点一下 ──
+          // 悬停/聚焦的节点一律走完整路径，所以可交互的目标永远是有光晕的那颗，
+          // 不会出现「看着是星点、点了却突然亮起来」的错位。
+          const isBright = allBright || brightIds.has(node.id)
+          if (!isBright && !isHover && !isFocus) {
+            const dot = Math.max(0.6, radius * 0.9)
+            ctx.globalAlpha = Math.min(1, (0.2 + fresh * 0.34) * (0.7 + depth * 0.3)
+              * (1 - blur * 0.45)) * alphaScale
+              * (dimTeam && node.scope === 'team' ? 0.3 : 1) * litOf(item.seed)
+            ctx.fillStyle = item.color
+            ctx.fillRect(screen.x - dot / 2, screen.y - dot / 2, dot, dot)
+            continue
+          }
+
           // 亮度再按 id 抖一点：同一领域全一样亮会像一排灯，星点该有明暗层次
           const twinkle = 0.78 + hashUnit(node.id + '#b') * 0.4
           const dimNode = dimTeam && node.scope === 'team' && !isHover && !isFocus
@@ -2214,6 +2266,9 @@ window.__ModuleLoader__.load({
             (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1)
               * (1 + flare * 0.9),
           ) * (dimNode ? 0.3 : 1) * litOf(item.seed)
+            // 亮星也要随总量略压（保底 0.55），否则 5000 点时一片白；
+            // alphaScale === 1 表示没超阈值，此处完全不介入
+            * (alphaScale === 1 ? 1 : Math.max(0.55, alphaScale))
 
           hits.push({ id: node.id, x: screen.x, y: screen.y, r: radius, z: screen.z })
 
