@@ -11,14 +11,18 @@
  *   凭据取 .chat-inspect/creds/<uid>.env（MEM_USERNAME / MEM_PASSWORD）
  */
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { pickNeighbors, mergeEdges, readEdges } from '../src/edges.ts'
 import { knnBody } from '../src/es/dsl.ts'
 import { createEsClient } from '../src/es/http.ts'
 import type { EsClient } from '../src/es/http.ts'
 
-const ES_URL = 'https://192.168.50.125:9200'
-const CA = '/home/xqh/.dsh/certs/dsh-es-lan-ca.crt'
+// 连接信息一律走环境变量：本仓库是公开的，不能把内网地址与家目录写死。
+// 本机用法：export MEM_ES_URL=https://<内网地址>:9200 MEM_ES_CA=/path/to/ca.crt
+const ES_URL = process.env.MEM_ES_URL ?? 'https://127.0.0.1:9200'
+const CA = process.env.MEM_ES_CA ?? join(homedir(), '.dsh', 'certs', 'es-ca.crt')
 const PERSONAL_PREFIX = 'personal_memory_'
 
 // 与 src/config.ts 的 edges 默认值、embedding.dims(bge-m3) 对齐
