@@ -561,9 +561,17 @@ function buildGraph(nodeList, edgeList, options = {}) {
   }
 }
 
-/** 星图默认与上限（文档 8.4：节点封顶 400、单点度数 10） */
-const GRAPH_DEFAULT_NODES = 300
-const GRAPH_MAX_NODES = 400
+/**
+ * 星图默认与上限（阶段 15）。
+ *
+ * 文档 8.4 原本定的是 300/400（防毛球）；阶段 15 把毛球问题交给前端 LOD 解决
+ * （亮星画光晕、其余退化成小点），于是上限可以放开到「单盘 1000」。
+ *
+ * ⚠️ fetchSize = GRAPH_MAX_NODES * 2。抬到 5000 时是 10000，**正好压在 ES
+ * `index.max_result_window` 默认值上**；再往上必须改 search_after 分批（阶段 15 不做）。
+ */
+const GRAPH_DEFAULT_NODES = 1000
+const GRAPH_MAX_NODES = 1000
 const GRAPH_MAX_DEGREE = 10
 
 /**
@@ -614,13 +622,18 @@ async function handleGraph(ctx, res, url) {
         : [['personal', names.personal], ['team', names.team]]
 
   const fetchSize = Math.min(GRAPH_MAX_NODES * 2, Math.max(limit * 2, 200))
-  const nodes = []
-  const edges = []
   // 两级截断都要如实报（Zep 的「truncated 诚实」）：
   //   ① 取样上限 fetchSize —— 索引里 active 的比它多，说明「没取到」；
   //   ② 节点上限 limit —— 取到了但画不下，说明「没画全」。
   const sampled = {}
   const total = {}
+  // ── 分盘构图（阶段 15 定案）───────────────────────────────────────────
+  // 每张盘各自取数、各自 buildGraph，最后合并渲染。
+  // 不能两库合并后抢同一个 limit：团队盘的高连接节点会把个人盘挤掉。
+  // 两库之间本来就没有边（14.8：不做跨库建边），分盘构图在语义上也是对的。
+  const graphs = []
+  const clusterMap = new Map()
+  const stats = { nodes: 0, edges: 0, orphans: 0, unresolved: 0 }
 
   for (const [scopeName, index] of targets) {
     let result
@@ -639,11 +652,13 @@ async function handleGraph(ctx, res, url) {
     const totalHits = typeof result.hits?.total === 'number' ? result.hits.total : result.hits?.total?.value
     total[scopeName] = Number.isFinite(totalHits) ? num(totalHits) : sampled[scopeName]
     // 面板的 search 返回 ES 原始响应（`{ hits: { hits: [...] } }`），不是数组
+    const scopeNodes = []
+    const scopeEdges = []
     for (const hit of result.hits?.hits ?? []) {
       const source = hit._source ?? {}
       const id = str(source.memory_id) || str(hit._id)
       if (id === '') continue
-      nodes.push({
+      scopeNodes.push({
         id,
         scope: scopeName,
         // 详情面板只需要一句可读的摘要，全文由「记忆浏览」负责
@@ -654,12 +669,25 @@ async function handleGraph(ctx, res, url) {
         status: str(source.status) || 'active',
       })
       for (const edge of readRelated(source.related)) {
-        edges.push({ source: id, target: edge.id, weight: edge.weight })
+        scopeEdges.push({ source: id, target: edge.id, weight: edge.weight })
       }
+    }
+    const sub = buildGraph(scopeNodes, scopeEdges, { limit, maxDegree: GRAPH_MAX_DEGREE })
+    graphs.push(sub)
+    stats.nodes += sub.stats.nodes
+    stats.edges += sub.stats.edges
+    stats.orphans += sub.stats.orphans
+    stats.unresolved += sub.stats.unresolved
+    // 分团按 domain 累加：同一领域在两张盘都有时合并成一个数，与合并前的口径一致
+    for (const cluster of sub.clusters) {
+      const prev = clusterMap.get(cluster.domain)
+      if (prev === undefined) clusterMap.set(cluster.domain, { domain: cluster.domain, count: cluster.count })
+      else prev.count += cluster.count
     }
   }
 
-  const graph = buildGraph(nodes, edges, { limit, maxDegree: GRAPH_MAX_DEGREE })
+  const nodes = graphs.flatMap((graph) => graph.nodes)
+  const edges = graphs.flatMap((graph) => graph.edges)
 
   return json(res, 200, {
     ok: true,
@@ -668,8 +696,11 @@ async function handleGraph(ctx, res, url) {
       scope,
       limit,
       maxDegree: GRAPH_MAX_DEGREE,
-      coverage: buildCoverage(total, sampled, graph.nodes.length),
-      ...graph,
+      coverage: buildCoverage(total, sampled, nodes.length),
+      nodes,
+      edges,
+      clusters: [...clusterMap.values()].sort((a, b) => b.count - a.count),
+      stats,
     },
   })
 }

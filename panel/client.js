@@ -1857,7 +1857,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let alive = true
         setState({ loading: true, error: '', data: null })
-        apiGet('/graph', { limit: 300, scope })
+        // 不传 limit：由后端 GRAPH_DEFAULT_NODES 决定（阶段 15 起是单盘 1000）。
+        // 上限从「前端写死 300」移到后端常量后，调上限不用再动前端。
+        apiGet('/graph', { scope })
           .then((data) => {
             if (alive) setState({ loading: false, error: '', data })
           })
