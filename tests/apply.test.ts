@@ -158,6 +158,26 @@ describe('apply', () => {
     assert.equal(harness.sections.length, 0)
   })
 
+  // 2026-11-04 巡检教训：积压 158 条 pending 没人消费的根因就是「钩子只挂在一条路上」。
+  // 清扫 effect 必须随 distill.enabled 注册——上面的 22 只守住「关闭时不注册」，
+  // 这条守住「开启时真的注册」，否则功能等于没装。
+  test('distill.enabled=true 时注册清扫定时器（关闭时不注册）', () => {
+    const off = fakeCtx()
+    apply(off.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
+    const on = fakeCtx()
+    apply(
+      on.ctx as never,
+      baseConfig({
+        es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 },
+        distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000 },
+      }),
+    )
+    assert.equal(on.disposers.length, off.disposers.length + 1, '开着蒸馏就该多注册一个清扫 effect')
+    // 卸载要能收干净（定时器必须在 disposer 里清掉，否则 fiber 卸载后还在跑）
+    for (const dispose of on.disposers) dispose()
+    assert.ok(true)
+  })
+
   test('配置非法：一次列出全部问题（不只报第一个）', () => {
     const broken = Config({ identity: { userId: '' } } as never) as ConfigType
     assert.throws(
