@@ -201,6 +201,8 @@ def main() -> int:
                 "content": content,
                 "memory_type": mtype,
                 "domain": domain,
+                # 来源戳：迁移脚本直写（缺了审计时查不到这批是谁灌的）
+                "origin": "import",
                 # 已整理过的旧记忆：直接标 done，避免后台蒸馏重复改写
                 "promote_state": "none",
                 "distill_state": "done",

@@ -403,6 +403,8 @@ export async function writePersonaCandidate(
     domain: 'general',
     privacy: 'private',
     importance: 'normal',
+    // 来源戳：插件自动学习写的（同 traits），不是模型调 memory_save
+    origin: 'tool',
     status: PERSONA_PENDING_STATUS,
     promote_state: 'none',
     distill_state: 'persona',

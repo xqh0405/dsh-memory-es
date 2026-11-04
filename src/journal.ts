@@ -280,6 +280,8 @@ export async function writeJournal(
     domain: 'general',
     privacy: 'private',
     importance: 'low',
+    // 来源戳：定时任务写的日记（同 traits/persona）
+    origin: 'tool',
     status: 'active',
     promote_state: 'none',
     distill_state: 'journal',

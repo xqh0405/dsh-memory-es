@@ -84,3 +84,113 @@ test('没有 llm 服务时：不抛错，返回 no_llm_service（条目留在 pe
   assert.equal(result.ok, false)
   assert.equal(result.reason, 'no_llm_service')
 })
+
+// ── content_fault：失败分类（sweep 计次的地基）────────────────────────────
+// 分错类的代价不对称：把环境故障算成内容问题 → 一次 LLM 停机判死整批条目；
+// 把内容问题算成环境问题 → 毒条目无限重试烧钱。两类都要钉死。
+
+test('content_fault：模型输出不可解析 → true（内容问题，计次）', async () => {
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: { get: async () => ({ id: 'm1', source: { memory_id: 'm1', user_id: 'xqh', content: 'x' } }) },
+      writer: { update: async () => ({ id: 'm1', result: 'updated', status: 200 }) },
+      llm: {
+        prepareCall: async () => ({
+          config: {},
+          stream: async function* () {
+            yield { type: 'text-delta', text: '完全不是 JSON 的输出' }
+          },
+        }),
+      },
+      provider: 'p',
+      model: 'm',
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'unparsable')
+  assert.equal(result.content_fault, true)
+})
+
+test('content_fault：蒸馏结果超长被 distillMemory 拒 → true（非 EsError 都算内容）', async () => {
+  // 模型给一份超 6000 字的「改写」→ distillMemory 抛超长错误（普通 Error，非 EsError）
+  const huge = 'a'.repeat(6001)
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: { get: async () => ({ id: 'm1', source: { memory_id: 'm1', user_id: 'xqh', content: 'x' } }) },
+      writer: { update: async () => ({ id: 'm1', result: 'updated', status: 200 }) },
+      llm: {
+        prepareCall: async () => ({
+          config: {},
+          stream: async function* () {
+            yield { type: 'text-delta', text: JSON.stringify({ content: huge }) }
+          },
+        }),
+      },
+      provider: 'p',
+      model: 'm',
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /超过上限/)
+  assert.equal(result.content_fault, true)
+})
+
+test('content_fault：写库 EsError（ES 抖动）→ false（环境问题，不计次）', async () => {
+  const { EsError } = await import('../src/es/http.ts')
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: { get: async () => ({ id: 'm1', source: { memory_id: 'm1', user_id: 'xqh', content: 'x' } }) },
+      writer: {
+        update: async () => {
+          throw new EsError('connect ECONNREFUSED 127.0.0.1:9200', { kind: 'network' })
+        },
+      },
+      llm: {
+        prepareCall: async () => ({
+          config: {},
+          stream: async function* () {
+            yield { type: 'text-delta', text: '{"content":"改写后"}' }
+          },
+        }),
+      },
+      provider: 'p',
+      model: 'm',
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.content_fault, false, 'ES 故障绝不能算成内容问题——否则一次 ES 抖动吃掉重试预算')
+})
+
+test('content_fault：LLM 调用本身抛错（超时/断网）→ 不设（环境问题）', async () => {
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: {},
+      writer: {},
+      llm: {
+        prepareCall: async () => {
+          throw new Error('ETIMEDOUT')
+        },
+      },
+      provider: 'p',
+      model: 'm',
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.content_fault, undefined, '环境失败不标 content_fault → sweep 不计次')
+})
