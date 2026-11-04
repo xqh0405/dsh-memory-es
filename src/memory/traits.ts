@@ -439,6 +439,8 @@ export async function writeTraitCandidate(
     domain: 'general',
     privacy: 'private',
     importance: 'normal',
+    // 来源戳：这条是插件自动提炼写的，不是模型在对话里调 memory_save（缺省会落 agent）
+    origin: 'tool',
     // 关键：pending 而不是 active——检索只认 active，所以候选不会自己生效
     status: TRAIT_STATUS,
     promote_state: 'none',

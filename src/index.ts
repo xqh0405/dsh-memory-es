@@ -39,7 +39,7 @@ import { defineReviewTool } from './memory/review.ts'
 import { defineHistoryTool } from './memory/history.ts'
 import { collectStream, pickRoute } from './memory/distillRunner.ts'
 import { defineDistillTool } from './memory/distill.ts'
-import { runDistillJob } from './memory/distillRunner.ts'
+import { runDistillJob, runDistillSweep } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
 import { defineSearchTool, searchMemories } from './memory/search.ts'
@@ -196,6 +196,72 @@ export function apply(ctx: Context, config: ConfigType): void {
       ),
     'dsh-memory-es.save',
   )
+
+  /**
+   * 蒸馏兜底清扫（2026-11-04 巡检修复）。
+   *
+   * `onSaved` 只覆盖「工具保存」这一条路：批量入库（.chat-inspect/ingest.ts 直调
+   * saveMemory、不带钩子）与当时蒸馏失败的条目会永远停在 `distill_state=pending`
+   * ——实测 6 个用户索引积压 158 条、没有任何消费者。这里按固定节奏补扫：
+   *   · 只碰创建 ≥5 分钟的条目（给 onSaved 的即时蒸馏留窗口，不双跑）；
+   *   · 内容问题计次、到顶标 failed；环境问题（模型没就绪）不计次、留 pending
+   *     等下轮——否则一次 LLM 停机会把整批条目误判死；
+   *   · 已带 summary 的（巡检管线蒸馏过）直接标 done，不重复烧模型。
+   * 失败计数放在 effect 闭包里：随 fiber 销毁，重启清零（重试预算重算，可接受）。
+   */
+  if (distillEnabled) {
+    ctx.effect(() => {
+      const attempts = new Map<string, number>()
+      let running = false
+      const sweep = (): void => {
+        // 防重入：一轮没跑完不开下一轮（单轮上限 10 条 × ~40s ≈ 7 分钟 < 间隔）
+        if (running) return
+        running = true
+        void runDistillSweep({
+          userId,
+          personalPrefix,
+          reader,
+          writer,
+          embed,
+          llm: getLlm() as never,
+          provider: config.distill.provider,
+          model: config.distill.model,
+          timeoutMs: config.distill.timeoutMs,
+          attempts,
+          log: (event) => logger.info('distill-sweep %o', event),
+        })
+          .then((result) => {
+            if (result.scanned > 0 || result.reason !== undefined) {
+              logger.info(
+                'distill-sweep: 扫到=%d 蒸成=%d 直标done=%d 标skipped=%d 标failed=%d 环境缓=%d%s',
+                result.scanned,
+                result.distilled,
+                result.markedDone,
+                result.markedSkipped,
+                result.markedFailed,
+                result.envDeferred,
+                result.reason !== undefined ? `（整轮退出：${result.reason}）` : '',
+              )
+            }
+          })
+          .catch((err: unknown) => {
+            logger.warn('distill-sweep: 失败 %s', String(err).slice(0, 160))
+          })
+          .finally(() => {
+            running = false
+          })
+      }
+      // 启动 2 分钟后先扫一轮（重启后尽快清存量），之后每 15 分钟一轮
+      const kick = setTimeout(sweep, 2 * 60_000)
+      kick.unref?.()
+      const timer = setInterval(sweep, 15 * 60_000)
+      timer.unref?.()
+      return () => {
+        clearTimeout(kick)
+        clearInterval(timer)
+      }
+    }, 'dsh-memory-es.distill-sweep')
+  }
 
   ctx.effect(
     () =>

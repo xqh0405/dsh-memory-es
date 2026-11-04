@@ -96,11 +96,15 @@ else
         "status":{"terms":{"field":"status"}},
         "type":{"terms":{"field":"memory_type","size":8}},
         "privacy":{"terms":{"field":"privacy"}},
+        "distill":{"terms":{"field":"distill_state","size":8}},
         "recent":{"filter":{"range":{"created_at":{"gte":"now-'7'd"}}}}
       }}')
     kv "status" "$(printf '%s' "$AGG" | jq -r '[.aggregations.status.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' )"
     kv "memory_type" "$(printf '%s' "$AGG" | jq -r '[.aggregations.type.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' )"
     kv "privacy" "$(printf '%s' "$AGG" | jq -r '[.aggregations.privacy.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' )"
+    # distill_state：pending 是蒸馏队列。2026-11-04 巡检发现 6 索引积压 158 条无人消费
+    # （onSaved 只覆盖工具保存、批量入库不带钩子），已加插件侧清扫——这里持续可见
+    kv "distill_state" "$(printf '%s' "$AGG" | jq -r '[.aggregations.distill.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' )"
     kv "近 7 日新增" "$(printf '%s' "$AGG" | jq -r '.aggregations.recent.doc_count // 0')"
 
     # type 偏斜哨兵：单一类型 >90% 说明抽取或迁移写歪了

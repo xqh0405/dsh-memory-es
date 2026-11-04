@@ -60,6 +60,8 @@ export async function writeMood(deps: MoodStoreDeps, state: MoodState, signal?: 
     domain: 'system',
     privacy: 'private',
     importance: 'low',
+    // 来源戳：情绪状态是工具写的内部文档
+    origin: 'tool',
     status: MOOD_STATUS,
     promote_state: 'none',
     distill_state: 'done',
