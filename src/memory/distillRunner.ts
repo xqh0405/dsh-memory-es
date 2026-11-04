@@ -300,11 +300,14 @@ const SWEEP_DEFAULTS = { batch: 5, minAgeMinutes: 5, maxAttempts: 3 }
  * （.chat-inspect/ingest.ts 直调 saveMemory、不带钩子）与当时蒸馏失败的条目
  * 会永远停在 pending（实测 6 个用户索引积压 158 条，无任何消费者）。
  *
- * 三条边界（都有单测钉住）：
+ * 四条边界（都有单测钉住）：
  *   1. 只碰创建 ≥minAge 的条目：给 onSaved 的即时蒸馏留完成窗口，不双跑；
  *   2. 失败分两类——内容问题计次、到上限标 failed 终态；环境问题不计次、
  *      留 pending 等模型恢复（否则一次 LLM 停机会把整批条目误判死）；
- *   3. 已带 summary 的（巡检管线的蒸馏稿）直接标 done，不重复烧模型。
+ *   3. 已带 summary 的（巡检管线的蒸馏稿）直接标 done，不重复烧模型；
+ *   4. **模型闸不是整轮闸**：没模型的实例照样能执行第 3 条与非 active → skipped，
+ *      只有真要蒸馏时才解析路由。8/10 个容器 LLM 不可用（实测从未蒸馏成功），
+ *      把环境闸放最前会让它们的积压永远清不掉。
  *
  * 与 onSaved 的竞态之外还有一个已知无害重叠：114 本地与 125 的 dsh-xqh 共用
  * 同一个 personal_memory_xqh，两边的清扫可能同轮捞到同一条 → 双份 LLM 调用、
@@ -327,14 +330,29 @@ export async function runDistillSweep(
     envDeferred: 0,
   }
 
-  // 环境闸放最前：没模型整轮不跑（连 ES 查询都省了）
-  const llm = deps.llm
-  if (!llm || typeof llm.prepareCall !== 'function') {
-    return { ...result, reason: 'no_llm_service' }
+  // 模型路由**惰性**解析：只有真要蒸馏时才需要它。
+  //
+  // 不能把「没有模型」当成整轮退出的理由——2026-11-04 部署后实测：10 个容器里
+  // 只有 2 个曾经蒸馏成功过（有 distilled_at），其余 8 个的 LLM 根本不可用；
+  // 而它们的 pending 队列里绝大多数条目**已经带 summary**（巡检管线蒸馏过），
+  // 标 done 不需要模型，非 active 的标 skipped 也不需要。
+  // 把环境闸放最前会让这 100+ 条永远清不掉——那正是这次要修的「积压无人消费」。
+  type RouteState = {
+    route: { provider: string; model: string; source: 'config' | 'session' | 'first' } | null
+    reason?: 'no_llm_service' | 'no_model'
   }
-  const route = await pickRoute(llm, deps.provider, deps.model)
-  if (!route) {
-    return { ...result, reason: 'no_model' }
+  let routeState: RouteState | undefined
+  const ensureRoute = async (): Promise<RouteState> => {
+    if (routeState !== undefined) return routeState
+    const llm = deps.llm
+    if (!llm || typeof llm.prepareCall !== 'function') {
+      routeState = { route: null, reason: 'no_llm_service' }
+      return routeState
+    }
+    const picked = await pickRoute(llm, deps.provider, deps.model)
+    // pickRoute 的返回带 source（config/session/first），这里原样透传给 runDistillJob
+    routeState = picked === null ? { route: null, reason: 'no_model' } : { route: picked }
+    return routeState
   }
 
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
@@ -401,11 +419,21 @@ export async function runDistillSweep(
       continue
     }
 
+    // 到这里才真的需要模型：先解一次路由（同轮内复用，失败不重复试）
+    const rs = await ensureRoute()
+    if (rs.route === null) {
+      // 环境问题：不计次、不判死，留 pending 等下轮（模型恢复后自动续上）
+      result.envDeferred += 1
+      result.reason = rs.reason
+      log({ tool: 'distill-sweep', memory_id: memoryId, env_deferred: true, reason: rs.reason })
+      continue
+    }
+
     const outcome = await runDistillJob(deps, {
       memoryId,
       content: String(source.content ?? ''),
       domain: String(source.domain ?? 'general'),
-      route,
+      route: rs.route,
     })
     if (outcome.ok) {
       deps.attempts.delete(memoryId)
@@ -416,11 +444,10 @@ export async function runDistillSweep(
     if (!outcome.content_fault) {
       // 环境问题：不计次、不判死，留 pending 等模型恢复
       result.envDeferred += 1
+      result.reason = result.reason ?? outcome.reason
       log({ tool: 'distill-sweep', memory_id: memoryId, env_deferred: true, reason: outcome.reason })
-      // 模型服务缺失对整轮都成立 → 收工，别白试后面几条
-      if (outcome.reason === 'no_llm_service' || outcome.reason === 'no_model') {
-        return { ...result, reason: outcome.reason }
-      }
+      // 注意：**不整轮退出**——同一批里后面的条目可能带 summary（标 done 不需要模型），
+      // 提前 return 会让它们也一起留在 pending（2026-11-04 部署后实测的坑）
       continue
     }
 

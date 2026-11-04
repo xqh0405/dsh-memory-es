@@ -90,21 +90,53 @@ describe('runDistillSweep：查询边界', () => {
     assert.ok(body.includes('"created_at":"asc"') || body.includes('created_at') && body.includes('asc'), '最老优先，积压先清')
   })
 
-  test('没有 llm 服务 → 整轮不跑，连 ES 查询都不发（reason=no_llm_service）', async () => {
-    const { deps, searches } = makeSweep([PENDING], { llmOutput: null })
+  // 2026-11-04 部署后实测：10 个容器只有 2 个能蒸馏，其余 8 个 LLM 不可用；
+  // 而它们的 pending 里绝大多数已带 summary。若把模型闸当成整轮闸，
+  // 这 100+ 条会永远清不掉——所以「无模型仍要处理不需模型的分支」是硬约束。
+  test('没有 llm 服务 → 仍要查队列，把「带 summary」的直标 done（不吃模型的活照做）', async () => {
+    const { deps, updates, searches } = makeSweep([{ ...PENDING, summary: '已有摘要' }], { llmOutput: null })
     const result = await runDistillSweep(deps)
 
-    assert.equal(result.reason, 'no_llm_service')
-    assert.equal(searches.length, 0, '环境闸在查询之前，别白打 ES')
-    assert.equal(result.scanned, 0)
+    assert.equal(searches.length, 1, '必须查队列——否则不需模型的分支也没机会执行')
+    assert.equal(result.scanned, 1)
+    assert.equal(result.markedDone, 1, '带 summary 的标 done 不需要模型')
+    assert.equal(updates[0].patch.distill_state, 'done')
+    assert.equal(result.envDeferred, 0, '本轮没有需要模型的条目，就不该有环境失败记录')
   })
 
-  test('选不到模型路由 → 同样整轮不跑（reason=no_model）', async () => {
-    const { deps, searches } = makeSweep([PENDING], { provider: '', model: '' })
+  test('没有 llm 服务 → 非 active 仍标 skipped', async () => {
+    const { deps, updates } = makeSweep([{ ...PENDING, memory_id: 'm9', status: 'archived' }], { llmOutput: null })
     const result = await runDistillSweep(deps)
 
+    assert.equal(result.markedSkipped, 1)
+    assert.equal(updates[0].patch.distill_state, 'skipped')
+  })
+
+  test('没有 llm 服务 + 条目真需要蒸馏 → envDeferred，留 pending，不判死', async () => {
+    const { deps, updates, attempts } = makeSweep([PENDING], { llmOutput: null })
+    const result = await runDistillSweep(deps)
+
+    assert.equal(result.envDeferred, 1)
+    assert.equal(result.markedFailed, 0, '不能因为没模型就判死')
+    assert.equal(updates.length, 0)
+    assert.equal(attempts.size, 0, '环境失败不吃重试预算')
+    assert.equal(result.reason, 'no_llm_service')
+  })
+
+  test('选不到模型路由 → 同样只缓不判（reason=no_model），带 summary 的照样标 done', async () => {
+    const { deps, updates } = makeSweep(
+      [{ ...PENDING, memory_id: 'm1', summary: '已有摘要' }, { ...PENDING, memory_id: 'm2' }],
+      { provider: '', model: '' },
+    )
+    const result = await runDistillSweep(deps)
+
+    assert.equal(result.markedDone, 1, '有 summary 的先收口')
+    assert.equal(result.envDeferred, 1, '需要模型的留 pending')
     assert.equal(result.reason, 'no_model')
-    assert.equal(searches.length, 0)
+    assert.deepEqual(
+      updates.map((u) => u.patch.distill_state),
+      ['done'],
+    )
   })
 })
 
@@ -187,28 +219,20 @@ describe('runDistillSweep：失败分类（计次 vs 不计次）', () => {
     assert.equal(attempts.size, 0, '环境失败绝不能吃掉重试预算——否则一次停机判死整批')
   })
 
-  test('环境问题中途出现（no_llm）→ 整轮收工，不再白试后面的条目', async () => {
-    const { deps, llmCalls } = makeSweep([PENDING, { ...PENDING, memory_id: 'm2' }])
-    let calls = 0
+  test('模型中途不可用 → 不提前整轮 return，同批里不需模型的条目照常收口', async () => {
+    // 第 1 条真需要蒸馏（模型炸）→ envDeferred；第 2 条带 summary → 必须仍被标 done。
+    // 这条钉住 2026-11-04 的坑：提前 return 会让后面的条目一起烂在 pending。
+    const { deps, updates } = makeSweep([PENDING, { ...PENDING, memory_id: 'm2', summary: '已有摘要' }])
     deps.llm.prepareCall = async () => {
-      calls += 1
-      if (calls === 1) {
-        // 第一条走到模型后服务没了：runDistillJob 内部拿到的 llm 仍在，
-        // 这里用 stream 抛错模拟不可用
-        return {
-          config: {},
-          stream: async function* () {
-            throw new Error('service gone')
-          },
-        }
-      }
-      throw new Error('no llm')
+      throw new Error('service gone')
     }
 
     const r = await runDistillSweep(deps)
-    // 第一条环境失败 → envDeferred；第二条因服务缺失也是环境失败 → 不该无限往下试
-    assert.equal(r.envDeferred, 2)
-    assert.equal(llmCalls.prepare, 0)
+    assert.equal(r.envDeferred, 1, '需要模型的那条缓一轮')
+    assert.equal(r.markedDone, 1, '带 summary 的那条不能被提前 return 带走')
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0].id, 'm2')
+    assert.equal(updates[0].patch.distill_state, 'done')
   })
 })
 
