@@ -18,7 +18,10 @@
  * @module dsh-memory-es/recall-inject
  */
 
+import { join } from 'node:path'
+
 import type { Projected } from './fragment.ts'
+import { dshMemoryDataDir } from './sessions.ts'
 
 /** 注入块在 system prompt 里的段落名（与工具说明、情绪、引用约定并列） */
 export const RECALL_SECTION_NAME = 'dsh-memory-es-recall'
@@ -98,4 +101,44 @@ export interface InjectResult {
   text: string
   ms: number
   items: InjectedItem[]
+}
+/**
+ * 一次注入尝试的落盘记录。
+ *
+ * 为什么要落盘：`ctx.logger` 的输出不进 docker logs / journal（2026-11-05 实测：
+ * 本机两天日志里 dsh-memory-es 只有面板的 console.log，插件的 logger 一条没有），
+ * 所以「部署后注入到底工作没有、超时率多少」在命令行**完全看不见**。
+ * 落 JSONL 之后，`wc -l` + 按 outcome 分组就能验收，还能和影子数据逐条对照。
+ */
+export interface InjectRecord {
+  ts: string
+  agent: string
+  query: string
+  outcome: InjectOutcome
+  /** 这次注入检索的耗时；缓存命中不落盘，所以这里只反映真实检索 */
+  ms: number
+  /** 检索召回几条（裁剪前） */
+  hits: number
+  /** 实际注入了哪几条 */
+  items: Array<{ memory_id: string; chars: number }>
+  /** 注入正文总字符数 */
+  chars: number
+}
+
+/**
+ * 把检索异常归类：超时与真错误要分开统计——
+ * 超时是「队列忙，这轮算了」，错误是「通道有问题」，两者的处置完全不同。
+ */
+export function classifyInjectError(err: unknown): 'timeout' | 'error' {
+  if (typeof err === 'object' && err !== null) {
+    const name = (err as { name?: string }).name ?? ''
+    if (name === 'TimeoutError' || name === 'AbortError') return 'timeout'
+  }
+  return 'error'
+}
+
+/** 注入记录的输出路径：配置为空时落到插件私有数据目录 */
+export function resolveInjectPath(configured: string): string {
+  if (configured.trim() !== '') return configured
+  return join(dshMemoryDataDir(), 'recall-inject.jsonl')
 }

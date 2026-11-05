@@ -182,6 +182,8 @@ export interface ConfigType {
     maxChars: number
     sectionOrder: number
     cacheTtlMs: number
+    /** 每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl */
+    logPath: string
   }
 }
 
@@ -477,6 +479,9 @@ export const Config: z<ConfigType> = z.object({
     cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
       .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
         + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
+    logPath: z.string().default('')
+      .description('每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl。'
+        + '插件 logger 不进 docker logs，这里是唯一能在命令行验收的通道。'),
   }),
 })
 

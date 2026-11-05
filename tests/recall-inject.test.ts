@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
-import { formatInjection, pickForInjection } from '../src/recall-inject.ts'
+import { classifyInjectError, formatInjection, pickForInjection, resolveInjectPath } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
   return {
@@ -91,5 +91,28 @@ describe('formatInjection', () => {
     const text = formatInjection([{ memory_id: 'a', text: '甲', chars: 1, source: 'personal' }])
     assert.ok(text.startsWith('<memory-recall>'))
     assert.ok(text.trimEnd().endsWith('</memory-recall>'))
+  })
+})
+describe('classifyInjectError', () => {
+  test('TimeoutError / AbortError 归成 timeout（队列忙，不是通道坏）', () => {
+    assert.equal(classifyInjectError(Object.assign(new Error('aborted'), { name: 'TimeoutError' })), 'timeout')
+    assert.equal(classifyInjectError(Object.assign(new Error('aborted'), { name: 'AbortError' })), 'timeout')
+  })
+
+  test('其它异常归成 error', () => {
+    assert.equal(classifyInjectError(new Error('ECONNREFUSED')), 'error')
+    assert.equal(classifyInjectError('字符串也能兜住'), 'error')
+    assert.equal(classifyInjectError(null), 'error')
+  })
+})
+
+describe('resolveInjectPath', () => {
+  test('配置了就用配置的路径', () => {
+    assert.equal(resolveInjectPath('/tmp/x/inject.jsonl'), '/tmp/x/inject.jsonl')
+  })
+
+  test('留空时落到插件私有数据目录（与影子并列）', () => {
+    const path = resolveInjectPath('')
+    assert.match(path, /memory-es\/recall-inject\.jsonl$/)
   })
 })

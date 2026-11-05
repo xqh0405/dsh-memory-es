@@ -34,7 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { formatInjection, pickForInjection, RECALL_SECTION_NAME } from './recall-inject.ts'
+import { classifyInjectError, formatInjection, pickForInjection, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -843,6 +843,9 @@ export function apply(ctx: Context, config: ConfigType): void {
       const lastMessage = new Map<string, string>()
       // 同一 query 的结果复用：一个 turn 有多个 step，每步都会重新组装 prompt
       const resultCache = new Map<string, { at: number; text: string }>()
+      // 落盘通道：插件 logger 不进 docker logs，这是唯一能在命令行验收的入口
+      const injectLogPath = resolveInjectPath(inject.logPath)
+      const injectWriter = createShadowWriter<InjectRecord>(injectLogPath)
 
       const remember = ctx.on(
         'agent/inbox/inserted',
@@ -854,8 +857,17 @@ export function apply(ctx: Context, config: ConfigType): void {
         },
       )
 
-      const recall = async (query: string): Promise<string> => {
+      const recall = async (query: string, agentId: string): Promise<string> => {
         const startedAt = Date.now()
+        const writeRecord = (record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms'>): void => {
+          injectWriter.write({
+            ts: new Date().toISOString(),
+            agent: agentId,
+            query: query.slice(0, 200),
+            ms: Date.now() - startedAt,
+            ...record,
+          })
+        }
         try {
           const result = await searchMemories(
             {
@@ -874,15 +886,25 @@ export function apply(ctx: Context, config: ConfigType): void {
             // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径
             { query: query.slice(0, 400), limit: inject.maxItems + 2, detail: 'summary' },
           )
-          if (result.note !== 'ok') return ''
+          if (result.note !== 'ok') {
+            writeRecord({ outcome: result.note, hits: result.hits.length, items: [], chars: 0 })
+            return ''
+          }
           const items = pickForInjection(result.hits, inject.maxItems, inject.maxChars)
           const text = formatInjection(items)
+          writeRecord({
+            outcome: text === '' ? 'no_match' : 'injected',
+            hits: result.hits.length,
+            items: items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
+            chars: text.length,
+          })
           if (text !== '') {
             logger.info('注入 %d 条记忆（%d ms，%d 字符）', items.length, Date.now() - startedAt, text.length)
           }
           return text
         } catch (err) {
           // 超时/异常 = 这一轮没有记忆。注入是增强，绝不能把回合拖住或报错给用户
+          writeRecord({ outcome: classifyInjectError(err), hits: 0, items: [], chars: 0 })
           logger.info('注入跳过（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
           return ''
         }
@@ -906,7 +928,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           if (cached !== undefined && Date.now() - cached.at < inject.cacheTtlMs) {
             text = cached.text
           } else {
-            text = await recall(query)
+            text = await recall(query, agentId)
             resultCache.set(query, { at: Date.now(), text })
           }
           if (text === '') return assembly
@@ -921,7 +943,13 @@ export function apply(ctx: Context, config: ConfigType): void {
         },
       )
 
-      logger.info('自动召回注入已开：超时 %d ms，最多 %d 条 / %d 字符', inject.timeoutMs, inject.maxItems, inject.maxChars)
+      logger.info(
+        '自动召回注入已开：超时 %d ms，最多 %d 条 / %d 字符，记录 %s',
+        inject.timeoutMs,
+        inject.maxItems,
+        inject.maxChars,
+        injectLogPath,
+      )
 
       return () => {
         remember()

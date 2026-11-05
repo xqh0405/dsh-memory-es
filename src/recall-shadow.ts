@@ -130,14 +130,14 @@ export function resolveShadowPath(configured: string): string {
  * 写失败只吞掉、不抛：影子是旁路观测，**不能因为磁盘/权限问题影响消息主流程**。
  * 但要把失败次数记下来（`failures`），避免「一直没数据还以为是没命中」。
  */
-export function createShadowWriter(path: string): {
-  write: (record: ShadowRecord) => void
+export function createShadowWriter<T extends object = ShadowRecord>(path: string): {
+  write: (record: T) => void
   failures: () => number
 } {
   let failed = 0
   let ready = false
   return {
-    write(record) {
+    write(record: T) {
       try {
         if (!ready) {
           mkdirSync(dirname(path), { recursive: true })
@@ -156,7 +156,7 @@ export function createShadowWriter(path: string): {
 export interface ObserverDeps {
   /** 返回该用的检索结果；实现方负责把 detail 定成 summary（影子只估体积，不要全文） */
   search: (query: string, signal: AbortSignal) => Promise<{ hits: readonly ShadowHit[]; note: string }>
-  writer: ReturnType<typeof createShadowWriter>
+  writer: { write: (record: ShadowRecord) => void; failures: () => number }
   config: RecallShadowConfig
   /** 可注入的时钟（测试用） */
   now?: () => number

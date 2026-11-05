@@ -8,6 +8,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, test } from 'node:test'
 
 import { Config, type ConfigType } from '../src/config.ts'
@@ -421,6 +424,9 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
     })
 
     try {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'mem-inject-'))
+      const logPath = join(tmpDir, 'recall-inject.jsonl')
+
       const harness = fakeCtx()
       apply(
         harness.ctx as never,
@@ -430,7 +436,7 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
           // 把置信阈值压到 0：RRF 融合分本身很小（≈1/60），默认阈值会把它判成
           // low_confidence，而注入只认 ok。这条测的是「注入了什么」，不是置信判定本身。
           confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
-          recallInject: { enabled: true } as never,
+          recallInject: { enabled: true, logPath } as never,
         }),
       )
 
@@ -446,6 +452,14 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
       const assemble = harness.listeners.find((l) => l.event === 'system-prompt/assemble')!
       const assembly = { sections: [], contexts: [], tools: [], variables: {} }
       const result = await callable(assemble.handler)(assembly, { agent: { id: 'a1' } }, async () => assembly)
+
+      // 落盘是唯一能在命令行验收的通道：断言真的写了一行且内容对得上
+      const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+      assert.equal(records.length, 1, '一次注入应落一行')
+      assert.equal(records[0].outcome, 'injected')
+      assert.equal(records[0].agent, 'a1')
+      assert.ok(Number(records[0].chars) > 0)
+      assert.equal((records[0].items as unknown[]).length, 1)
 
       const injected = result.sections.find((section) => section.name === 'dsh-memory-es-recall')
       assert.ok(
