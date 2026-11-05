@@ -2,6 +2,12 @@
   "createdAt": "2026-11-02T13:50:48.994Z",
   "mustFailed": 0,
   "shouldFailed": 9,
+  "mustIds": [
+    "must-no-identity-types",
+    "must-no-mood-doc",
+    "must-receipts-shape",
+    "must-recall-sanity"
+  ],
   "passedIds": [
     "recall-q01",
     "recall-q02",
