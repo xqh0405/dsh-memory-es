@@ -94,7 +94,7 @@ export function formatInjection(items: readonly InjectedItem[]): string {
 }
 
 /** 可观测的一次注入尝试结果，供日志与测试断言 */
-export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'timeout' | 'error' | 'disabled' | 'empty_query'
+export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'low_score' | 'timeout' | 'error' | 'disabled' | 'empty_query'
 
 export interface InjectResult {
   outcome: InjectOutcome
@@ -123,6 +123,8 @@ export interface InjectRecord {
   items: Array<{ memory_id: string; chars: number }>
   /** 注入正文总字符数 */
   chars: number
+  /** top1 的向量相似度（向量不可用时缺省）——调 minScore 的依据 */
+  top1Score?: number
 }
 
 /**
@@ -141,4 +143,40 @@ export function classifyInjectError(err: unknown): 'timeout' | 'error' {
 export function resolveInjectPath(configured: string): string {
   if (configured.trim() !== '') return configured
   return join(dshMemoryDataDir(), 'recall-inject.jsonl')
+}
+
+/**
+ * 注入的绝对分数门槛（top1 的向量相似度）。
+ *
+ * 为什么必须另加一道：`note === 'ok'` 只能说明「候选之间有区分度」，**不能说明相关**。
+ * 2026-11-05 在 dsh-test 实测（团队库 326 条）：
+ *
+ *   闲聊「嗨！今天心情怎么样~」  note=ok  top1_knn=0.743  → 注入了 CPU 堆分析
+ *   闲聊「今天有什么趣事」        note=ok  top1_knn=0.733  → 注入了巡检教训
+ *   相关「店统计接口派奖从哪来」  note=ok  top1_knn=0.792  → 真相关
+ *
+ * 也就是说两类 query 的 `note` 全是 ok，但 `top1_knn` 干净地分成
+ * 闲聊 0.7227~0.7430 / 相关 0.7920~0.8314，中间有 0.049 的空档 → 门槛定在 0.76。
+ * （`final` RRF 分数在 0.03 量级，两类几乎重合，不能用。）
+ *
+ * 向量不可用时（degraded）**一律不注入**：这时只剩 BM25，没有可靠的绝对尺度，
+ * 而注入是增强——宁可不注入，也不要把无关记忆塞进上下文。
+ */
+export const DEFAULT_MIN_SCORE = 0.76
+
+export interface InjectGateInput {
+  note: string
+  /** top1 的向量相似度；向量不可用时为 undefined */
+  vectorScore: number | undefined
+  /** 本次检索是否降级（只走了 BM25） */
+  degraded: boolean
+  minScore: number
+}
+
+/** 是否可以注入。纯函数，便于把「什么该注入」钉成回归。 */
+export function passesInjectGate(input: InjectGateInput): boolean {
+  if (input.note !== 'ok') return false
+  if (input.degraded) return false
+  if (input.vectorScore === undefined || !Number.isFinite(input.vectorScore)) return false
+  return input.vectorScore >= input.minScore
 }

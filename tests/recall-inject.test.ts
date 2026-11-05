@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
-import { classifyInjectError, formatInjection, pickForInjection, resolveInjectPath } from '../src/recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, resolveInjectPath } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
   return {
@@ -114,5 +114,35 @@ describe('resolveInjectPath', () => {
   test('留空时落到插件私有数据目录（与影子并列）', () => {
     const path = resolveInjectPath('')
     assert.match(path, /memory-es\/recall-inject\.jsonl$/)
+  })
+})
+
+describe('passesInjectGate · 绝对分数门槛', () => {
+  const base = { note: 'ok', vectorScore: 0.80, degraded: false, minScore: 0.76 }
+
+  test('note 不是 ok 一律不注入', () => {
+    assert.equal(passesInjectGate({ ...base, note: 'no_match' }), false)
+    assert.equal(passesInjectGate({ ...base, note: 'low_confidence' }), false)
+  })
+
+  test('向量降级时不注入：只剩 BM25，没有可靠的绝对尺度', () => {
+    assert.equal(passesInjectGate({ ...base, degraded: true }), false)
+  })
+
+  test('拿不到向量分数时不注入', () => {
+    assert.equal(passesInjectGate({ ...base, vectorScore: undefined }), false)
+    assert.equal(passesInjectGate({ ...base, vectorScore: Number.NaN }), false)
+  })
+
+  test('0.76 这条线：实测闲聊最高 0.7430，相关最低 0.7920', () => {
+    // 用实测值当断言，别写 0.75/0.76 这种自己编的数
+    assert.equal(passesInjectGate({ ...base, vectorScore: 0.743 }), false, '闲聊档不该过')
+    assert.equal(passesInjectGate({ ...base, vectorScore: 0.7333 }), false, '闲聊档不该过')
+    assert.equal(passesInjectGate({ ...base, vectorScore: 0.792 }), true, '相关档要过')
+    assert.equal(passesInjectGate({ ...base, vectorScore: 0.8314 }), true, '相关档要过')
+  })
+
+  test('门槛可配：放宽到 0.72 时闲聊也会过（说明这是旋钮不是硬编码）', () => {
+    assert.equal(passesInjectGate({ ...base, vectorScore: 0.7333, minScore: 0.72 }), true)
   })
 })

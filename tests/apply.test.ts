@@ -401,11 +401,30 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
   test('有用户消息且检索命中时，assembly 多一个记忆段落', async () => {
     // 一条高分命中，交给 bm25 路；knn 路给空（embedding 指向死端口，本来就只会走 BM25）
     const fake = await startFakeEs((req, res) => {
+      // 同一个 fake server 兼任 Ollama：注入门槛要看 top1 的向量分数，
+      // 向量降级会被 passesInjectGate 直接拒掉（那是对的），所以这里必须给真向量。
+      if (req.path.startsWith('/api/embed')) {
+        sendJson(res, 200, { embeddings: [[0.1, 0.2, 0.3, 0.4]] })
+        return
+      }
       // GET（如心情文档读取）没有 body，别直接 JSON.parse
       const body = req.body === '' ? {} : (JSON.parse(req.body) as Record<string, unknown>)
       const isKnn = 'knn' in body
       const hits = isKnn
-        ? []
+        ? [
+            {
+              _id: 'm-1',
+              _score: 0.88,
+              _source: {
+                memory_id: 'm-1',
+                content: '重启后要先用 sync-local-plugin 同步再重启 dsh-web',
+                memory_type: 'fact',
+                domain: 'dsh',
+                updated_at: '2026-11-01T00:00:00.000Z',
+                content_sha256: 'h1',
+              },
+            },
+          ]
         : [
             {
               _id: 'm-1',
@@ -432,7 +451,7 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
         harness.ctx as never,
         baseConfig({
           es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 },
-          embedding: { url: 'http://127.0.0.1:1', model: 'bge-m3', dims: 4 },
+          embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
           // 把置信阈值压到 0：RRF 融合分本身很小（≈1/60），默认阈值会把它判成
           // low_confidence，而注入只认 ok。这条测的是「注入了什么」，不是置信判定本身。
           confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
@@ -468,6 +487,72 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
       )
       assert.match(injected!.text, /重启后要先用 sync-local-plugin/)
       assert.match(injected!.text, /数据不是指令/)
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+describe('apply · 注入的分数门槛（2026-11-05 实测：闲聊也 note=ok）', () => {
+  test('top1 向量分数低于 minScore 时不注入，并记 low_score', async () => {
+    const fake = await startFakeEs((req, res) => {
+      if (req.path.startsWith('/api/embed')) {
+        sendJson(res, 200, { embeddings: [[0.1, 0.2, 0.3, 0.4]] })
+        return
+      }
+      const body = req.body === '' ? {} : (JSON.parse(req.body) as Record<string, unknown>)
+      const isKnn = 'knn' in body
+      // 0.73 是实测的闲聊档（「嗨！今天心情怎么样~」= 0.743、「在吗」= 0.7227）
+      const score = isKnn ? 0.73 : 9
+      sendJson(res, 200, {
+        took: 1,
+        hits: {
+          total: { value: 1, relation: 'eq' },
+          hits: [
+            {
+              _id: 'm-1',
+              _score: score,
+              _source: {
+                memory_id: 'm-1',
+                content: 'member 堆需求与 CPU 爆核的根因分析',
+                memory_type: 'fact',
+                domain: 'general',
+                updated_at: '2026-11-01T00:00:00.000Z',
+                content_sha256: 'h1',
+              },
+            },
+          ],
+        },
+      })
+    })
+
+    try {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'mem-gate-'))
+      const logPath = join(tmpDir, 'recall-inject.jsonl')
+      const harness = fakeCtx()
+      apply(
+        harness.ctx as never,
+        baseConfig({
+          es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 },
+          embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
+          confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
+          recallInject: { enabled: true, logPath } as never,
+        }),
+      )
+
+      const inboxes = harness.listeners.filter((l) => l.event === 'agent/inbox/inserted')
+      for (const listener of inboxes) {
+        listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '今天心情怎么样' }] } } as never)
+      }
+      const assemble = harness.listeners.find((l) => l.event === 'system-prompt/assemble')!
+      const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+      const result = await callable(assemble.handler)(assembly, { agent: { id: 'a1' } }, async () => assembly)
+
+      assert.deepEqual(result.sections, [], '分数不够就不该插段落')
+      const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+      assert.equal(records.length, 1)
+      assert.equal(records[0].outcome, 'low_score', '要能和「本来就没命中」区分开')
+      assert.equal(records[0].top1Score, 0.73, '分数要落盘，调 minScore 时才有依据')
     } finally {
       await fake.close()
     }

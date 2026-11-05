@@ -182,6 +182,8 @@ export interface ConfigType {
     maxChars: number
     sectionOrder: number
     cacheTtlMs: number
+    /** top1 的向量相似度门槛；低于它不注入（note=ok 分不出闲聊与相关） */
+    minScore: number
     /** 每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl */
     logPath: string
   }
@@ -479,6 +481,10 @@ export const Config: z<ConfigType> = z.object({
     cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
       .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
         + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
+    minScore: z.number().min(0).max(1).default(0.76)
+      .description('注入的绝对分数门槛：top1 的向量相似度低于它就不注入。'
+        + '默认 0.76 —— 2026-11-05 实测（团队库 326 条）：闲聊 query 的 top1_knn 在 0.7227~0.7430，'
+        + '真相关在 0.7920~0.8314，而两者的 note 全是 ok（置信判定只看候选区分度，不看绝对相关）。'),
     logPath: z.string().default('')
       .description('每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl。'
         + '插件 logger 不进 docker logs，这里是唯一能在命令行验收的通道。'),

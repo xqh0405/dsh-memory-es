@@ -34,7 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, formatInjection, pickForInjection, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -883,11 +883,21 @@ export function apply(ctx: Context, config: ConfigType): void {
               mood: () => mood.state,
               signal: AbortSignal.timeout(inject.timeoutMs),
             },
-            // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径
-            { query: query.slice(0, 400), limit: inject.maxItems + 2, detail: 'summary' },
+            // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径。
+            // explain: true 只为拿到 top1 的向量分数——note 分不出闲聊与相关（见 passesInjectGate）
+            { query: query.slice(0, 400), limit: inject.maxItems + 2, detail: 'summary', explain: true },
           )
-          if (result.note !== 'ok') {
-            writeRecord({ outcome: result.note, hits: result.hits.length, items: [], chars: 0 })
+          const top1Score = result.receipts?.[0]?.knn_score
+          const gate = passesInjectGate({
+            note: result.note,
+            vectorScore: top1Score,
+            degraded: result.degraded,
+            minScore: inject.minScore,
+          })
+          if (!gate) {
+            // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）
+            const outcome = result.note !== 'ok' ? result.note : 'low_score'
+            writeRecord({ outcome, hits: result.hits.length, items: [], chars: 0, ...(top1Score === undefined ? {} : { top1Score }) })
             return ''
           }
           const items = pickForInjection(result.hits, inject.maxItems, inject.maxChars)
@@ -897,6 +907,7 @@ export function apply(ctx: Context, config: ConfigType): void {
             hits: result.hits.length,
             items: items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
             chars: text.length,
+            ...(top1Score === undefined ? {} : { top1Score }),
           })
           if (text !== '') {
             logger.info('注入 %d 条记忆（%d ms，%d 字符）', items.length, Date.now() - startedAt, text.length)
