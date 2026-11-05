@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.6.30**
+**当前版本：0.6.31**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -80,13 +80,30 @@ cd dsh-memory-es-<版本>
 ./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
 ```
 
+前置条件：Linux + Docker（`docker compose` v2）、内存 ≥ 4 GB、Node.js ≥ 22 + dsh；向量检索还需要 Ollama 与 `bge-m3`（没有它只剩关键词检索）。首次起 ES 要出网拉镜像与中文分词插件。
+
+**没有 ES 的机器**（第一次装）再跑一条，把库和账号一起备好：
+
+```bash
+./es/setup.sh                       # 起 ES → 建索引 → 建角色/账号 → 生成配置片段
+```
+
+它会在 `$DSH_HOME/memory-es/es` 落地数据与证书，并生成 `plugin-config.yml`——把里面那段并进
+profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到证书），再重启 dsh web。
+
+装完自检（`install.sh` 会自动跑一遍，也可以随时手动）：
+
+```bash
+./selfcheck.sh                      # 七项 PASS/FAIL：ES/CA、账号、索引、ACL、embedding、加载清单、配置
+```
+
 装完重启 dsh web，再核对版本：插件日志 `ready: v<版本>`、面板自检 `自检通过 v<版本>`、面板页脚「版本 <版本>」。
 
 包里还带 `manifest.json`（版本、commit、构建时间）与 `SHA256SUMS`（`sha256sum -c SHA256SUMS`）。
 
 ## 版本
 
-当前 **0.6.30**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.6.31**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本

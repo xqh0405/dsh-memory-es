@@ -19,10 +19,43 @@
  * @module dsh-memory-es/es/http
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { join, resolve } from 'node:path'
 import type { Hit } from '../fragment.ts'
+import { dshMemoryDataDir } from '../sessions.ts'
+
+/**
+ * CA 路径解析：配置留空 = 自动找。
+ *
+ * 为什么默认值不能是相对路径 `deploy/es/certs/ca.crt`：那是**仓库里**的位置，
+ * 发行包解到任意目录后它必然指错，用户只会看到「读不到 CA 证书」却不知道
+ * 该往哪放（评审 M2）。所以改成「按约定位置依次找」：
+ *   1. `$DSH_HOME/memory-es/es/certs/ca.crt` —— `es/setup.sh` 的标准落点
+ *   2. `$DSH_HOME/memory-es/ca.crt`          —— 手工拷贝的别名
+ *   3. `<cwd>/deploy/es/certs/ca.crt`        —— 仓库内开发
+ * 一个都不存在时返回第 1 个，错误信息因此指向「应该放哪」而不是一个谜之相对路径。
+ *
+ * ⚠️ `panel/index.js` 里有一份同序实现（面板不 import 主插件产物），改这里要一起改。
+ */
+export function resolveCaCertPath(
+  raw: string | undefined,
+  dataDir: string = dshMemoryDataDir(),
+  cwd: string = process.cwd(),
+): string {
+  const trimmed = (raw ?? '').trim()
+  if (trimmed !== '') return trimmed
+  const candidates = [
+    join(dataDir, 'es', 'certs', 'ca.crt'),
+    join(dataDir, 'ca.crt'),
+    resolve(cwd, 'deploy/es/certs/ca.crt'),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return candidates[0]!
+}
 
 /** 错误分类：既决定要不要重试，也决定给模型看哪句提示 */
 export type EsErrorKind =
@@ -288,12 +321,18 @@ export function createEsClient(config: EsClientConfig): EsClient {
   }
 
   // 一次读入、常驻内存：证书轮换后需要重启插件才知道（写进文档）
+  // 配置留空 = 自动找（见 resolveCaCertPath）：发行包里没有「仓库相对路径」可依赖。
+  const caCertPath = resolveCaCertPath(config.caCertPath)
   let caPem: Buffer | undefined
-  if (config.caCertPath) {
+  if (caCertPath !== '') {
     try {
-      caPem = readFileSync(config.caCertPath)
+      caPem = readFileSync(caCertPath)
     } catch (err) {
-      throw new EsError(`读不到 CA 证书：${config.caCertPath}`, { kind: 'config', cause: err })
+      throw new EsError(
+        `读不到 CA 证书：${caCertPath}（自签 ES 必须给它；`
+        + '发行包跑 ./es/setup.sh 会生成，已有 CA 就显式写进 es.caCertPath）',
+        { kind: 'config', cause: err },
+      )
     }
   }
 

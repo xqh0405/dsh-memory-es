@@ -209,8 +209,10 @@ export const Config: z<ConfigType> = z.object({
   es: z.object({
     url: z.string().default('https://127.0.0.1:9200')
       .description('ES 地址；只绑回环，不要对公网开 9200。'),
-    caCertPath: z.string().default('deploy/es/certs/ca.crt')
-      .description('自签 CA 证书路径（PEM），用于校验 ES 的 HTTPS 证书。'),
+    caCertPath: z.string().default('')
+      .description('自签 CA 证书路径（PEM），用于校验 ES 的 HTTPS 证书。'
+        + '留空 = 自动找 $DSH_HOME/memory-es/es/certs/ca.crt → $DSH_HOME/memory-es/ca.crt → ./deploy/es/certs/ca.crt'
+        + '（发行包跑 es/setup.sh 会把证书放在第一处）。'),
     requestTimeoutMs: z.number().step(1).min(500).default(8_000)
       .description('单次 ES 请求超时（毫秒）。'),
   }),
@@ -231,8 +233,10 @@ export const Config: z<ConfigType> = z.object({
   identity: z.object({
     userId: z.string()
       .description('必填：本次部署代表哪个用户（对应 personal_memory_<id> 索引名）。'),
-    readUsername: z.string().default('mem-reader-xqh')
-      .description('只读身份的用户名（D5：一人一索引 + 索引级 ACL）。'),
+    readUsername: z.string().default('mem-reader')
+      // 别再写死某个人的名字（评审 M2）：默认值只是旧三账号模型的兼容回落，
+      // 新部署一律用 identity.username（mem-user-<uid>）。
+      .description('只读身份的用户名（旧三账号模型的兼容回落；单账号部署用 identity.username）。'),
     readPassword: z.string().default('')
       .description('只读身份的密码；从环境变量注入，不要写进配置文件。'),
     writerUsername: z.string().default('mem-writer')

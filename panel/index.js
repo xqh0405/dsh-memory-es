@@ -41,9 +41,31 @@ function readPanelVersion() {
 // 但 /overview 每次请求都现读——升级插件后页面不该还显示旧版本号，也不必为此重启整个 dsh web。
 const PANEL_VERSION = readPanelVersion()
 
+/**
+ * CA 路径解析：配置留空 = 自动找。
+ *
+ * 与 `src/es/http.ts` 的 `resolveCaCertPath` **同序**（面板不 import 主插件产物，
+ * 两边各留一份；改一处必须改另一处）：
+ *   1. `$DSH_HOME/memory-es/es/certs/ca.crt` —— es/setup.sh 的标准落点
+ *   2. `$DSH_HOME/memory-es/ca.crt`          —— 手工拷贝的别名
+ *   3. `./deploy/es/certs/ca.crt`            —— 仓库内开发
+ * 都不存在时返回第 1 个（报错因此指向「应该放哪」）。
+ */
+function resolveCaCertPath(raw) {
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  if (trimmed !== '') return trimmed
+  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  const base = join(home, 'memory-es')
+  const candidates = [join(base, 'es', 'certs', 'ca.crt'), join(base, 'ca.crt'), 'deploy/es/certs/ca.crt']
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return candidates[0]
+}
+
 /** 配置默认值与 `src/config.ts` 保持一致（只用于面板兜底，不替代插件校验） */
 const DEFAULTS = {
-  es: { url: 'https://127.0.0.1:9200', caCertPath: 'deploy/es/certs/ca.crt', requestTimeoutMs: 8000 },
+  es: { url: 'https://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 8000 },
   index: { personalPrefix: 'personal_memory_', docPrefix: 'personal_doc_', team: 'team_knowledge' },
   identity: {
     userId: '',
@@ -157,6 +179,8 @@ function resolveClientConfig(ctx, role = 'reader') {
   const config = findEntryRow(ctx)
   if (!config.ok) return config
   const value = config.value
+  // CA 留空 = 按约定位置自动找（发行包里没有仓库相对路径可依赖），只解析一次
+  const caCertPath = resolveCaCertPath(value.es.caCertPath)
   // 单账号模式：一个人一个 ES 账号，个人库读写 + 团队库按 teamWrite 授权
   const single = value.identity.username && value.identity.password ? value.identity : null
 
@@ -167,7 +191,7 @@ function resolveClientConfig(ctx, role = 'reader') {
         ok: true,
         value: {
           url: value.es.url,
-          caCertPath: value.es.caCertPath,
+          caCertPath,
           timeoutMs: value.es.requestTimeoutMs,
           auth: { username: single.username, password: single.password },
         },
@@ -186,7 +210,7 @@ function resolveClientConfig(ctx, role = 'reader') {
         ok: true,
         value: {
           url: value.es.url,
-          caCertPath: value.es.caCertPath,
+          caCertPath,
           timeoutMs: value.es.requestTimeoutMs,
           auth: { username: single.username, password: single.password },
         },
@@ -204,7 +228,7 @@ function resolveClientConfig(ctx, role = 'reader') {
       ok: true,
       value: {
         url: value.es.url,
-        caCertPath: value.es.caCertPath,
+        caCertPath,
         timeoutMs: value.es.requestTimeoutMs,
         auth: { username, password },
       },
@@ -215,7 +239,7 @@ function resolveClientConfig(ctx, role = 'reader') {
       ok: true,
       value: {
         url: value.es.url,
-        caCertPath: value.es.caCertPath,
+        caCertPath,
         timeoutMs: value.es.requestTimeoutMs,
         auth: { username: single.username, password: single.password },
       },
@@ -229,7 +253,7 @@ function resolveClientConfig(ctx, role = 'reader') {
     ok: true,
     value: {
       url: value.es.url,
-      caCertPath: value.es.caCertPath,
+      caCertPath,
       timeoutMs: value.es.requestTimeoutMs,
       auth: credential,
     },
