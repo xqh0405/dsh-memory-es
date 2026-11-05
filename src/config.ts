@@ -174,6 +174,15 @@ export interface ConfigType {
     queryMaxChars: number
     path: string
   }
+  /** 阶段 17 P0-1：自动召回真注入（与影子同口径，但真写进 system prompt） */
+  recallInject: {
+    enabled: boolean
+    timeoutMs: number
+    maxItems: number
+    maxChars: number
+    sectionOrder: number
+    cacheTtlMs: number
+  }
 }
 
 /**
@@ -444,6 +453,30 @@ export const Config: z<ConfigType> = z.object({
       .description('拿消息前多少个字符当检索 query。'),
     path: z.string().default('')
       .description('JSONL 输出路径；留空 = $DSH_HOME/memory-es/recall-shadow.jsonl。'),
+  }),
+  /**
+   * 阶段 17 P0-1：自动召回真注入。
+   *
+   * **默认关**：它改变每一轮的实际输入（会影响模型回答），属于「改检索行为」的开关，
+   * 按护栏默认关；要开先看同一份影子数据说明「注入什么、多大、多贵」。
+   */
+  recallInject: z.object({
+    enabled: z.boolean().default(false)
+      .description('自动召回真注入：每次组装 prompt 前检索一次，把命中的记忆写进 system prompt。默认关。'),
+    timeoutMs: z.number().step(1).min(50).max(5_000).default(500)
+      .description('单次注入检索的硬超时（毫秒）；超时 = 这一轮不注入，静默跳过、不报错。'
+        + '默认 500 而不是 1500：125 上单次热路径 44~65ms，但 11 个容器共享一个 -np 1 的 Ollama，'
+        + '队列被批量补向量占住时 3 秒都不回（2026-11-05 实测 13 条观测 11 条 timeout）。'
+        + '超时的正确反应是「这轮没记忆」，不是让用户白等。'),
+    maxItems: z.number().step(1).min(1).max(10).default(3)
+      .description('注入条数上限；与影子 recallShadow.maxItems 保持一致，这样影子数据可以直接预估真实体积。'),
+    maxChars: z.number().step(1).min(100).default(600)
+      .description('注入正文的字符预算（按检索顺序累加）。实测 3 条约 363 字符 ≈ 181 token。'),
+    sectionOrder: z.number().step(1).default(3203)
+      .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
+    cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+      .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
+        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
   }),
 })
 

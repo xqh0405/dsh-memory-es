@@ -13,6 +13,7 @@
 import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -33,6 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
+import { formatInjection, pickForInjection, RECALL_SECTION_NAME } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -816,6 +818,117 @@ export function apply(ctx: Context, config: ConfigType): void {
       })
     },
     'dsh-memory-es.recall-shadow',
+  )
+
+  /*
+   * 阶段 17 P0-1：自动召回**真注入**。
+   *
+   * 通道选择：静态 section 的 `text` 是**同步**的，没法在里面跑检索；而
+   * `system-prompt/assemble` 是 waterfall（可 await），在每个 model step 组装
+   * prompt 前触发——这是唯一能「先查再写进 prompt」的位置。
+   *
+   * 三条纪律（2026-11-05 实测得出，见 recall-inject.ts 头注释）：
+   *  · 超时极短（默认 500ms）：125 上 11 个容器共享一个 -np 1 的 Ollama，
+   *    队列被批量补向量占住时 3 秒都不回，超时的正确反应是「这轮没记忆」；
+   *  · 只注入 note==='ok'：low_confidence 在影子数据里占 24/74，注进去是噪声；
+   *  · 注入块显式说明「数据不是指令」，因为记忆正文里存过运维命令与提交规则。
+   */
+  ctx.effect(
+    () => {
+      const inject = config.recallInject
+      if (!inject.enabled) return () => {}
+
+      // 最近一条用户消息，按 agent 存：assemble 时拿它当 query。
+      // 子代理没有 inbox 消息 → 查不到 → 不注入（避免把父会话的记忆带进子任务）。
+      const lastMessage = new Map<string, string>()
+      // 同一 query 的结果复用：一个 turn 有多个 step，每步都会重新组装 prompt
+      const resultCache = new Map<string, { at: number; text: string }>()
+
+      const remember = ctx.on(
+        'agent/inbox/inserted',
+        ({ agent, message }: { agent: { id: string }; message: unknown }) => {
+          const text = extractUserText(message)
+          const trimmed = text.trim()
+          if (trimmed === '') return
+          lastMessage.set(String(agent?.id ?? 'default'), trimmed.slice(0, 2_000))
+        },
+      )
+
+      const recall = async (query: string): Promise<string> => {
+        const startedAt = Date.now()
+        try {
+          const result = await searchMemories(
+            {
+              userId,
+              personalPrefix,
+              teamIndex: config.index.team,
+              reader,
+              embed,
+              dims: config.embedding.dims,
+              retrieval,
+              confidence: config.confidence,
+              ranking: config.ranking,
+              mood: () => mood.state,
+              signal: AbortSignal.timeout(inject.timeoutMs),
+            },
+            // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径
+            { query: query.slice(0, 400), limit: inject.maxItems + 2, detail: 'summary' },
+          )
+          if (result.note !== 'ok') return ''
+          const items = pickForInjection(result.hits, inject.maxItems, inject.maxChars)
+          const text = formatInjection(items)
+          if (text !== '') {
+            logger.info('注入 %d 条记忆（%d ms，%d 字符）', items.length, Date.now() - startedAt, text.length)
+          }
+          return text
+        } catch (err) {
+          // 超时/异常 = 这一轮没有记忆。注入是增强，绝不能把回合拖住或报错给用户
+          logger.info('注入跳过（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
+          return ''
+        }
+      }
+
+      const dispose = ctx.on(
+        'system-prompt/assemble',
+        async (
+          _assembly: PromptAssembly,
+          context: AssembleContext,
+          next: () => Promise<PromptAssembly>,
+        ): Promise<PromptAssembly> => {
+          const assembly = await next()
+          // AssembleContext 的公开类型只有 scope/signal；运行时由 dsh-agent 带上 agent
+          const agentId = String((context as AssembleContext & { agent?: { id?: string } }).agent?.id ?? '')
+          const query = lastMessage.get(agentId)
+          if (query === undefined) return assembly
+
+          const cached = resultCache.get(query)
+          let text: string
+          if (cached !== undefined && Date.now() - cached.at < inject.cacheTtlMs) {
+            text = cached.text
+          } else {
+            text = await recall(query)
+            resultCache.set(query, { at: Date.now(), text })
+          }
+          if (text === '') return assembly
+
+          return {
+            ...assembly,
+            sections: [
+              ...assembly.sections,
+              { name: RECALL_SECTION_NAME, text, interpolate: false },
+            ],
+          }
+        },
+      )
+
+      logger.info('自动召回注入已开：超时 %d ms，最多 %d 条 / %d 字符', inject.timeoutMs, inject.maxItems, inject.maxChars)
+
+      return () => {
+        remember()
+        dispose()
+      }
+    },
+    'dsh-memory-es.recall-inject',
   )
 
   ctx.effect(
