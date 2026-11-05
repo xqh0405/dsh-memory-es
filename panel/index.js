@@ -1837,6 +1837,28 @@ async function handleIdentityPending(ctx, res, url) {
   return json(res, 200, { ok: true, value: { rows } })
 }
 
+/**
+ * 采纳闸门的规则判定（纯函数，导出给测试）。
+ *
+ * ⚠️ 分支顺序是硬要求：anchor 的目标状态就是 active，所以必须先判 anchor、再判 pending。
+ * 反过来写会让「设为锚点」永远返回「只有 pending 能被采纳」（2026-11-05 的 bug）。
+ * 规则与 src/memory/review.ts 的 setAnchor 保持一致：identity + active。
+ */
+export function classifyIdentityAction(memoryType, status, action) {
+  const type = typeof memoryType === 'string' ? memoryType : ''
+  const state = typeof status === 'string' ? status : ''
+  if (!['identity', 'persona'].includes(type)) {
+    return { ok: false, error: `这条是 ${type || '未知'}，不能走采纳闸门（只收 identity / persona）` }
+  }
+  if (action === 'anchor') {
+    if (type !== 'identity') return { ok: false, error: `这条的类型是 ${type || '未知'}，不是 identity，不能设锚点` }
+    if (state !== 'active') return { ok: false, error: `只有生效中的自述能设锚点（当前 ${state}）` }
+    return { ok: true }
+  }
+  if (state !== 'pending') return { ok: false, error: `这条当前状态是 ${state}（只有 pending 能被采纳）` }
+  return { ok: true }
+}
+
 /** 采纳 / 拒绝一条候选。规则与 src/memory/review.ts 必须一致（两份实现，改一处要改两处）。 */
 async function handleIdentityReview(ctx, res, req) {
   const body = await readJsonBody(req)
@@ -1856,7 +1878,7 @@ async function handleIdentityReview(ctx, res, req) {
   const writer = createReadClient(() => resolveClientConfig(ctx, 'personal-writer'))
   const reader = createReadClient(() => resolveClientConfig(ctx))
 
-  // 先读校验：只有 pending + (identity | persona) 能动
+  // 先读校验：类型与状态的可操作性统一由 classifyIdentityAction 判定（顺序见该函数的注释）。
   const found = await reader.search(names.personal, {
     size: 1,
     query: { bool: { filter: [{ term: { memory_id: memoryId } }] } },
@@ -1864,20 +1886,11 @@ async function handleIdentityReview(ctx, res, req) {
   })
   const src = found.hits?.hits?.[0]?._source
   if (!src) return json(res, 404, { ok: false, error: `找不到条目 ${memoryId}` })
-  if (!['identity', 'persona'].includes(str(src.memory_type))) {
-    return json(res, 409, { ok: false, error: `这条是 ${str(src.memory_type) || '未知'}，不能走采纳闸门（只收 identity / persona）` })
-  }
-  if (str(src.status) !== 'pending') return json(res, 409, { ok: false, error: `这条当前状态是 ${str(src.status)}（只有 pending 能被采纳）` })
+  const verdict = classifyIdentityAction(str(src.memory_type), str(src.status), action)
+  if (!verdict.ok) return json(res, 409, { ok: false, error: verdict.error })
 
   // 锚点：不改 status，只改 anchor 标志（规则与 src/memory/review.ts 的 setAnchor 一致）
   if (action === 'anchor') {
-    // 与 src/memory/review.ts 的 setAnchor 同规则：只有 identity 且 active 才能设锚点
-    if (String(src.memory_type) !== 'identity') {
-      return json(res, 409, { ok: false, error: `这条的类型是 ${String(src.memory_type) || '未知'}，不是 identity，不能设锚点` })
-    }
-    if (String(src.status) !== 'active') {
-      return json(res, 409, { ok: false, error: `只有生效中的自述能设锚点（当前 ${String(src.status)}）` })
-    }
     const anchor = body.value.anchor !== false
     const anchorAt = new Date().toISOString()
     await writer.update(names.personal, memoryId, { anchor, updated_at: anchorAt }, { refresh: 'wait_for' })
@@ -1910,6 +1923,7 @@ async function handleIdentityReview(ctx, res, req) {
     return json(res, 200, { ok: true, value: { memoryId, status: 'active', anchor, audit: anchorAuditState } })
   }
 
+  // 走到这里只剩采纳 / 拒绝（pending 校验已在 classifyIdentityAction 里）
   const target = action === 'approve' ? 'active' : 'archived'
   const at = new Date().toISOString()
   await writer.update(

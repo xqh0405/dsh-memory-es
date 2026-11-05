@@ -10,9 +10,28 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction } = await import(
   '../panel/index.js'
 )
+
+test('classifyIdentityAction：active 自述能设锚点（顺序回归，2026-11-05）', () => {
+  const verdict = classifyIdentityAction('identity', 'active', 'anchor')
+  assert.equal(verdict.ok, true, 'anchor 的目标状态就是 active；任何 pending 前置校验都会让「设为锚点」永远点不动')
+})
+
+test('classifyIdentityAction：采纳/拒绝仍然只收 pending', () => {
+  for (const action of ['approve', 'reject']) {
+    const verdict = classifyIdentityAction('identity', 'active', action)
+    assert.equal(verdict.ok, false)
+    assert.match(verdict.error, /只有 pending 能被采纳/)
+  }
+})
+
+test('classifyIdentityAction：锚点只给 identity + active', () => {
+  assert.match(classifyIdentityAction('persona', 'active', 'anchor').error, /不是 identity，不能设锚点/)
+  assert.match(classifyIdentityAction('identity', 'pending', 'anchor').error, /只有生效中的自述能设锚点（当前 pending）/)
+  assert.match(classifyIdentityAction('fact', 'active', 'anchor').error, /不能走采纳闸门/)
+})
 
 test('pendingQuery：待裁决必须同时限定 review_state 与 status=active', () => {
   const filter = pendingQuery().bool.filter
