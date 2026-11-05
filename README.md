@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.6.15**
+**当前版本：0.6.26**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -86,12 +86,12 @@ cd dsh-memory-es-<版本>
 
 ## 版本
 
-当前 **0.6.15**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.6.26**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本
-scripts/version.sh bump patch   # 日常改动：0.6.15 → 0.6.16（第三位允许两位数）
-scripts/version.sh bump minor   # 重大变动才动第二位：0.6.16 → 0.7.0
+scripts/version.sh bump patch   # 日常改动：末位 +1，第三位允许两位数（0.6.9 → 0.6.10）
+scripts/version.sh bump minor   # 重大变动才动第二位（0.6.0 → 0.7.0）
 ```
 
 运行态三处可核对：插件日志 `ready: vX.Y.Z`、面板自检 `自检通过 vX.Y.Z`、面板页脚「版本 X.Y.Z」。

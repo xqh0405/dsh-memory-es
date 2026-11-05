@@ -39,4 +39,22 @@ describe('版本号', () => {
   test('读不到时降级为 unknown，而不是抛错', () => {
     assert.equal(readVersion(import.meta.url, '../definitely-not-here.json'), 'unknown')
   })
+
+  test('README 的版本声明与 package.json 一致（防对外版本漂移）', () => {
+    // 对外第一印象就在 README。2026-11-05 实测它停在 0.6.15 而包已是 0.6.26，
+    // 漂了 11 个版本没人发现 —— 所以钉在这里。
+    // 只钉「声明式」的两处（页首 + 「版本」节）；命令示例里的数字是说明性举例，不参与比对。
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+    const expected = pkgVersion('../package.json')
+
+    const declared = [
+      ...readme.matchAll(/当前版本[：:]\s*\**(\d+\.\d+\.\d+)/g),
+      ...readme.matchAll(/当前\s+\*\*(\d+\.\d+\.\d+)\*\*/g),
+    ].map((match) => match[1])
+
+    assert.equal(declared.length, 2, `README 应有 2 处版本声明，实际 ${declared.length} 处：${declared.join('、')}`)
+    for (const found of declared) {
+      assert.equal(found, expected, `README 写 ${found}，package.json 是 ${expected}`)
+    }
+  })
 })
