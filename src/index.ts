@@ -44,7 +44,8 @@ import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob, runDistillSweep } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
-import { defineSearchTool, searchMemories } from './memory/search.ts'
+import { defineSearchTool, expandQuery, searchMemories } from './memory/search.ts'
+import { createEmbedCache } from './embed-cache.ts'
 import { defineGetTool } from './memory/get.ts'
 import { createRecallCache } from './memory/recallCache.ts'
 import { defineStatusTool } from './memory/status.ts'
@@ -847,6 +848,24 @@ export function apply(ctx: Context, config: ConfigType): void {
       const injectLogPath = resolveInjectPath(inject.logPath)
       const injectWriter = createShadowWriter<InjectRecord>(injectLogPath)
 
+      /**
+       * 阶段 20：embedding 预热缓存。
+       *
+       * 注入路径的 embed 全部走 `cachedEmbed`：预热与 assemble 共享同一次在途请求，
+       * 所以「预热还没回来、assemble 先到」也不会打两次 Ollama（见 embed-cache 的 in-flight）。
+       */
+      const embedCache = createEmbedCache({
+        ttlMs: inject.prewarm.cacheTtlMs,
+        maxEntries: inject.prewarm.maxEntries,
+      })
+      const cachedEmbed = embedCache.wrap(embed)
+
+      /**
+       * 预热用的 key 必须与检索侧同源：`search.ts` 是对 **expandQuery 之后**的文本做 embed，
+       * 这里若只 embed 原始 query，缓存键对不上，预热等于白跑。
+       */
+      const prewarmKey = (text: string): string => expandQuery(text.slice(0, 400), retrieval.synonyms)
+
       const remember = ctx.on(
         'agent/inbox/inserted',
         ({ agent, message }: { agent: { id: string }; message: unknown }) => {
@@ -854,17 +873,31 @@ export function apply(ctx: Context, config: ConfigType): void {
           const trimmed = text.trim()
           if (trimmed === '') return
           lastMessage.set(String(agent?.id ?? 'default'), trimmed.slice(0, 2_000))
+
+          // 阶段 20：预热。即发即忘、超时放弃——它只抢在 assemble 之前，绝不拖住消息主流程。
+          if (!inject.prewarm.enabled) return
+          void cachedEmbed
+            .embed(prewarmKey(trimmed), { signal: AbortSignal.timeout(inject.prewarm.timeoutMs) })
+            .catch(() => {
+              // 预热失败 = 没预热。assemble 时照常实时算，不该留下任何痕迹
+            })
         },
       )
 
       const recall = async (query: string, agentId: string): Promise<string> => {
         const startedAt = Date.now()
-        const writeRecord = (record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms'>): void => {
+        // 预热命中与否：只看缓存里有没有这条向量（与 search 内部用的是同一个 key）。
+        // 注意这要在 writeRecord 之前算——它记录的是「这次 assemble 有没有等 Ollama」。
+        const embedCached = embedCache.get(prewarmKey(query)) !== undefined
+        const writeRecord = (
+          record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms' | 'embedCached'>,
+        ): void => {
           injectWriter.write({
             ts: new Date().toISOString(),
             agent: agentId,
             query: query.slice(0, 200),
             ms: Date.now() - startedAt,
+            embedCached,
             ...record,
           })
         }
@@ -875,7 +908,9 @@ export function apply(ctx: Context, config: ConfigType): void {
               personalPrefix,
               teamIndex: config.index.team,
               reader,
-              embed,
+              // 阶段 20：走预热缓存。命中则这次 assemble 不等 Ollama；
+              // 未命中（预热失败/超时/新 query）就退化为原来的实时嵌入，行为不变。
+              embed: cachedEmbed,
               dims: config.embedding.dims,
               retrieval,
               confidence: config.confidence,

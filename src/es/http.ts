@@ -20,8 +20,8 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { Agent as HttpAgent, request as httpRequest } from 'node:http'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { join, resolve } from 'node:path'
 import type { Hit } from '../fragment.ts'
 import { dshMemoryDataDir } from '../sessions.ts'
@@ -184,6 +184,41 @@ export interface EsSearchResult {
   hits: Hit[]
 }
 
+/** `_msearch` 的一条子请求：目标索引 + 查询体 */
+export interface MsearchRequest {
+  index: string
+  body: Record<string, unknown>
+}
+
+/** `_bulk` 的一条脚本更新（命中回写用） */
+export interface BulkScriptUpdate {
+  index: string
+  id: string
+  script: { source: string; params?: Record<string, unknown> }
+}
+
+export interface BulkScriptResult {
+  index: string
+  id: string
+  ok: boolean
+  status: number
+  /** ok=false 时的原因（ES 的 error.reason 或传输错误） */
+  error?: string
+}
+
+interface RawBulkResponse {
+  items?: Array<{ update?: { status?: unknown; error?: { reason?: unknown } } }>
+}
+
+interface RawMsearchResponse {
+  responses?: Array<{
+    took?: unknown
+    hits?: { total?: unknown; hits?: unknown }
+    error?: { type?: unknown; reason?: unknown }
+    status?: number
+  }>
+}
+
 export interface EsInfo {
   cluster_name?: string
   version: { number: string }
@@ -218,6 +253,21 @@ export interface EsClient {
   ): Promise<EsWriteResult>
   /** 检索；body 由 `es/dsl.ts` 组装，这里只负责收发 */
   search(indexName: string, body: Record<string, unknown>, call?: CallOptions): Promise<EsSearchResult>
+  /**
+   * 阶段 20：一次 HTTP 打多个查询（`_msearch`）。
+   *
+   * 用途是把「personal 的 bm25+knn、team 的 bm25+knn」四次往返压成两次（每个索引一次），
+   * 语义与逐条 `search` **完全等价**——同样先过滤再打分，同样返回 `_id/_score/_source`。
+   * 任一子查询报错就整体抛（与逐条版「任一路 ES 出错就明确失败」一致）。
+   */
+  msearch(requests: readonly MsearchRequest[], call?: CallOptions): Promise<EsSearchResult[]>
+  /**
+   * 阶段 20：批量脚本更新（命中回写）。
+   *
+   * **部分失败不抛**：返回每条的结果，让调用方自己决定记多少日志——回写是观测通道，
+   * 坏一条不影响其余，也不该让整次检索失败。只有传输层/整体 HTTP 失败才抛。
+   */
+  bulkUpdateScript(items: readonly BulkScriptUpdate[], call?: CallOptions): Promise<BulkScriptResult[]>
 }
 
 interface RawSearchHit {
@@ -339,22 +389,42 @@ export function createEsClient(config: EsClientConfig): EsClient {
   const authHeader = `Basic ${Buffer.from(`${config.username}:${config.password}`, 'utf8').toString('base64')}`
   const transport = baseUrl.protocol === 'https:' ? httpsRequest : httpRequest
 
-  /** 发一次请求；不做重试与语义解释 */
+  /**
+   * 阶段 20：显式 keepAlive 连接池。
+   *
+   * 进程内每次检索要发 2~4 个请求，之前走全局 agent（Node 19+ 默认 keepAlive，
+   * 但 `maxSockets` 是 Infinity、空闲 5s 就关）。显式给一个有上限的池子有两个好处：
+   *  · 同一批检索复用连接，省 TLS 握手（自签 CA 握手比明文贵）；
+   *  · 并发封顶 16，避免一次「四路召回 + 批量回写」把 fd 打满。
+   *
+   * 不 destroy：池子随进程退出释放；插件热重载会重建客户端，旧 agent 的空闲连接
+   * 在 keepAliveMsecs 后自然关闭（每个 agent 至多 16 个 socket，可接受）。
+   */
+  const agent =
+    baseUrl.protocol === 'https:'
+      ? new HttpsAgent({ keepAlive: true, keepAliveMsecs: 1_000, maxSockets: 16 })
+      : new HttpAgent({ keepAlive: true, keepAliveMsecs: 1_000, maxSockets: 16 })
+
+  /** 发一次请求；不做重试与语义解释。`rawBody` 用于 NDJSON（`_msearch`） */
   function once(
     method: string,
     path: string,
     payload: unknown,
     signal?: AbortSignal,
+    rawBody = false,
   ): Promise<{ status: number; text: string }> {
     const target = new URL(path, baseUrl)
     const shown = `${method} ${target.pathname}${target.search}`
-    const body = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload), 'utf8')
+    const body =
+      payload === undefined
+        ? undefined
+        : Buffer.from(rawBody ? String(payload) : JSON.stringify(payload), 'utf8')
     const headers: Record<string, string | number> = {
       authorization: authHeader,
       accept: 'application/json',
     }
     if (body) {
-      headers['content-type'] = 'application/json'
+      headers['content-type'] = rawBody ? 'application/x-ndjson' : 'application/json'
       headers['content-length'] = body.byteLength
     }
 
@@ -362,7 +432,7 @@ export function createEsClient(config: EsClientConfig): EsClient {
       const req = transport(
         target,
         // signal 交给 http.request：中止时它会 destroy 请求并以 AbortError 走 error 事件
-        { method, headers, ca: caPem, signal },
+        { method, headers, ca: caPem, signal, agent },
         (res) => {
           const chunks: Buffer[] = []
           res.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -398,12 +468,18 @@ export function createEsClient(config: EsClientConfig): EsClient {
   }
 
   /** 统一入口：只在 409 / 429 上重试一次（各一次，不是“无限”） */
-  async function request<T>(method: string, path: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
+  async function request<T>(
+    method: string,
+    path: string,
+    payload?: unknown,
+    signal?: AbortSignal,
+    rawBody = false,
+  ): Promise<T> {
     let attempt = 0
     for (;;) {
       attempt += 1
       try {
-        const { status, text } = await once(method, path, payload, signal)
+        const { status, text } = await once(method, path, payload, signal, rawBody)
         return interpret<T>(method, path, status, text)
       } catch (err) {
         const failure = err instanceof EsError ? err : new EsError(String(err), { kind: 'protocol', cause: err })
@@ -496,17 +572,81 @@ export function createEsClient(config: EsClientConfig): EsClient {
 
     async search(indexName, body, call: CallOptions = {}) {
       const raw = await request<RawSearchResponse>('POST', `/${enc(indexName)}/_search`, body, call.signal)
-      const rawHits = Array.isArray(raw.hits?.hits) ? (raw.hits.hits as RawSearchHit[]) : []
-      const hits: Hit[] = rawHits.map((hit) => ({
-        id: typeof hit._id === 'string' ? hit._id : '',
-        score: typeof hit._score === 'number' ? hit._score : 0,
-        source: (hit._source ?? {}) as Record<string, unknown>,
-      }))
       return {
         took: typeof raw.took === 'number' ? raw.took : 0,
         total: normalizeTotal(raw.hits?.total),
-        hits,
+        hits: mapRawHits(raw.hits?.hits),
       }
     },
+
+    async msearch(requests, call: CallOptions = {}) {
+      if (requests.length === 0) return []
+      // NDJSON：每两条一组（header + 查询体），**末尾必须有换行**，否则 ES 报解析错
+      const ndjson =
+        requests.map((item) => `${JSON.stringify({ index: item.index })}\n${JSON.stringify(item.body)}`).join('\n')
+        + '\n'
+      const raw = await request<RawMsearchResponse>('POST', '/_msearch', ndjson, call.signal, true)
+      const responses = Array.isArray(raw.responses) ? raw.responses : []
+      if (responses.length !== requests.length) {
+        // 条数对不上就整体失败：错位合并会让 personal 的分数算进 team（比报错难查得多）
+        throw new EsError(
+          `POST /_msearch → 响应 ${responses.length} 条，与请求 ${requests.length} 条不一致`,
+          { kind: 'protocol' },
+        )
+      }
+      return responses.map((item, index) => {
+        if (item.error !== undefined) {
+          const type = typeof item.error.type === 'string' ? item.error.type : ''
+          const reason = typeof item.error.reason === 'string' ? item.error.reason : '未知错误'
+          throw new EsError(
+            `msearch[${index}] (${requests[index]!.index}) → ${[type, reason].filter(Boolean).join(' ')}`,
+            { kind: kindFromStatus(item.status ?? 500), status: item.status, esType: type || undefined },
+          )
+        }
+        return {
+          took: typeof item.took === 'number' ? item.took : 0,
+          total: normalizeTotal(item.hits?.total),
+          hits: mapRawHits(item.hits?.hits),
+        }
+      })
+    },
+
+    async bulkUpdateScript(items, call: CallOptions = {}) {
+      if (items.length === 0) return []
+      // `_bulk` 的 NDJSON：每条两行（action + payload），末尾必须有换行
+      const ndjson =
+        items
+          .map(
+            (item) =>
+              `${JSON.stringify({ update: { _index: item.index, _id: item.id } })}\n${JSON.stringify({ script: item.script })}`,
+          )
+          .join('\n') + '\n'
+      const raw = await request<RawBulkResponse>('POST', '/_bulk', ndjson, call.signal, true)
+      const rawItems = Array.isArray(raw.items) ? raw.items : []
+      // 顺序与请求严格一致；缺条目按失败算（不猜「大概是成功」）
+      return items.map((item, index) => {
+        const entry = rawItems[index]?.update
+        const status = typeof entry?.status === 'number' ? entry.status : 0
+        const ok = status >= 200 && status < 300
+        const reason = typeof entry?.error?.reason === 'string' ? entry.error.reason : undefined
+        return {
+          index: item.index,
+          id: item.id,
+          ok,
+          status,
+          ...(ok || reason === undefined ? {} : { error: reason }),
+        }
+      })
+    },
   }
+}
+
+/** `_search` 与 `_msearch` 共用的命中归一：两处必须一致，否则合并分数会漂 */
+function mapRawHits(raw: unknown): Hit[] {
+  const rawHits = Array.isArray(raw) ? (raw as RawSearchHit[]) : []
+  return rawHits.map((hit) => ({
+    id: typeof hit._id === 'string' ? hit._id : '',
+    score: typeof hit._score === 'number' ? hit._score : 0,
+    source: (hit._source ?? {}) as Record<string, unknown>,
+  }))
 }

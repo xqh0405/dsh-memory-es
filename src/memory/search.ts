@@ -15,7 +15,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { Embedder } from '../embedding.ts'
-import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFilterOptions } from '../es/dsl.ts'
+import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFilterOptions, type SearchBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
@@ -190,7 +190,11 @@ export interface SearchDeps {
   personalPrefix: string
   teamIndex: string
   /** 读身份：检索一律走只读凭证 */
-  reader: Pick<EsClient, 'search'>
+  /**
+   * `msearch` 可选：生产环境总是有（真 EsClient），测试里的手写 fake 往往只实现 search。
+   * 有它就把四路召回合并成一次往返（阶段 20），没有就退回逐个 search——语义完全一致。
+   */
+  reader: Pick<EsClient, 'search'> & { msearch?: EsClient['msearch'] }
   /**
    * 阶段 6.3：当前心情（同步读缓存，不额外打 ES）。缺省 = 当没有情绪。
    * 传函数而不是值，是为了每次检索都拿到最新状态。
@@ -207,8 +211,13 @@ export interface SearchDeps {
   /**
    * 命中回写（热度信号）：必须给写身份。不给就不记，检索结果不受影响。
    * 用脚本 `+= 1`，并发检索时才不会丢更新。
+   *
+   * 阶段 20：`bulkUpdateScript` 可选——有它就一次 `_bulk` 写完（省 N-1 次往返），
+   * 没有就退回逐条 `updateScript`（语义相同，只是慢）。
    */
-  hitRecorder?: Pick<EsClient, 'updateScript'> | null
+  hitRecorder?:
+    | (Pick<EsClient, 'updateScript'> & { bulkUpdateScript?: EsClient['bulkUpdateScript'] })
+    | null
   /** 注入时钟（团队库兜底时间窗要用） */
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
@@ -403,35 +412,56 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   // 标识符（lot.bd_write_sync / class 名 / 主机名）单独走 content_exact 精确匹配加分；
   // IK 会把它们切碎，纯 BM25 分数压不住噪声（实测 13.9）。
   const identifiers = extractIdentifiers(query)
-  const tasks: Array<{ scope: Scope; route: 'bm25' | 'knn'; run: Promise<Hit[]> }> = []
+  // 先收集查询、不立即发：能一次 `_msearch` 就一次（阶段 20），没有 msearch 才逐条。
+  const queries: Array<{ scope: Scope; route: 'bm25' | 'knn'; index: string; body: SearchBody }> = []
 
-  const pushRoute = (target: Scope, indexName: string, targetMeta: MetaFilterOptions): void => {
-    tasks.push({
+  const pushQuery = (target: Scope, indexName: string, targetMeta: MetaFilterOptions): void => {
+    queries.push({
       scope: target,
       route: 'bm25',
-      run: deps.reader
-        .search(indexName, bm25Body(expandedQuery, targetMeta, topK, identifiers), { signal: deps.signal })
-        .then((r) => r.hits),
+      index: indexName,
+      body: bm25Body(expandedQuery, targetMeta, topK, identifiers),
     })
     if (vector) {
-      tasks.push({
+      queries.push({
         scope: target,
         route: 'knn',
-        run: deps.reader
-          .search(indexName, knnBody(vector, deps.dims, targetMeta, topK), { signal: deps.signal })
-          .then((r) => r.hits),
+        index: indexName,
+        body: knnBody(vector, deps.dims, targetMeta, topK),
       })
     }
   }
 
-  if (scope !== 'team') pushRoute('personal', personalIndex, meta)
+  if (scope !== 'team') pushQuery('personal', personalIndex, meta)
   if (scope !== 'personal') {
-    pushRoute('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
+    pushQuery('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
   }
 
   let settled: Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>
   try {
-    settled = await Promise.all(tasks.map(async (task) => ({ ...task, hits: await task.run })))
+    const msearch = deps.reader.msearch
+    if (msearch !== undefined && queries.length > 1) {
+      // 一次往返打完全部子查询。ES 允许 `_msearch` 跨索引，响应顺序与请求严格一致；
+      // 任一条失败会整体抛（见 http.ts 的 msearch），与逐条版「任一路出错就失败」同一语义。
+      const results = await msearch.call(
+        deps.reader,
+        queries.map((item) => ({ index: item.index, body: item.body })),
+        { signal: deps.signal },
+      )
+      settled = queries.map((item, index) => ({
+        scope: item.scope,
+        route: item.route,
+        hits: results[index]?.hits ?? [],
+      }))
+    } else {
+      settled = await Promise.all(
+        queries.map(async (item) => ({
+          scope: item.scope,
+          route: item.route,
+          hits: (await deps.reader.search(item.index, item.body, { signal: deps.signal })).hits,
+        })),
+      )
+    }
   } catch (err) {
     // 任一路 ES 出错就明确失败（§6.5）；不做“猜到一半结果”的降级
     log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
@@ -657,19 +687,41 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   if (deps.hitRecorder !== null && deps.hitRecorder !== undefined && topMerged.length > 0) {
     const stamp = now.toISOString()
     const recorder = deps.hitRecorder
-    void Promise.all(
-      topMerged.map((hit) => {
-        const index = hit.origin === 'team' ? deps.teamIndex : personalIndex
-        return recorder
-          .updateScript(index, hit.id, {
-            source: HIT_UPDATE_SCRIPT,
-            params: { now: stamp },
-          })
-          .catch((err: unknown) => {
+    const updates = topMerged.map((hit) => ({
+      index: hit.origin === 'team' ? deps.teamIndex : personalIndex,
+      id: hit.id,
+      script: { source: HIT_UPDATE_SCRIPT, params: { now: stamp } },
+    }))
+    if (typeof recorder.bulkUpdateScript === 'function') {
+      // 阶段 20：一次 `_bulk` 写完。部分失败只记一条汇总日志——回写是观测通道，
+      // 坏一条不该让整次检索失败，也不该刷 N 条日志把真错误淹掉。
+      void recorder
+        .bulkUpdateScript(updates)
+        .then((results) => {
+          const failed = results.filter((item) => !item.ok)
+          if (failed.length > 0) {
+            log({
+              tool: 'search',
+              event: 'hit_record_partial',
+              failed: failed.length,
+              total: results.length,
+              first_error: failed[0]?.error ?? '',
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          log({ tool: 'search', event: 'hit_record_degraded', error: formatEsError(err) })
+        })
+    } else {
+      // 没有 bulk 能力（测试里的手写 fake / 旧实现）：退回逐条，语义完全一致
+      void Promise.all(
+        updates.map((item) =>
+          recorder.updateScript(item.index, item.id, item.script).catch((err: unknown) => {
             log({ tool: 'search', event: 'hit_record_degraded', error: formatEsError(err) })
-          })
-      }),
-    )
+          }),
+        ),
+      )
+    }
   }
 
   // 低置信不再丢弃结果：返回 + 标注，让模型自己判断。

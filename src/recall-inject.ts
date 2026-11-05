@@ -125,6 +125,11 @@ export interface InjectRecord {
   chars: number
   /** top1 的向量相似度（向量不可用时缺省）——调 minScore 的依据 */
   top1Score?: number
+  /**
+   * 阶段 20：这次检索的 embed 是否命中了预热缓存。
+   * 验收预热收益就看它：`true` 说明 assemble 没等 Ollama。
+   */
+  embedCached?: boolean
 }
 
 /**

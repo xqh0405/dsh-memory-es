@@ -70,6 +70,8 @@ export interface ConfigType {
     maxPerDomain: number
     /** 阶段 12：缺省详略（full / summary） */
     defaultDetail: string
+    /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
+    synonyms?: Record<string, string>
   }
   /** 排序乘子（阶段 2） */
   ranking: {
@@ -186,6 +188,13 @@ export interface ConfigType {
     minScore: number
     /** 每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl */
     logPath: string
+    /** 阶段 20：embedding 预热（消息到达即 embed，assemble 时命中缓存） */
+    prewarm: {
+      enabled: boolean
+      timeoutMs: number
+      cacheTtlMs: number
+      maxEntries: number
+    }
   }
 }
 
@@ -492,6 +501,26 @@ export const Config: z<ConfigType> = z.object({
     logPath: z.string().default('')
       .description('每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl。'
         + '插件 logger 不进 docker logs，这里是唯一能在命令行验收的通道。'),
+    /**
+     * 阶段 20：embedding 预热。
+     *
+     * 用户消息在 `agent/inbox/inserted` 就到了，而注入要到 `system-prompt/assemble` 才查——
+     * 中间隔着模型思考的时间，足够把 embed 先算完。**同文本同模型的向量是确定性的**，
+     * 所以这一步不改变任何检索结果，只把等待提前。
+     *
+     * 默认开：它不改变行为（失败静默、assemble 照常实时算），关掉它没有收益只有慢。
+     * 真正改变行为的是 `recallInject.enabled`，那个默认关。
+     */
+    prewarm: z.object({
+      enabled: z.boolean().default(true)
+        .description('消息到达时提前 embed 一次。不改变检索结果（同文本向量相同），失败静默；只在 recallInject.enabled 时生效。'),
+      timeoutMs: z.number().step(1).min(50).max(5_000).default(2_000)
+        .description('预热的硬超时（毫秒）。超时就放弃，assemble 时照常实时算——预热绝不能占住 Ollama 队列。'),
+      cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+        .description('预热向量的缓存窗口（毫秒）。默认 30s，与 cacheTtlMs 同量级：覆盖「一条消息 → 一次 assemble」，又不会长期持有旧模型的向量。'),
+      maxEntries: z.number().step(1).min(1).max(1_024).default(64)
+        .description('缓存条数上限。1024 维 float 约 4KB/条，64 条 ≈ 256KB。'),
+    }).default({}),
   }),
 })
 
