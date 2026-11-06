@@ -512,8 +512,11 @@ export const Config: z<ConfigType> = z.object({
      * 真正改变行为的是 `recallInject.enabled`，那个默认关。
      */
     prewarm: z.object({
-      enabled: z.boolean().default(true)
-        .description('消息到达时提前 embed 一次。不改变检索结果（同文本向量相同），失败静默；只在 recallInject.enabled 时生效。'),
+      enabled: z.boolean().default(false)
+        .description('消息到达时提前 embed 一次。不改变检索结果（同文本向量相同），失败静默；只在 recallInject.enabled 时生效。'
+          + '**默认关（2026-11-06 改）**：163 次 assemble 实测命中率只有 1.8%——'
+          + 'assemble 紧跟消息到达，预热没有提前量；而且共享 in-flight 时 assemble 会继承预热的 '
+          + 'timeoutMs，绕过注入自己的 500ms 硬超时。等「消息到达 → assemble」有了稳定间隔再开。'),
       timeoutMs: z.number().step(1).min(50).max(5_000).default(2_000)
         .description('预热的硬超时（毫秒）。超时就放弃，assemble 时照常实时算——预热绝不能占住 Ollama 队列。'),
       cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
