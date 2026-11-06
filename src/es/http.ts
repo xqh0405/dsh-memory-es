@@ -372,7 +372,12 @@ export function createEsClient(config: EsClientConfig): EsClient {
 
   // 一次读入、常驻内存：证书轮换后需要重启插件才知道（写进文档）
   // 配置留空 = 自动找（见 resolveCaCertPath）：发行包里没有「仓库相对路径」可依赖。
-  const caCertPath = resolveCaCertPath(config.caCertPath)
+  //
+  // ⚠️ **只有 https 才解析 CA**：http 端点（测试里的 fake ES、反代后的明文入口）
+  // 根本不用证书，却会因为「找不到文件」在构造客户端时就抛错 —— 2026-11-06 在 CI 上
+  // 全量单测因此成片失败（本地有 deploy/es/certs 才没暴露）。
+  const isTls = baseUrl.protocol === 'https:'
+  const caCertPath = isTls ? resolveCaCertPath(config.caCertPath) : ''
   let caPem: Buffer | undefined
   if (caCertPath !== '') {
     try {

@@ -24,6 +24,10 @@ function baseConfig(
 ): ConfigType {
   const parsed = Config({
     identity: { userId: 'xqh', readPassword: 'pw-reader', writerPassword: 'pw-writer' },
+    // 显式给 http：schema 默认是 https://127.0.0.1:9200，那会让 createEsClient 去自动找
+    // 自签 CA —— 本机有 deploy/es/certs 才侥幸通过，CI 上没有就整片失败（2026-11-06）。
+    // 这些用例只跑编排、不发真请求，端点写成什么都不影响语义。
+    es: { url: 'http://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 1_000 },
     ...overrides,
   } as never) as ConfigType
   return parsed

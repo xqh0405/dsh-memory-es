@@ -179,8 +179,12 @@ function resolveClientConfig(ctx, role = 'reader') {
   const config = findEntryRow(ctx)
   if (!config.ok) return config
   const value = config.value
-  // CA 留空 = 按约定位置自动找（发行包里没有仓库相对路径可依赖），只解析一次
-  const caCertPath = resolveCaCertPath(value.es.caCertPath)
+  // CA 留空 = 按约定位置自动找（发行包里没有仓库相对路径可依赖），只解析一次。
+  // ⚠️ **只有 https 才解析**，与 src/es/http.ts 的 isTls 判断必须一致：
+  // http 端点（测试里的 fake ES、反代后的明文入口）不用证书，却会因为「找不到文件」
+  // 在建客户端时就抛错 → 权限探测失败 → 面板接口一律 403。2026-11-06 CI 上就是这样。
+  const isTls = String(value.es.url ?? '').startsWith('https:')
+  const caCertPath = isTls ? resolveCaCertPath(value.es.caCertPath) : ''
   // 单账号模式：一个人一个 ES 账号，个人库读写 + 团队库按 teamWrite 授权
   const single = value.identity.username && value.identity.password ? value.identity : null
 
