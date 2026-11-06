@@ -247,6 +247,7 @@ describe('saveMemory 编排', () => {
     try {
       const result = await saveMemory(makeDeps(fake, { log: (e) => events.push(e) }), { content: '一条事实' })
       assert.deepEqual(result, {
+        status: 'created',
         memory_id: FIXED_ID,
         deduped: false,
         degraded: false,
@@ -270,6 +271,7 @@ describe('saveMemory 编排', () => {
     const { fake, written } = await startSaveFake({ duplicate: { memoryId: 'existing-1' } })
     try {
       const result = await saveMemory(makeDeps(fake), { content: '一条事实' })
+      assert.equal(result.status, 'merged', '命中去重要能一眼看出来：merged，不是 created')
       assert.equal(result.deduped, true)
       assert.equal(result.memory_id, 'existing-1')
       assert.match(result.text, /未重复写入/)

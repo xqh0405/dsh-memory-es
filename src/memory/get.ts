@@ -123,10 +123,10 @@ export async function getMemories(deps: GetDeps, input: GetInput): Promise<GetRe
 }
 
 const DESCRIPTION = [
-  '按 memory_id 取记忆全文（分级读取的展开动作）。',
-  '什么时候用：memory_search 用 detail=summary 只给了摘要、需要看细节时；或已知 id 要复核一条记忆。',
+  '按 memory_id 取记忆全文——分级读取的展开动作，不是检索入口。',
+  '—— 该用我：memory_search 传了 detail=summary、只拿到摘要，现在要读细节；已知 id 要复核一条记忆。',
+  '—— 别用我：不知道 id（先用 memory_search）；想找新内容（检索是 memory_search 的活）。',
   `一次最多 ${MAX_GET_IDS} 条；只读个人库，不属于自己的 id 会返回在 missing 里。`,
-  '它是检索的补充，不是第二个检索入口——不知道 id 时请先用 memory_search。',
 ].join(' ')
 
 export function defineGetTool(deps: GetDeps) {

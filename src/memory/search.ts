@@ -816,12 +816,12 @@ export function renderReceipts(receipts: readonly HitReceipt[]): string {
 }
 
 const DESCRIPTION = [
-  '查记忆库（个人 + 团队），混合检索：关键词与语义都能命中。',
-  '时机：动手前确认「这个项目以前怎么定的」；用户提到「之前说过 / 记过」；遇到似曾相识的报错。',
+  '按「一句事实」检索个人 + 团队记忆库：关键词与语义混合。',
+  '—— 该用我：动手前确认「以前怎么定的」；用户说「之前说过 / 记过」；遇到似曾相识的报错；需要某条具体的约定、口径、踩坑。',
+  '—— 别用我：找方案 / 复盘 / 开发文档这类长文（用 doc_search）；已知 memory_id 要读全文（用 memory_get）；还没查过就想存（先查再存，否则重复写会命中去重）。',
   '同一问题最多查一次，拿到结果就往前走；查不到就问人，不要凭印象编。',
-  '返回精简结果（正文截断 500 字，不带向量）。note=no_match 表示确实没有；',
-  'note=low_confidence 表示候选区分度偏低：结果仍会给出，但要谨慎采信。',
-  '想省 context 可传 detail=summary（只给摘要 + 120 字）；需要全文时用 memory_get 按 id 展开。',
+  '返回正文截断 500 字、不带向量。note 含义：ok 正常；no_match 确实没有；low_confidence 候选区分度不足（结果照给，但要谨慎采信）；degraded 向量不可用、本轮只走了关键词。',
+  '想省 context 传 detail=summary（摘要 + 120 字）；要全文用 memory_get 按 id 展开。',
 ].join(' ')
 
 /** 把编排封成模型可见的工具定义 */

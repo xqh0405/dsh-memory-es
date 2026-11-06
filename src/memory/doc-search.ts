@@ -20,11 +20,18 @@ import type { RetrievalConfig } from './search.ts'
 
 export const MAX_DOC_RESULT_LIMIT = 20
 const PROJECT_SNIPPET_CHARS = 600
+/** 阶段 23 分级读取：summary 时每个片段只给这么多字（只够判断「是不是这篇」） */
+const SUMMARY_SNIPPET_CHARS = 120
 
 export interface DocSearchInput {
   query: string
   domain?: string[]
   limit?: number
+  /**
+   * 阶段 23 分级读取：`full`（默认，每段 600 字）/ `summary`（每段 120 字）。
+   * 默认仍是 full——切默认值是行为变更，要先过契约评测与 token 对比。
+   */
+  detail?: 'full' | 'summary'
 }
 
 export interface DocSearchDeps {
@@ -186,7 +193,7 @@ export async function searchDocs(deps: DocSearchDeps, input: DocSearchInput): Pr
       score: Number(d.score.toFixed(5)),
       hits: d.hits,
       section_path: d.best.section,
-      snippet: d.best.content.slice(0, PROJECT_SNIPPET_CHARS),
+      snippet: d.best.content.slice(0, input.detail === 'summary' ? SUMMARY_SNIPPET_CHARS : PROJECT_SNIPPET_CHARS),
     }))
 
   log({
@@ -215,10 +222,11 @@ export async function searchDocs(deps: DocSearchDeps, input: DocSearchInput): Pr
 }
 
 const DESCRIPTION = [
-  '查个人文档库（长文：方案、复盘、开发文档），关键词与语义混合检索。',
-  '与 memory_search 的区别：那边是「一句事实」，这里是「整篇文档」；返回按文档聚合，带命中的小节路径与片段。',
-  '时机：要查某个项目的方案/踩坑记录/接口契约，而记忆里只有一句话线索时。',
-  'note=no_match 表示没有；note=degraded 表示向量不可用、本次只走了关键词。',
+  '按「整篇长文」检索个人文档库（方案、复盘、开发文档、路线）：关键词 + 语义混合，按文档聚合返回小节路径与片段。',
+  '—— 该用我：要查某个项目的方案细节 / 踩坑记录 / 接口契约 / 设计取舍，而记忆里只有一句话线索；需要一整段论述，而不是一句结论。',
+  '—— 别用我：找具体约定、口径、踩坑（用 memory_search，它给「一句事实」更省 token）；想读整篇正文（这里给的是命中片段）。',
+  'note：no_match 表示没有；degraded 表示向量不可用、本次只走关键词。',
+  '想省 token 传 detail=summary（每段 120 字）；要判断值不值得读原文时先用它。',
 ].join(' ')
 
 export function defineDocSearchTool(deps: DocSearchDeps) {
@@ -239,6 +247,11 @@ export function defineDocSearchTool(deps: DocSearchDeps) {
       limit: {
         type: 'integer',
         description: `返回的文档篇数，默认取配置，上限 ${MAX_DOC_RESULT_LIMIT}。`,
+      },
+      detail: {
+        type: 'string',
+        enum: ['full', 'summary'],
+        description: '详略：full（默认，每段 600 字）/ summary（每段 120 字，只够判断是不是这篇，能明显省 token）。',
       },
     },
     output: {
