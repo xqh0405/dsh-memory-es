@@ -90,6 +90,8 @@ export interface ConfigType {
   /** 置信判定：分层阈值，见 schema 处注释 */
   confidence: {
     floorTop1: number
+    /** 阶段 21：中间区绝对下限（0 = 关闭） */
+    midBandFloor: number
     autoPassTop1: number
     minMargin: number
     minBm25: number
@@ -301,6 +303,10 @@ export const Config: z<ConfigType> = z.object({
   confidence: z.object({
     floorTop1: z.number().default(DEFAULT_CONFIDENCE.floorTop1)
       .description('kNN 第一名 cosine 低于它 → 明显无关，判低置信。'),
+    midBandFloor: z.number().min(0).max(1).default(DEFAULT_CONFIDENCE.midBandFloor)
+      .description('阶段 21：中间区绝对下限。top1 低于它直接判低置信，不再看 margin —— '
+        + '闲聊 top1 落在 0.72~0.74，与真相关（≥0.79）只差 0.05，margin 分不开。'
+        + '默认 0.76，与注入的 minScore 同源；0 = 关闭（回到旧行为）。'),
     autoPassTop1: z.number().default(DEFAULT_CONFIDENCE.autoPassTop1)
       .description('kNN 第一名 cosine 达到它 → 直接放行，不再看 margin（绝对相似度已经够高）。'),
     minMargin: z.number().default(DEFAULT_CONFIDENCE.minMargin)

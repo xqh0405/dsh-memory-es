@@ -454,7 +454,8 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
           embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
           // 把置信阈值压到 0：RRF 融合分本身很小（≈1/60），默认阈值会把它判成
           // low_confidence，而注入只认 ok。这条测的是「注入了什么」，不是置信判定本身。
-          confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
+          // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
+          confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
           recallInject: { enabled: true, logPath } as never,
         }),
       )
@@ -535,7 +536,8 @@ describe('apply · 注入的分数门槛（2026-11-05 实测：闲聊也 note=ok
         baseConfig({
           es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 },
           embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
-          confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
+          // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
+          confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
           recallInject: { enabled: true, logPath } as never,
         }),
       )

@@ -67,6 +67,15 @@ export const PERSONAL_WEIGHT = 1.2
  */
 export interface ConfidenceConfig {
   floorTop1: number
+  /**
+   * 阶段 21：中间区下限（绝对分闸）。
+   *
+   * 0.6~autoPassTop1 这段原本只靠 margin/bm25 判断，而**闲聊恰好落在 0.72~0.74**：
+   * 2026-11-05 实测闲聊 top1 0.7227~0.7430、真相关 0.7920~0.8314（中间 0.049 空档），
+   * 但两者的 note 全是 ok —— margin 分不开它们。低于这条线直接判低置信，不再看区分度。
+   * 0 = 关闭（回到旧行为）。
+   */
+  midBandFloor: number
   autoPassTop1: number
   minMargin: number
   minBm25: number
@@ -83,6 +92,8 @@ export interface ConfidenceConfig {
  */
 export const DEFAULT_CONFIDENCE: ConfidenceConfig = {
   floorTop1: 0.6,
+  /** 与注入的 recallInject.minScore 同源（都是 2026-11-05 那批实测定出来的分界） */
+  midBandFloor: 0.76,
   autoPassTop1: 0.8,
   minMargin: 0.025,
   minBm25: 30,
@@ -97,7 +108,7 @@ export interface ConfidenceInput {
   bm25Top1: number
 }
 
-export type ConfidenceReason = 'ok' | 'narrow' | 'too-low' | 'no-vector'
+export type ConfidenceReason = 'ok' | 'narrow' | 'too-low' | 'mid-floor' | 'no-vector'
 
 /**
  * 分层置信判定（阶段 0.5，替代原来的单一 marginFloor）。
@@ -121,6 +132,12 @@ export function judgeConfidence(
 ): { low: boolean; reason: ConfidenceReason } {
   if (input.top1 === null) return { low: false, reason: 'no-vector' }
   if (input.top1 < cfg.floorTop1) return { low: true, reason: 'too-low' }
+  // 阶段 21：中间区下限。这一段 margin 不可靠——闲聊 top1 就落在 0.72~0.74，
+  // 与真相关（≥0.79）只差 0.05，而候选池一大 margin 就整体塌到 0.02 量级。
+  // 低于 midBandFloor 直接判低置信，不再看区分度；0 = 关闭。
+  if (cfg.midBandFloor > 0 && input.top1 < cfg.midBandFloor) {
+    return { low: true, reason: 'mid-floor' }
+  }
   if (input.top1 >= cfg.autoPassTop1) return { low: false, reason: 'ok' }
   // 只有一条候选时没有「区分度」可言：不能因为第二名不存在就判窄。
   // （否则库里只存了一条相关记忆时，查询永远被判低置信。）

@@ -16,6 +16,7 @@ import { EmbeddingError } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
 import type { Hit } from '../src/fragment.ts'
 import {
+  DEFAULT_CONFIDENCE,
   defineSearchTool,
   MAX_RESULT_LIMIT,
   searchMemories,
@@ -122,8 +123,8 @@ async function harness(
 describe('searchMemories 编排', () => {
   test('both：两库各两路（4 路查询合成 1 次往返）；个人库因权重排在前面', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
-      [TEAM_INDEX]: { bm25: [hit('t1', 5)], knn: [hit('t1', 0.45)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 5)], knn: [hit('t1', 0.8)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: '北单中断开奖' })
@@ -144,8 +145,8 @@ describe('searchMemories 编排', () => {
   test('同一条被晋升到团队库（content_sha256 相同）只返回一次，且标为 personal', async () => {
     const shared = { content_sha256: 'same-hash' }
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3, shared)], knn: [hit('p1', 0.62, shared)] },
-      [TEAM_INDEX]: { bm25: [hit('t1', 9, shared)], knn: [hit('t1', 0.45, shared)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3, shared)], knn: [hit('p1', 0.85, shared)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 9, shared)], knn: [hit('t1', 0.8, shared)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q' })
@@ -184,7 +185,7 @@ describe('searchMemories 编排', () => {
 
   test('中间区 margin 不够、但 BM25 够强 → 放行（关键词精确命中救回）', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 35), hit('p2', 2)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 35), hit('p2', 2)], knn: [hit('p1', 0.78), hit('p2', 0.775)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -196,7 +197,7 @@ describe('searchMemories 编排', () => {
 
   test('中间区 margin 与 BM25 都不够 → 低置信，但仍返回', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 5), hit('p2', 4)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 5), hit('p2', 4)], knn: [hit('p1', 0.78), hit('p2', 0.775)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -271,7 +272,7 @@ describe('searchMemories 编排', () => {
 
   test('库里只有一条命中时不判空（margin 至少要两个分数才成立）', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -316,7 +317,7 @@ describe('searchMemories 编排', () => {
 
   test('scope=personal 不碰团队索引；scope=team 不碰个人索引', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
       [TEAM_INDEX]: { bm25: [hit('t1', 3)], knn: [hit('t1', 0.62)] },
     })
     try {
@@ -615,7 +616,7 @@ describe('非事实类型（identity / persona / journal）默认不进检索', 
 
 describe('defineSearchTool', () => {
   test('参数与输出 schema 合法，execute 返回声明结构', async () => {
-    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.7)] } })
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
     try {
       const def = defineSearchTool(h.deps())
       const parameters = def.parameters as { properties: Record<string, unknown> }
@@ -907,7 +908,7 @@ describe('阶段 13：as_of 入参', () => {
 
 describe('命中回写：bulk 优先（阶段 20）', () => {
   test('有 bulk 能力时一次调用，不逐条', async () => {
-    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] } })
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
     const bulkCalls: Array<readonly unknown[]> = []
     let singleCalls = 0
     try {
@@ -938,7 +939,7 @@ describe('命中回写：bulk 优先（阶段 20）', () => {
   })
 
   test('没有 bulk 能力时退回逐条（语义不变）', async () => {
-    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] } })
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
     const single: string[] = []
     try {
       await searchMemories(
@@ -956,6 +957,48 @@ describe('命中回写：bulk 优先（阶段 20）', () => {
 
       assert.equal(single.length, 1, '没有 bulk 时必须逐条写')
       assert.match(single[0]!, /personal_memory_xqh\/p1/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+
+describe('阶段 21：中间区绝对下限（midBandFloor）', () => {
+  // 0.73 是实测的闲聊档（「嗨！今天心情怎么样~」= 0.743、「在吗」= 0.7227）。
+  // 这组数据刻意给了很大的 margin（0.23）和很高的 bm25（40）——
+  // 旧逻辑一定判 ok，正是 7 条 noise 误报的成因。
+  const fixtures = { [PERSONAL_INDEX]: { bm25: [hit('p1', 40), hit('p2', 1)], knn: [hit('p1', 0.73), hit('p2', 0.5)] } }
+
+  test('闲聊档 0.73 直接判低置信，不再看 margin / bm25', async () => {
+    const h = await harness(fixtures)
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'low_confidence')
+      assert.ok(result.hits.length > 0, '低置信仍然返回结果，只是标注')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('midBandFloor=0 时回到旧行为（同一组数据判 ok）', async () => {
+    const h = await harness(fixtures)
+    try {
+      const result = await searchMemories(
+        h.deps({ confidence: { ...DEFAULT_CONFIDENCE, midBandFloor: 0 } }),
+        { query: 'q', scope: 'personal' },
+      )
+      assert.equal(result.note, 'ok', '关掉闸门必须能精确回到旧行为')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('真相关档 0.85 不受影响', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'ok')
     } finally {
       await h.fake.close()
     }
