@@ -11,7 +11,7 @@ import { Config } from '../src/config.ts'
 
 describe('配置默认值', () => {
   test('recallInject 默认关，且 prewarm 也默认关', () => {
-    const cfg = Config({})
+    const cfg = Config({} as never)
     assert.equal(cfg.recallInject.enabled, false, '自动注入是行为变更，必须显式打开')
     // 2026-11-06 实测 163 次 assemble，预热命中率 1.8%；
     // 且共享 in-flight 会让 assemble 继承预热的 timeoutMs，绕过 500ms 硬超时。
@@ -19,7 +19,7 @@ describe('配置默认值', () => {
   })
 
   test('prewarm 的护栏仍在（关掉不等于删掉）', () => {
-    const prewarm = Config({}).recallInject.prewarm
+    const prewarm = Config({} as never).recallInject.prewarm
     assert.equal(prewarm.timeoutMs, 2_000)
     assert.equal(prewarm.cacheTtlMs, 30_000)
     assert.equal(prewarm.maxEntries, 64)

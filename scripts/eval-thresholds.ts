@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 import { createEmbedder } from '../src/embedding.ts'
 import { bm25Body, extractIdentifiers, knnBody } from '../src/es/dsl.ts'
 import { createEsClient } from '../src/es/http.ts'
-import { judgeConfidence, type ConfidenceConfig } from '../src/memory/search.ts'
+import { DEFAULT_CONFIDENCE, judgeConfidence, type ConfidenceConfig } from '../src/memory/search.ts'
 import { DEFAULT_CONFIG_PATH, parsePluginConfig } from './lib/plugin-config.ts'
 
 interface QueryRow {
@@ -155,7 +155,8 @@ async function main() {
           let missed = 0
           let kept = 0
           let fp = 0
-          const cfg: ConfidenceConfig = { floorTop1: tLow, autoPassTop1: tHigh, minMargin: mMin, minBm25: bMin }
+          // midBandFloor 不参与网格搜索：它是「中间区的绝对下限」，与 tLow/tHigh 是两条独立轴。
+          const cfg: ConfidenceConfig = { floorTop1: tLow, midBandFloor: DEFAULT_CONFIDENCE.midBandFloor, autoPassTop1: tHigh, minMargin: mMin, minBm25: bMin }
           for (const s of real) {
             const ok = decide(s, cfg)
             if (ok && s.canHit) kept += 1
@@ -193,7 +194,7 @@ async function main() {
     console.log('\n== 推荐（误杀优先，再看误放）==')
     console.log(`tLow=${best.tLow}  tHigh=${best.tHigh}  mMin=${best.mMin}  bMin=${best.bMin}`)
     console.log(`真命中返回 ${best.kept}/${real.length}，误杀 ${best.missed}，noise 误放 ${best.falsePositive}/${noise.length}`)
-    const bestCfg: ConfidenceConfig = { floorTop1: best.tLow, autoPassTop1: best.tHigh, minMargin: best.mMin, minBm25: best.bMin }
+    const bestCfg: ConfidenceConfig = { floorTop1: best.tLow, midBandFloor: DEFAULT_CONFIDENCE.midBandFloor, autoPassTop1: best.tHigh, minMargin: best.mMin, minBm25: best.bMin }
     const broken = real.filter((s) => !decide(s, bestCfg))
     if (broken.length > 0) console.log(`被误杀：${broken.map((s) => s.id).join(', ')}`)
     const leaked = noise.filter((s) => decide(s, bestCfg))
