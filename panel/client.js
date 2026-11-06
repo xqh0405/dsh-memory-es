@@ -4862,7 +4862,9 @@ window.__ModuleLoader__.load({
      * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
      */
     function MemoryPanel({ t, onStatus }) {
-      const TAB_ORDER = ['overview', 'browse', 'searchlog', 'graph', 'identity', 'persona', 'review', 'maint', 'config']
+      // 这份清单同时是**URL 白名单**（readUrlEnum 不在里面就回退 overview），
+      // 所以新增页签只加渲染分支、忘了加这里，`?tab=xxx` 会静默失效 —— 2026-11-06 踩过。
+      const TAB_ORDER = ['overview', 'browse', 'searchlog', 'inject', 'graph', 'identity', 'persona', 'review', 'maint', 'config']
       // 页签从 URL 还原：刷新/分享链接/从别的会话切回来都停在同一页
       const [tab, setTab] = React.useState(() => readUrlEnum('tab', TAB_ORDER, 'overview'))
       // 状态写回 URL。放进 effect 而不是 setTab 里，是因为概览页的「记忆浏览 →」也调 setTab，
