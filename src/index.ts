@@ -34,7 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjectionDetailed, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -935,13 +935,14 @@ export function apply(ctx: Context, config: ConfigType): void {
             writeRecord({ outcome, hits: result.hits.length, items: [], chars: 0, ...(top1Score === undefined ? {} : { top1Score }) })
             return ''
           }
-          const items = pickForInjection(result.hits, inject.maxItems, inject.maxChars)
+          const { picked: items, dropped } = pickForInjectionDetailed(result.hits, inject.maxItems, inject.maxChars)
           const text = formatInjection(items)
           writeRecord({
             outcome: text === '' ? 'no_match' : 'injected',
             hits: result.hits.length,
             items: items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
             chars: text.length,
+            ...(dropped.length === 0 ? {} : { dropped }),
             ...(top1Score === undefined ? {} : { top1Score }),
           })
           if (text !== '') {

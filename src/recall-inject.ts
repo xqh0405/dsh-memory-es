@@ -38,6 +38,12 @@ export interface RecallInjectConfig {
   sectionOrder: number
 }
 
+/** 被预算挤掉的条目及原因（阶段 22 回合栏与 JSONL 共用） */
+export interface DroppedItem {
+  memory_id: string
+  reason: 'max-items' | 'max-chars' | 'empty'
+}
+
 export interface InjectedItem {
   memory_id: string
   text: string
@@ -56,13 +62,44 @@ export function pickForInjection(
   maxItems: number,
   maxChars: number,
 ): InjectedItem[] {
+  return pickForInjectionDetailed(hits, maxItems, maxChars).picked
+}
+
+/**
+ * 阶段 22：把「被挤掉的」也记下来。
+ *
+ * 只看注入了什么，永远回答不了「为什么这一轮没注进那条最相关的」——
+ * 面板上的回合栏要能说出「它排在第 4，但字符预算到第 3 条就用完了」。
+ * 顺序与 `pickForInjection` 完全一致（超预算即停，后面的全部记 max-chars）。
+ */
+export function pickForInjectionDetailed(
+  hits: readonly Projected[],
+  maxItems: number,
+  maxChars: number,
+): { picked: InjectedItem[]; dropped: DroppedItem[] } {
   const picked: InjectedItem[] = []
+  const dropped: DroppedItem[] = []
   let used = 0
+  let overBudget = false
   for (const hit of hits) {
-    if (picked.length >= maxItems) break
+    if (picked.length >= maxItems) {
+      dropped.push({ memory_id: hit.memory_id, reason: 'max-items' })
+      continue
+    }
     const text = (hit.summary ?? hit.content ?? '').trim()
-    if (text === '') continue
-    if (picked.length > 0 && used + text.length > maxChars) break
+    if (text === '') {
+      dropped.push({ memory_id: hit.memory_id, reason: 'empty' })
+      continue
+    }
+    if (overBudget) {
+      dropped.push({ memory_id: hit.memory_id, reason: 'max-chars' })
+      continue
+    }
+    if (picked.length > 0 && used + text.length > maxChars) {
+      overBudget = true
+      dropped.push({ memory_id: hit.memory_id, reason: 'max-chars' })
+      continue
+    }
     picked.push({
       memory_id: hit.memory_id,
       text,
@@ -71,7 +108,7 @@ export function pickForInjection(
     })
     used += text.length
   }
-  return picked
+  return { picked, dropped }
 }
 
 /**
@@ -123,6 +160,8 @@ export interface InjectRecord {
   items: Array<{ memory_id: string; chars: number }>
   /** 注入正文总字符数 */
   chars: number
+  /** 阶段 22：被预算挤掉的条目（空数组/缺省 = 没挤掉任何东西） */
+  dropped?: DroppedItem[]
   /** top1 的向量相似度（向量不可用时缺省）——调 minScore 的依据 */
   top1Score?: number
   /**

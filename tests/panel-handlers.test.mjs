@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction, summarizeInjectRecords } = await import(
   '../panel/index.js'
 )
 
@@ -1068,4 +1068,33 @@ test('projectHit：反馈计数缺失按 0（0 是真实值，不是「没数据
   assert.equal(scored.confirmedUse, 3)
   assert.equal(scored.corrections, 1)
   assert.equal(scored.feedbackAt, '2026-11-01T12:00:00.000Z')
+})
+
+
+test('summarizeInjectRecords：四态分开统计，超时率与注入率各算各的', () => {
+  const records = [
+    { outcome: 'injected', ms: 80, chars: 400, items: [{ memory_id: 'a' }, { memory_id: 'b' }], dropped: [{ memory_id: 'z' }] },
+    { outcome: 'injected', ms: 120, chars: 200, items: [{ memory_id: 'c' }] },
+    { outcome: 'timeout', ms: 500, chars: 0, items: [] },
+    { outcome: 'low_confidence', ms: 90, chars: 0, items: [] },
+  ]
+  const stats = summarizeInjectRecords(records)
+  assert.equal(stats.total, 4)
+  assert.equal(stats.byOutcome.injected, 2)
+  assert.equal(stats.timeoutRate, 0.25, '超时率只数 timeout，不能把 low_confidence 也算进去')
+  assert.equal(stats.injectedRate, 0.5)
+  // 条均/字符均只按**真正注入成功的**那几条算，否则被拦下的会把均值拉低到没意义
+  assert.equal(stats.avgItems, 1.5)
+  assert.equal(stats.avgChars, 300)
+  assert.equal(stats.droppedTotal, 1)
+  assert.equal(stats.avgMs, 198)
+})
+
+test('summarizeInjectRecords：空输入不产生 NaN', () => {
+  const stats = summarizeInjectRecords([])
+  assert.equal(stats.total, 0)
+  assert.equal(stats.timeoutRate, 0)
+  assert.equal(stats.injectedRate, 0)
+  assert.equal(stats.avgItems, 0)
+  assert.equal(stats.avgMs, 0)
 })

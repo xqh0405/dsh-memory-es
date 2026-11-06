@@ -13,7 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
@@ -871,6 +871,99 @@ export function classifyCluster(input) {
 }
 
 /** GET /search-log：最近检索记录 + 按查询归一化键聚类的覆盖率（阶段 11） */
+/**
+ * 阶段 22：回合记忆栏。
+ *
+ * 数据源只有一份——插件落盘的 `recall-inject.jsonl`（与 `recall-shadow.jsonl` 同目录）。
+ * **不新增埋点索引**：注入是每回合都可能发生的高频写，进 ES 只会又养一张要清理的表。
+ *
+ * 文件会一直增长，所以**只读尾部**（512 KB）：整文件读进来在跑了几周之后迟早出事。
+ */
+function readTailText(file, maxBytes) {
+  let fd
+  try {
+    fd = openSync(file, 'r')
+    const size = statSync(file).size
+    const start = Math.max(0, size - maxBytes)
+    const length = size - start
+    const buf = Buffer.alloc(length)
+    let read = 0
+    while (read < length) {
+      const n = readSync(fd, buf, read, length - read, start + read)
+      if (n <= 0) break
+      read += n
+    }
+    const text = buf.subarray(0, read).toString('utf8')
+    // 从中间切进去的第一行一定是半行：丢掉它（除非正好从 0 开始）
+    return start === 0 ? text : text.slice(text.indexOf('\n') + 1)
+  } catch {
+    return ''
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function summarizeInjectRecords(records) {
+  const byOutcome = {}
+  let msSum = 0
+  let msCount = 0
+  const itemCounts = []
+  const charCounts = []
+  let dropped = 0
+  for (const r of records) {
+    const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
+    byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
+    if (typeof r.ms === 'number' && Number.isFinite(r.ms)) {
+      msSum += r.ms
+      msCount += 1
+    }
+    if (outcome === 'injected') {
+      if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+      if (typeof r.chars === 'number') charCounts.push(r.chars)
+    }
+    if (Array.isArray(r.dropped)) dropped += r.dropped.length
+  }
+  const total = records.length
+  const avg = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length)
+  return {
+    total,
+    byOutcome,
+    // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
+    timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
+    injectedRate: total === 0 ? 0 : (byOutcome.injected ?? 0) / total,
+    avgItems: Number(avg(itemCounts).toFixed(2)),
+    avgChars: Math.round(avg(charCounts)),
+    avgMs: msCount === 0 ? 0 : Math.round(msSum / msCount),
+    droppedTotal: dropped,
+  }
+}
+
+async function handleInjectLog(_ctx, res, url) {
+  const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '30', 10)
+  const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 30))
+  const file = join(DSH_HOME, 'memory-es', 'recall-inject.jsonl')
+  if (!existsSync(file)) {
+    return json(res, 200, { ok: true, exists: false, path: file, records: [], stats: summarizeInjectRecords([]) })
+  }
+  const records = []
+  for (const line of readTailText(file, 512 * 1024).split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    try {
+      records.push(JSON.parse(trimmed))
+    } catch {
+      // 半行（正在写）直接忽略
+    }
+  }
+  return json(res, 200, {
+    ok: true,
+    exists: true,
+    // 统计按全部读到的记录算，明细只回尾部 limit 条（新的在前）
+    stats: summarizeInjectRecords(records),
+    records: records.slice(-limit).reverse(),
+  })
+}
+
 async function handleSearchLog(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -2884,6 +2977,8 @@ async function handle(ctx, req, res) {
     if (path === '/memories') return await handleMemories(ctx, res, url)
     // 阶段 11：检索埋点的覆盖率与反查
     if (path === '/search-log' && req.method === 'GET') return await handleSearchLog(ctx, res, url)
+    // 阶段 22：回合记忆栏（本轮注入 / 超时 / 低分 / 无消息，数据源是 recall-inject.jsonl）
+    if (path === '/inject-log' && req.method === 'GET') return await handleInjectLog(ctx, res, url)
     if (path === '/search-log/used-in' && req.method === 'GET') return await handleSearchLogUsedIn(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
@@ -3254,6 +3349,8 @@ export function apply(ctx) {
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
   admitRequest,
+  summarizeInjectRecords,
+  readTailText,
   applyConfigChanges,
   coerceFieldValue,
   fieldTypeOf,

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
-import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, resolveInjectPath } from '../src/recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, resolveInjectPath } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
   return {
@@ -144,5 +144,32 @@ describe('passesInjectGate · 绝对分数门槛', () => {
 
   test('门槛可配：放宽到 0.72 时闲聊也会过（说明这是旋钮不是硬编码）', () => {
     assert.equal(passesInjectGate({ ...base, vectorScore: 0.7333, minScore: 0.72 }), true)
+  })
+})
+
+
+describe('阶段 22：被挤掉的条目也要记下来', () => {
+  test('字符预算挤掉 → reason=max-chars，且顺序与 pickForInjection 一致', () => {
+    const hits = [hit('a', '一二三四五'), hit('b', '六七八九十'), hit('c', '短')]
+    const { picked, dropped } = pickForInjectionDetailed(hits, 5, 6)
+    assert.deepEqual(picked.map((item) => item.memory_id), ['a'])
+    // 第二条超预算后，后面的即使更短也不再捡（与 pickForInjection 同一语义）
+    assert.deepEqual(dropped, [
+      { memory_id: 'b', reason: 'max-chars' },
+      { memory_id: 'c', reason: 'max-chars' },
+    ])
+  })
+
+  test('条数上限挤掉 → reason=max-items', () => {
+    const hits = [hit('a', '甲'), hit('b', '乙'), hit('c', '丙')]
+    const { picked, dropped } = pickForInjectionDetailed(hits, 2, 1000)
+    assert.deepEqual(picked.map((item) => item.memory_id), ['a', 'b'])
+    assert.deepEqual(dropped, [{ memory_id: 'c', reason: 'max-items' }])
+  })
+
+  test('没挤掉任何东西时 dropped 为空数组（JSONL 里就不会出现该字段）', () => {
+    const { picked, dropped } = pickForInjectionDetailed([hit('a', '甲')], 3, 1000)
+    assert.equal(picked.length, 1)
+    assert.deepEqual(dropped, [])
   })
 })
