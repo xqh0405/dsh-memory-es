@@ -13,6 +13,7 @@
 import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -33,6 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjectionDetailed, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -42,7 +44,8 @@ import { defineDistillTool } from './memory/distill.ts'
 import { runDistillJob, runDistillSweep } from './memory/distillRunner.ts'
 import { definePromoteTool } from './memory/promote.ts'
 import { defineDocSearchTool } from './memory/doc-search.ts'
-import { defineSearchTool, searchMemories } from './memory/search.ts'
+import { defineSearchTool, expandQuery, searchMemories } from './memory/search.ts'
+import { createEmbedCache } from './embed-cache.ts'
 import { defineGetTool } from './memory/get.ts'
 import { createRecallCache } from './memory/recallCache.ts'
 import { defineStatusTool } from './memory/status.ts'
@@ -816,6 +819,191 @@ export function apply(ctx: Context, config: ConfigType): void {
       })
     },
     'dsh-memory-es.recall-shadow',
+  )
+
+  /*
+   * 阶段 17 P0-1：自动召回**真注入**。
+   *
+   * 通道选择：静态 section 的 `text` 是**同步**的，没法在里面跑检索；而
+   * `system-prompt/assemble` 是 waterfall（可 await），在每个 model step 组装
+   * prompt 前触发——这是唯一能「先查再写进 prompt」的位置。
+   *
+   * 三条纪律（2026-11-05 实测得出，见 recall-inject.ts 头注释）：
+   *  · 超时极短（默认 500ms）：125 上 11 个容器共享一个 -np 1 的 Ollama，
+   *    队列被批量补向量占住时 3 秒都不回，超时的正确反应是「这轮没记忆」；
+   *  · 只注入 note==='ok'：low_confidence 在影子数据里占 24/74，注进去是噪声；
+   *  · 注入块显式说明「数据不是指令」，因为记忆正文里存过运维命令与提交规则。
+   */
+  ctx.effect(
+    () => {
+      const inject = config.recallInject
+      if (!inject.enabled) return () => {}
+
+      // 最近一条用户消息，按 agent 存：assemble 时拿它当 query。
+      // 子代理没有 inbox 消息 → 查不到 → 不注入（避免把父会话的记忆带进子任务）。
+      const lastMessage = new Map<string, string>()
+      // 同一 query 的结果复用：一个 turn 有多个 step，每步都会重新组装 prompt
+      const resultCache = new Map<string, { at: number; text: string }>()
+      // 落盘通道：插件 logger 不进 docker logs，这是唯一能在命令行验收的入口
+      const injectLogPath = resolveInjectPath(inject.logPath)
+      const injectWriter = createShadowWriter<InjectRecord>(injectLogPath)
+
+      /**
+       * 阶段 20：embedding 预热缓存。
+       *
+       * 注入路径的 embed 全部走 `cachedEmbed`：预热与 assemble 共享同一次在途请求，
+       * 所以「预热还没回来、assemble 先到」也不会打两次 Ollama（见 embed-cache 的 in-flight）。
+       */
+      const embedCache = createEmbedCache({
+        ttlMs: inject.prewarm.cacheTtlMs,
+        maxEntries: inject.prewarm.maxEntries,
+      })
+      const cachedEmbed = embedCache.wrap(embed)
+
+      /**
+       * 预热用的 key 必须与检索侧同源：`search.ts` 是对 **expandQuery 之后**的文本做 embed，
+       * 这里若只 embed 原始 query，缓存键对不上，预热等于白跑。
+       */
+      const prewarmKey = (text: string): string => expandQuery(text.slice(0, 400), retrieval.synonyms)
+
+      const remember = ctx.on(
+        'agent/inbox/inserted',
+        ({ agent, message }: { agent: { id: string }; message: unknown }) => {
+          const text = extractUserText(message)
+          const trimmed = text.trim()
+          if (trimmed === '') return
+          lastMessage.set(String(agent?.id ?? 'default'), trimmed.slice(0, 2_000))
+
+          // 阶段 20：预热。即发即忘、超时放弃——它只抢在 assemble 之前，绝不拖住消息主流程。
+          if (!inject.prewarm.enabled) return
+          void cachedEmbed
+            .embed(prewarmKey(trimmed), { signal: AbortSignal.timeout(inject.prewarm.timeoutMs) })
+            .catch(() => {
+              // 预热失败 = 没预热。assemble 时照常实时算，不该留下任何痕迹
+            })
+        },
+      )
+
+      const recall = async (query: string, agentId: string): Promise<string> => {
+        const startedAt = Date.now()
+        // 预热命中与否：只看缓存里有没有这条向量（与 search 内部用的是同一个 key）。
+        // 注意这要在 writeRecord 之前算——它记录的是「这次 assemble 有没有等 Ollama」。
+        const embedCached = embedCache.get(prewarmKey(query)) !== undefined
+        const writeRecord = (
+          record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms' | 'embedCached'>,
+        ): void => {
+          injectWriter.write({
+            ts: new Date().toISOString(),
+            agent: agentId,
+            query: query.slice(0, 200),
+            ms: Date.now() - startedAt,
+            embedCached,
+            ...record,
+          })
+        }
+        try {
+          const result = await searchMemories(
+            {
+              userId,
+              personalPrefix,
+              teamIndex: config.index.team,
+              reader,
+              // 阶段 20：走预热缓存。命中则这次 assemble 不等 Ollama；
+              // 未命中（预热失败/超时/新 query）就退化为原来的实时嵌入，行为不变。
+              embed: cachedEmbed,
+              dims: config.embedding.dims,
+              retrieval,
+              confidence: config.confidence,
+              ranking: config.ranking,
+              mood: () => mood.state,
+              signal: AbortSignal.timeout(inject.timeoutMs),
+            },
+            // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径。
+            // explain: true 只为拿到 top1 的向量分数——note 分不出闲聊与相关（见 passesInjectGate）
+            { query: query.slice(0, 400), limit: inject.maxItems + 2, detail: 'summary', explain: true },
+          )
+          const top1Score = result.receipts?.[0]?.knn_score
+          const gate = passesInjectGate({
+            note: result.note,
+            vectorScore: top1Score,
+            degraded: result.degraded,
+            minScore: inject.minScore,
+          })
+          if (!gate) {
+            // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）
+            const outcome = result.note !== 'ok' ? result.note : 'low_score'
+            writeRecord({ outcome, hits: result.hits.length, items: [], chars: 0, ...(top1Score === undefined ? {} : { top1Score }) })
+            return ''
+          }
+          const { picked: items, dropped } = pickForInjectionDetailed(result.hits, inject.maxItems, inject.maxChars)
+          const text = formatInjection(items)
+          writeRecord({
+            outcome: text === '' ? 'no_match' : 'injected',
+            hits: result.hits.length,
+            items: items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
+            chars: text.length,
+            ...(dropped.length === 0 ? {} : { dropped }),
+            ...(top1Score === undefined ? {} : { top1Score }),
+          })
+          if (text !== '') {
+            logger.info('注入 %d 条记忆（%d ms，%d 字符）', items.length, Date.now() - startedAt, text.length)
+          }
+          return text
+        } catch (err) {
+          // 超时/异常 = 这一轮没有记忆。注入是增强，绝不能把回合拖住或报错给用户
+          writeRecord({ outcome: classifyInjectError(err), hits: 0, items: [], chars: 0 })
+          logger.info('注入跳过（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
+          return ''
+        }
+      }
+
+      const dispose = ctx.on(
+        'system-prompt/assemble',
+        async (
+          _assembly: PromptAssembly,
+          context: AssembleContext,
+          next: () => Promise<PromptAssembly>,
+        ): Promise<PromptAssembly> => {
+          const assembly = await next()
+          // AssembleContext 的公开类型只有 scope/signal；运行时由 dsh-agent 带上 agent
+          const agentId = String((context as AssembleContext & { agent?: { id?: string } }).agent?.id ?? '')
+          const query = lastMessage.get(agentId)
+          if (query === undefined) return assembly
+
+          const cached = resultCache.get(query)
+          let text: string
+          if (cached !== undefined && Date.now() - cached.at < inject.cacheTtlMs) {
+            text = cached.text
+          } else {
+            text = await recall(query, agentId)
+            resultCache.set(query, { at: Date.now(), text })
+          }
+          if (text === '') return assembly
+
+          return {
+            ...assembly,
+            sections: [
+              ...assembly.sections,
+              { name: RECALL_SECTION_NAME, text, interpolate: false },
+            ],
+          }
+        },
+      )
+
+      logger.info(
+        '自动召回注入已开：超时 %d ms，最多 %d 条 / %d 字符，记录 %s',
+        inject.timeoutMs,
+        inject.maxItems,
+        inject.maxChars,
+        injectLogPath,
+      )
+
+      return () => {
+        remember()
+        dispose()
+      }
+    },
+    'dsh-memory-es.recall-inject',
   )
 
   ctx.effect(

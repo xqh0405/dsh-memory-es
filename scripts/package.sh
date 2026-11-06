@@ -6,10 +6,12 @@
 #   dsh-memory-es-<ver>/
 #     VERSION / manifest.json / SHA256SUMS
 #     install.sh              ← 一条命令装/更新（plugin + panel + CLI + 表情包）
+#     selfcheck.sh            ← 装完自检（七项 PASS/FAIL；install.sh 自动跑）
 #     README-INSTALL.md
 #     plugin/                 ← 主插件（package.json + cordis.patch.yml + lib/）
 #     panel/                  ← 面板（含 cli/ 源码，面板「整理/导出」按钮要用）
 #     stickers/               ← 基础表情包（--no-stickers 可不打）
+#     es/                     ← ES 引导（评审 P0-3）：setup.sh + 自检 + compose 模板 + 引导脚本
 #
 # 用法：
 #   scripts/package.sh                 # 打包（要求 lib 不旧于源码；版本号两处一致）
@@ -17,8 +19,9 @@
 #   scripts/package.sh --no-stickers   # 不打表情包（包体 ~7MB → ~250KB）
 #   scripts/package.sh --out /tmp/x    # 指定输出目录
 #
-# 判据（打完自己看一眼）：`tar tzf dist/*.tar.gz | head` 有 plugin/lib/index.js；
-# 版本号与 `scripts/version.sh check` 一致。
+# 判据（打完自己看一眼）：
+#   `tar tzf dist/*.tar.gz | grep -cE 'es/setup.sh|es/selfcheck.sh|es/scripts/es-up.sh'` = 3
+#   `tar tzf dist/*.tar.gz | grep plugin/lib/index.js` 非空；版本号与 `scripts/version.sh check` 一致。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -89,6 +92,21 @@ fi
 
 cp -f scripts/install-package.sh "$STAGE/install.sh"
 chmod +x "$STAGE/install.sh"
+
+# ES 引导（评审 P0-3 / M1）：以前包里 0 个引导脚本，新用户装完只会得到一个连不上库的插件。
+# 目录结构刻意保留仓库的相对布局（scripts/ 与 deploy/es/ 同级），这样脚本里的
+# ROOT="$(dirname)/.." 在包里同样成立，不需要为发行版改一遍路径。
+mkdir -p "$STAGE/es/scripts/lib" "$STAGE/es/deploy/es"
+cp -f deploy/es/docker-compose.yml deploy/es/.env.example "$STAGE/es/deploy/es/"
+for s in es-up es-certs es-down fetch-ik init-indices init-security init-user es-setup selfcheck; do
+  cp -f "scripts/$s.sh" "$STAGE/es/scripts/$s.sh"
+done
+cp -f scripts/lib/curl-es.sh "$STAGE/es/scripts/lib/"
+# 入口放两个常见位置：es/setup.sh（引导）与顶层 selfcheck.sh（装完自检/排障）
+cp -f scripts/es-setup.sh "$STAGE/es/setup.sh"
+cp -f scripts/selfcheck.sh "$STAGE/es/selfcheck.sh"
+cp -f scripts/selfcheck.sh "$STAGE/selfcheck.sh"
+chmod +x "$STAGE/es/setup.sh" "$STAGE/es/selfcheck.sh" "$STAGE/selfcheck.sh" "$STAGE/es/scripts/"*.sh
 printf '%s\n' "$VERSION" >"$STAGE/VERSION"
 
 # 清单：部署后核对"这一包是什么时候、从哪个 commit 打的"
@@ -103,6 +121,7 @@ cat >"$STAGE/manifest.json" <<JSON
   "builtAt": "${BUILT_AT}",
   "files": ${FILES},
   "withStickers": $([ "$WITH_STICKERS" = "1" ] && echo true || echo false),
+  "withEs": true,
   "node": "$(node -p 'process.version' 2>/dev/null || echo unknown)"
 }
 JSON
@@ -110,14 +129,49 @@ JSON
 cat >"$STAGE/README-INSTALL.md" <<MD
 # dsh-memory-es ${VERSION} 安装包
 
-**一个包**（插件 + 面板），一条命令装/更新：
+## 前置清单（先看一眼，能省掉 90% 的「装完不能用」）
+
+| 需要 | 为什么 | 没有会怎样 |
+|---|---|---|
+| Linux + Docker（含 \`docker compose\` v2） | 本包自带 ES 引导，用容器起 8.19 | \`./es/setup.sh\` 会直接告诉缺哪个命令 |
+| 内存 ≥ 4 GB（ES heap 2g + Ollama ~1.2g） | ES 单节点 + 中文向量模型 | \`mem_limit 6g\` 起不来，日志报 OOMKilled |
+| 出网（仅首次） | 拉 ES 镜像 + IK 分词插件（release.infinilabs.com） | 可手动放 \`es/deploy/es/plugins/analysis-ik\` 后重跑 |
+| Ollama + \`bge-m3\`（1024 维） | 向量检索；没有它只剩 BM25 | 自检 05 会 FAIL，功能降级但可用 |
+| Node.js ≥ 22 + dsh | 插件本身 | \`install.sh\` 装不了 |
+| 一个 ES 账号目录 | 一人一索引 ACL | \`es/setup.sh --user <uid>\` 会建 |
+
+## 装（插件 + 面板，单包，一条命令）
 
 \`\`\`bash
 tar xzf ${NAME}.tar.gz
 cd ${NAME}
 ./install.sh                     # 本机：DSH_HOME=~/.dsh，profile=web
-# 容器里：./install.sh --dsh-home /data/dsh
+# 容器里：./install.sh --dsh-home /data/dsh --owner node
 \`\`\`
+
+## 开箱（第一次装才需要：起 ES + 建账号 + 出配置）
+
+\`\`\`bash
+./es/setup.sh                    # 用户默认取当前登录名；也可以 --user <uid> --tier team-write
+\`\`\`
+
+它会：起 ES（生成随机密码与自签证书、下载 IK）→ 建索引模板与共享索引 →
+建角色/账号 → 生成 \`<ES 目录>/plugin-config.yml\`（含密码，600）。
+
+把那段配置合并进 \`\$DSH_HOME/profiles/<profile>/cordis.patch.yml\`（与其它 \`- id:\` 同级），
+然后重启 dsh web。**已经有 ES 的**别跑 setup，直接写配置（\`es.caCertPath\` 可以留空，
+会自动找 \`\$DSH_HOME/memory-es/es/certs/ca.crt\`）。
+
+## 装完自检（install.sh 会自动跑一遍）
+
+\`\`\`bash
+./selfcheck.sh                            # 七项 PASS/FAIL
+./selfcheck.sh --profile web-test         # 装到别的 profile
+./selfcheck.sh --es-dir /srv/dsh-es       # ES 在别处
+\`\`\`
+
+七项：ES 连通（含 CA 校验）/ 本用户账号 / 索引齐不齐 / 团队库 ACL / embedding 模型与维度 /
+插件与 bundles 加载清单 / 插件配置（identity 与 CA）。有 FAIL 就按它给的「下一步」修。
 
 从旧版（面板是独立包）升级时，\`install.sh\` 会自动移除 \`dsh-memory-es-panel\` 并从
 \`dsh.profile.bundles\` 删掉旧名，否则会出现两个「记忆库」面板。
@@ -130,7 +184,7 @@ cd ${NAME}
 - 面板自检：\`[记忆库面板] 自检通过 v${VERSION} …\`
 - 面板页脚：\`版本 ${VERSION}\`
 
-不想要表情包用 \`--no-stickers\`（插件与面板仍会装）。
+不想要表情包用 \`--no-stickers\`；不想装完跑自检用 \`--skip-selfcheck\`（插件与面板仍会装）。
 MD
 
 echo '==> 生成校验和'

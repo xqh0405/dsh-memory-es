@@ -3,7 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ES_DIR="$ROOT/deploy/es"
+# 默认是仓库内的 deploy/es；发行包与「已装好的机器」用 ES_DIR 指到持久目录
+# （例如 $DSH_HOME/memory-es/es），这样解包目录删了也不影响已起好的库。
+ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
+export ES_DIR
 ENV_FILE="$ES_DIR/.env"
 
 # 1) .env

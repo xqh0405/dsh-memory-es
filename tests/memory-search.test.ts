@@ -16,6 +16,7 @@ import { EmbeddingError } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
 import type { Hit } from '../src/fragment.ts'
 import {
+  DEFAULT_CONFIDENCE,
   defineSearchTool,
   MAX_RESULT_LIMIT,
   searchMemories,
@@ -66,6 +67,14 @@ async function harness(
   options: { failIndex?: string } = {},
 ): Promise<Harness> {
   const fake = await startFakeEs((req, res) => {
+    // 阶段 20：命中回写走 `_bulk`。假 ES 不关心脚本内容，按条数回全成功。
+    if (req.path.includes('/_bulk')) {
+      const pairs = req.body.split('\n').filter((line) => line.trim() !== '').length / 2
+      sendJson(res, 200, {
+        items: Array.from({ length: pairs }, () => ({ update: { status: 200, result: 'updated' } })),
+      })
+      return
+    }
     const index = /^\/([^/]+)\/_search/.exec(req.path)?.[1] ?? ''
     const body = JSON.parse(req.body) as Record<string, unknown>
     const route = 'knn' in body ? 'knn' : 'bm25'
@@ -112,14 +121,16 @@ async function harness(
 }
 
 describe('searchMemories 编排', () => {
-  test('both：两库各两路，共 4 次请求；个人库因权重排在前面', async () => {
+  test('both：两库各两路（4 路查询合成 1 次往返）；个人库因权重排在前面', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
-      [TEAM_INDEX]: { bm25: [hit('t1', 5)], knn: [hit('t1', 0.45)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 5)], knn: [hit('t1', 0.8)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: '北单中断开奖' })
+      // 逻辑查询仍是 4 路；HTTP 往返被阶段 20 的 _msearch 合成 1 次
       assert.equal(h.requests.length, 4, 'personal+team × (bm25+knn)')
+      assert.equal(h.fake.msearchCalls, 1, '4 路查询必须走一次 _msearch，而不是 4 次 search')
       assert.equal(result.note, 'ok')
       assert.equal(result.degraded, false)
       assert.equal(result.filtered, false)
@@ -134,8 +145,8 @@ describe('searchMemories 编排', () => {
   test('同一条被晋升到团队库（content_sha256 相同）只返回一次，且标为 personal', async () => {
     const shared = { content_sha256: 'same-hash' }
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3, shared)], knn: [hit('p1', 0.62, shared)] },
-      [TEAM_INDEX]: { bm25: [hit('t1', 9, shared)], knn: [hit('t1', 0.45, shared)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3, shared)], knn: [hit('p1', 0.85, shared)] },
+      [TEAM_INDEX]: { bm25: [hit('t1', 9, shared)], knn: [hit('t1', 0.8, shared)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q' })
@@ -174,7 +185,7 @@ describe('searchMemories 编排', () => {
 
   test('中间区 margin 不够、但 BM25 够强 → 放行（关键词精确命中救回）', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 35), hit('p2', 2)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 35), hit('p2', 2)], knn: [hit('p1', 0.78), hit('p2', 0.775)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -186,7 +197,7 @@ describe('searchMemories 编排', () => {
 
   test('中间区 margin 与 BM25 都不够 → 低置信，但仍返回', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 5), hit('p2', 4)], knn: [hit('p1', 0.7), hit('p2', 0.695)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 5), hit('p2', 4)], knn: [hit('p1', 0.78), hit('p2', 0.775)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -238,10 +249,11 @@ describe('searchMemories 编排', () => {
       assert.equal(result.note, 'ok')
       // 回写是 fire-and-forget：放一轮事件循环再断言
       await new Promise((r) => setTimeout(r, 30))
-      const updates = h.requests.filter((r) => r.path.includes('/_update/'))
-      assert.equal(updates.length, 1, '一条命中 → 一次回写')
-      assert.match(updates[0].body, /hit_count/)
-      assert.match(updates[0].body, /last_hit_at/)
+      // 阶段 20：真 EsClient 有 bulkUpdateScript，回写走一次 `_bulk`（不是逐条 `_update`）
+      const updates = h.requests.filter((r) => r.path.includes('/_bulk'))
+      assert.equal(updates.length, 1, '一条命中 → 一次 bulk 回写')
+      assert.match(updates[0]!.body, /hit_count/)
+      assert.match(updates[0]!.body, /last_hit_at/)
     } finally {
       await h.fake.close()
     }
@@ -252,7 +264,7 @@ describe('searchMemories 编排', () => {
     try {
       await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
       await new Promise((r) => setTimeout(r, 30))
-      assert.equal(h.requests.filter((r) => r.path.includes('/_update/')).length, 0)
+      assert.equal(h.requests.filter((r) => /\/_(update|bulk)\//.test(r.path)).length, 0)
     } finally {
       await h.fake.close()
     }
@@ -260,7 +272,7 @@ describe('searchMemories 编排', () => {
 
   test('库里只有一条命中时不判空（margin 至少要两个分数才成立）', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
     })
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
@@ -305,7 +317,7 @@ describe('searchMemories 编排', () => {
 
   test('scope=personal 不碰团队索引；scope=team 不碰个人索引', async () => {
     const h = await harness({
-      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.62)] },
+      [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
       [TEAM_INDEX]: { bm25: [hit('t1', 3)], knn: [hit('t1', 0.62)] },
     })
     try {
@@ -604,7 +616,7 @@ describe('非事实类型（identity / persona / journal）默认不进检索', 
 
 describe('defineSearchTool', () => {
   test('参数与输出 schema 合法，execute 返回声明结构', async () => {
-    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.7)] } })
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
     try {
       const def = defineSearchTool(h.deps())
       const parameters = def.parameters as { properties: Record<string, unknown> }
@@ -888,6 +900,105 @@ describe('阶段 13：as_of 入参', () => {
       const body = JSON.stringify(h.bodyOf('team_knowledge', 'bm25'))
       assert.ok(body.includes('source_created_at'), `团队路没用 source_created_at：${body}`)
       assert.ok(!body.includes('"created_at"'), `团队路不该用 created_at：${body}`)
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+describe('命中回写：bulk 优先（阶段 20）', () => {
+  test('有 bulk 能力时一次调用，不逐条', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
+    const bulkCalls: Array<readonly unknown[]> = []
+    let singleCalls = 0
+    try {
+      await searchMemories(
+        h.deps({
+          hitRecorder: {
+            updateScript: async () => {
+              singleCalls += 1
+              return { id: '', result: 'updated', status: 200 }
+            },
+            bulkUpdateScript: async (items) => {
+              bulkCalls.push(items)
+              return items.map((item) => ({ index: item.index, id: item.id, ok: true, status: 200 }))
+            },
+          },
+        }),
+        { query: '北单中断开奖' },
+      )
+      // 回写是 fire-and-forget，给它一个宏任务的机会
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      assert.equal(bulkCalls.length, 1, '必须是 1 次 bulk')
+      assert.equal(singleCalls, 0, '有 bulk 就不该再逐条打')
+      assert.equal(bulkCalls[0]!.length, 1, '命中的 1 条要被写进 bulk')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('没有 bulk 能力时退回逐条（语义不变）', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
+    const single: string[] = []
+    try {
+      await searchMemories(
+        h.deps({
+          hitRecorder: {
+            updateScript: async (index, id) => {
+              single.push(`${index}/${id}`)
+              return { id, result: 'updated', status: 200 }
+            },
+          },
+        }),
+        { query: '北单中断开奖' },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      assert.equal(single.length, 1, '没有 bulk 时必须逐条写')
+      assert.match(single[0]!, /personal_memory_xqh\/p1/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+
+describe('阶段 21：中间区绝对下限（midBandFloor）', () => {
+  // 0.73 是实测的闲聊档（「嗨！今天心情怎么样~」= 0.743、「在吗」= 0.7227）。
+  // 这组数据刻意给了很大的 margin（0.23）和很高的 bm25（40）——
+  // 旧逻辑一定判 ok，正是 7 条 noise 误报的成因。
+  const fixtures = { [PERSONAL_INDEX]: { bm25: [hit('p1', 40), hit('p2', 1)], knn: [hit('p1', 0.73), hit('p2', 0.5)] } }
+
+  test('闲聊档 0.73 直接判低置信，不再看 margin / bm25', async () => {
+    const h = await harness(fixtures)
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'low_confidence')
+      assert.ok(result.hits.length > 0, '低置信仍然返回结果，只是标注')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('midBandFloor=0 时回到旧行为（同一组数据判 ok）', async () => {
+    const h = await harness(fixtures)
+    try {
+      const result = await searchMemories(
+        h.deps({ confidence: { ...DEFAULT_CONFIDENCE, midBandFloor: 0 } }),
+        { query: 'q', scope: 'personal' },
+      )
+      assert.equal(result.note, 'ok', '关掉闸门必须能精确回到旧行为')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('真相关档 0.85 不受影响', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] } })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      assert.equal(result.note, 'ok')
     } finally {
       await h.fake.close()
     }

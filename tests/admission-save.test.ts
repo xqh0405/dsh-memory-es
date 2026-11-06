@@ -107,6 +107,7 @@ describe('saveMemory 准入：凭据', () => {
       const result = await saveMemory(makeDeps(fake), {
         content: '生产库 password: Passw0rd123! 记一下',
       })
+      assert.equal(result.status, 'rejected', '被隔离是 rejected，不是 created')
       assert.equal(result.quarantined, true)
       assert.equal(result.deduped, false)
       assert.match(result.text, /隔离待审/)
@@ -154,6 +155,7 @@ describe('saveMemory 准入：检索原文再摄取', () => {
         makeDeps(fake, { recentRecalls: () => [{ memoryId: 'mem-old', content: recalled }] }),
         { content: recalled },
       )
+      assert.equal(result.status, 'rejected', '被隔离是 rejected，不是 created')
       assert.equal(result.quarantined, true)
       assert.match(result.text, /隔离待审/)
       assert.equal(written[0].status, 'quarantine')

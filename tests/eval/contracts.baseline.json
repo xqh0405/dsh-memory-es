@@ -1,7 +1,13 @@
 {
-  "createdAt": "2026-11-02T13:50:48.994Z",
+  "createdAt": "2026-11-06T06:50:28.020Z",
   "mustFailed": 0,
-  "shouldFailed": 9,
+  "shouldFailed": 3,
+  "mustIds": [
+    "must-no-identity-types",
+    "must-no-mood-doc",
+    "must-receipts-shape",
+    "must-recall-sanity"
+  ],
   "passedIds": [
     "recall-q01",
     "recall-q02",
@@ -26,27 +32,27 @@
     "recall-q22",
     "recall-q23",
     "recall-q24",
-    "must-no-identity-types",
-    "must-no-mood-doc",
-    "must-receipts-shape",
-    "must-recall-sanity",
-    "cjk-lottery-oldenv",
-    "cjk-dynamic-lazy",
-    "cjk-updatetime",
-    "cjk-ollama-gone",
-    "cjk-miner",
-    "cjk-alert-owner",
-    "cjk-btwaf-pid"
-  ],
-  "failedIds": [
-    "recall-q16",
     "noise-q25",
     "noise-q26",
     "noise-q27",
     "noise-q28",
     "noise-q29",
     "noise-q30",
+    "must-no-identity-types",
+    "must-no-mood-doc",
+    "must-receipts-shape",
     "noise-unknown-topic",
+    "must-recall-sanity",
+    "cjk-lottery-oldenv",
+    "cjk-dynamic-lazy",
+    "cjk-updatetime",
+    "cjk-miner",
+    "cjk-alert-owner",
+    "cjk-btwaf-pid"
+  ],
+  "failedIds": [
+    "recall-q16",
+    "cjk-ollama-gone",
     "cjk-jenkins-builder"
   ]
 }

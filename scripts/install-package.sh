@@ -10,6 +10,10 @@
 #   ./install.sh --dry-run              # 只打印要做什么
 #   ./install.sh --profile web-test     # 装到别的 profile
 #   ./install.sh --owner node           # root 执行时把属主改成 node（容器里 dsh 以 node 跑）
+#   ./install.sh --skip-selfcheck       # 不跑装后自检（CI/脚本里用）
+#
+# 装完会自动跑一次 selfcheck.sh（七项 PASS/FAIL）：装成功 ≠ 能用，
+# ES/CA/账号/索引/embedding/配置 任一没就位都在那一屏里说清楚。
 #
 # 从旧版（面板是独立包 dsh-memory-es-panel）升级时，脚本会自动移除那个包并清理
 # dsh.profile.bundles 里的旧名——否则两个「记忆库」面板会同时注册。
@@ -22,6 +26,7 @@ DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROFILE="${MEMORY_ES_PROFILE:-web}"
 WITH_STICKERS=1
 DRY_RUN=0
+SELFCHECK=1
 # 容器里常以 root 执行 docker exec，但 dsh 以 node 跑：装完需要 chown，
 # 否则 node 用户读不到 / 写不了（症状是插件不加载或面板打不开）
 OWNER=""
@@ -32,6 +37,7 @@ while [ $# -gt 0 ]; do
     --profile) PROFILE="$2"; shift 2 ;;
     --no-stickers) WITH_STICKERS=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --skip-selfcheck) SELFCHECK=0; shift ;;
     --owner) OWNER="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -164,9 +170,29 @@ elif [ -n "$OWNER" ] && [ "$(id -u)" != "0" ]; then
   echo "    ! --owner 只有 root 执行时生效（当前 uid=$(id -u)），已忽略"
 fi
 
+# 装完自检：装成功 ≠ 能用。ES 没起 / CA 路径不对 / 账号没建 / 没配 identity，
+# 全都在这一屏里用 PASS-FAIL 说清楚，并给出下一步命令。
+# 自检不改变安装结果（退出码仍是 0），只在有 FAIL 时把「还没就绪」讲明白。
+SELFCHECK_FAILED=0
+if [ "$SELFCHECK" = "1" ] && [ "$DRY_RUN" != "1" ] && [ -f "$HERE/selfcheck.sh" ]; then
+  echo
+  echo "==> 装后自检"
+  if ! DSH_HOME="$DSH_HOME" MEMORY_ES_PROFILE="$PROFILE" bash "$HERE/selfcheck.sh" \
+      --dsh-home "$DSH_HOME" --profile "$PROFILE"; then
+    SELFCHECK_FAILED=1
+  fi
+fi
+
 echo
 echo "完成：v${VERSION} 已就位（$PLUGIN_DEST，插件与面板同一个包）"
 echo "人格：内置在插件里（persona/seed.md），装完直接生效，不需要写配置"
 echo "      要换成自己的，就在 profile 的 cordis.patch.yml 里配 persona.seed —— 配置优先，升级不会覆盖"
 echo "生效：重启 dsh-web（本机：kill -TERM \$(systemctl show dsh-web -p MainPID --value)；容器：docker restart <容器名>）"
 echo "核对：插件日志 'ready: v${VERSION}'、面板自检 '自检通过 v${VERSION}'、面板页脚「版本 ${VERSION}」"
+if [ "$SELFCHECK_FAILED" = "1" ]; then
+  echo
+  echo '!! 自检未全绿：插件已装好，但「还没就绪」。第一次装通常是因为 ES 还没起、'
+  echo '   配置里还没有 dsh-memory-es 段。按上面「下一步」修，或直接跑：'
+  echo '     ./es/setup.sh        # 起 ES + 建账号 + 生成配置片段'
+  echo '     ./selfcheck.sh       # 修完再自检'
+fi

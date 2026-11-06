@@ -158,7 +158,7 @@ async function main() {
     // 与运行时的默认检索参数保持一致；改这里等于改评测口径，需同步 config.ts
     retrieval: { topK: 20, rrfK: 60, limit: 8 },
     // 关闭判空 = autoPassTop1 取 0（任何 top1 都直接放行）
-    ...(opts.noGate ? { confidence: { floorTop1: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 } } : {}),
+    ...(opts.noGate ? { confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 } } : {}),
     ranking: { ...DEFAULT_RANKING, agreementBonus: opts.agreementBonus ?? DEFAULT_RANKING.agreementBonus },
   }
 

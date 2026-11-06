@@ -214,10 +214,11 @@ cmd_prune_audit() {
   fi
   log_line "prune-audit start (apply=$apply keep=${AUDIT_KEEP_DAYS:-90}d)"
   local out rc
+  # 阶段 20：连 search_log_* 一起清（它含 query 原文，保留期是隐私面，不该只清审计）。
   if [ "$apply" = "1" ]; then
-    out=$("$ROOT/scripts/prune-audit.sh" --apply 2>&1)
+    out=$("$ROOT/scripts/prune-audit.sh" --search-log --apply 2>&1)
   else
-    out=$("$ROOT/scripts/prune-audit.sh" 2>&1)
+    out=$("$ROOT/scripts/prune-audit.sh" --search-log 2>&1)
   fi
   rc=$?
   log_line "prune-audit end rc=$rc"

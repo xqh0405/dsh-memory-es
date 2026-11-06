@@ -70,6 +70,8 @@ export interface ConfigType {
     maxPerDomain: number
     /** 阶段 12：缺省详略（full / summary） */
     defaultDetail: string
+    /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
+    synonyms?: Record<string, string>
   }
   /** 排序乘子（阶段 2） */
   ranking: {
@@ -88,6 +90,8 @@ export interface ConfigType {
   /** 置信判定：分层阈值，见 schema 处注释 */
   confidence: {
     floorTop1: number
+    /** 阶段 21：中间区绝对下限（0 = 关闭） */
+    midBandFloor: number
     autoPassTop1: number
     minMargin: number
     minBm25: number
@@ -174,6 +178,26 @@ export interface ConfigType {
     queryMaxChars: number
     path: string
   }
+  /** 阶段 17 P0-1：自动召回真注入（与影子同口径，但真写进 system prompt） */
+  recallInject: {
+    enabled: boolean
+    timeoutMs: number
+    maxItems: number
+    maxChars: number
+    sectionOrder: number
+    cacheTtlMs: number
+    /** top1 的向量相似度门槛；低于它不注入（note=ok 分不出闲聊与相关） */
+    minScore: number
+    /** 每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl */
+    logPath: string
+    /** 阶段 20：embedding 预热（消息到达即 embed，assemble 时命中缓存） */
+    prewarm: {
+      enabled: boolean
+      timeoutMs: number
+      cacheTtlMs: number
+      maxEntries: number
+    }
+  }
 }
 
 /**
@@ -196,8 +220,10 @@ export const Config: z<ConfigType> = z.object({
   es: z.object({
     url: z.string().default('https://127.0.0.1:9200')
       .description('ES 地址；只绑回环，不要对公网开 9200。'),
-    caCertPath: z.string().default('deploy/es/certs/ca.crt')
-      .description('自签 CA 证书路径（PEM），用于校验 ES 的 HTTPS 证书。'),
+    caCertPath: z.string().default('')
+      .description('自签 CA 证书路径（PEM），用于校验 ES 的 HTTPS 证书。'
+        + '留空 = 自动找 $DSH_HOME/memory-es/es/certs/ca.crt → $DSH_HOME/memory-es/ca.crt → ./deploy/es/certs/ca.crt'
+        + '（发行包跑 es/setup.sh 会把证书放在第一处）。'),
     requestTimeoutMs: z.number().step(1).min(500).default(8_000)
       .description('单次 ES 请求超时（毫秒）。'),
   }),
@@ -218,8 +244,10 @@ export const Config: z<ConfigType> = z.object({
   identity: z.object({
     userId: z.string()
       .description('必填：本次部署代表哪个用户（对应 personal_memory_<id> 索引名）。'),
-    readUsername: z.string().default('mem-reader-xqh')
-      .description('只读身份的用户名（D5：一人一索引 + 索引级 ACL）。'),
+    readUsername: z.string().default('mem-reader')
+      // 别再写死某个人的名字（评审 M2）：默认值只是旧三账号模型的兼容回落，
+      // 新部署一律用 identity.username（mem-user-<uid>）。
+      .description('只读身份的用户名（旧三账号模型的兼容回落；单账号部署用 identity.username）。'),
     readPassword: z.string().default('')
       .description('只读身份的密码；从环境变量注入，不要写进配置文件。'),
     writerUsername: z.string().default('mem-writer')
@@ -275,6 +303,10 @@ export const Config: z<ConfigType> = z.object({
   confidence: z.object({
     floorTop1: z.number().default(DEFAULT_CONFIDENCE.floorTop1)
       .description('kNN 第一名 cosine 低于它 → 明显无关，判低置信。'),
+    midBandFloor: z.number().min(0).max(1).default(DEFAULT_CONFIDENCE.midBandFloor)
+      .description('阶段 21：中间区绝对下限。top1 低于它直接判低置信，不再看 margin —— '
+        + '闲聊 top1 落在 0.72~0.74，与真相关（≥0.79）只差 0.05，margin 分不开。'
+        + '默认 0.76，与注入的 minScore 同源；0 = 关闭（回到旧行为）。'),
     autoPassTop1: z.number().default(DEFAULT_CONFIDENCE.autoPassTop1)
       .description('kNN 第一名 cosine 达到它 → 直接放行，不再看 margin（绝对相似度已经够高）。'),
     minMargin: z.number().default(DEFAULT_CONFIDENCE.minMargin)
@@ -444,6 +476,60 @@ export const Config: z<ConfigType> = z.object({
       .description('拿消息前多少个字符当检索 query。'),
     path: z.string().default('')
       .description('JSONL 输出路径；留空 = $DSH_HOME/memory-es/recall-shadow.jsonl。'),
+  }),
+  /**
+   * 阶段 17 P0-1：自动召回真注入。
+   *
+   * **默认关**：它改变每一轮的实际输入（会影响模型回答），属于「改检索行为」的开关，
+   * 按护栏默认关；要开先看同一份影子数据说明「注入什么、多大、多贵」。
+   */
+  recallInject: z.object({
+    enabled: z.boolean().default(false)
+      .description('自动召回真注入：每次组装 prompt 前检索一次，把命中的记忆写进 system prompt。默认关。'),
+    timeoutMs: z.number().step(1).min(50).max(5_000).default(500)
+      .description('单次注入检索的硬超时（毫秒）；超时 = 这一轮不注入，静默跳过、不报错。'
+        + '默认 500 而不是 1500：125 上单次热路径 44~65ms，但 11 个容器共享一个 -np 1 的 Ollama，'
+        + '队列被批量补向量占住时 3 秒都不回（2026-11-05 实测 13 条观测 11 条 timeout）。'
+        + '超时的正确反应是「这轮没记忆」，不是让用户白等。'),
+    maxItems: z.number().step(1).min(1).max(10).default(3)
+      .description('注入条数上限；与影子 recallShadow.maxItems 保持一致，这样影子数据可以直接预估真实体积。'),
+    maxChars: z.number().step(1).min(100).default(600)
+      .description('注入正文的字符预算（按检索顺序累加）。实测 3 条约 363 字符 ≈ 181 token。'),
+    sectionOrder: z.number().step(1).default(3203)
+      .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
+    cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+      .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
+        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
+    minScore: z.number().min(0).max(1).default(0.76)
+      .description('注入的绝对分数门槛：top1 的向量相似度低于它就不注入。'
+        + '默认 0.76 —— 2026-11-05 实测（团队库 326 条）：闲聊 query 的 top1_knn 在 0.7227~0.7430，'
+        + '真相关在 0.7920~0.8314，而两者的 note 全是 ok（置信判定只看候选区分度，不看绝对相关）。'),
+    logPath: z.string().default('')
+      .description('每次注入尝试的 JSONL 落盘路径；留空 = $DSH_HOME/memory-es/recall-inject.jsonl。'
+        + '插件 logger 不进 docker logs，这里是唯一能在命令行验收的通道。'),
+    /**
+     * 阶段 20：embedding 预热。
+     *
+     * 用户消息在 `agent/inbox/inserted` 就到了，而注入要到 `system-prompt/assemble` 才查——
+     * 中间隔着模型思考的时间，足够把 embed 先算完。**同文本同模型的向量是确定性的**，
+     * 所以这一步不改变任何检索结果，只把等待提前。
+     *
+     * 默认开：它不改变行为（失败静默、assemble 照常实时算），关掉它没有收益只有慢。
+     * 真正改变行为的是 `recallInject.enabled`，那个默认关。
+     */
+    prewarm: z.object({
+      enabled: z.boolean().default(false)
+        .description('消息到达时提前 embed 一次。不改变检索结果（同文本向量相同），失败静默；只在 recallInject.enabled 时生效。'
+          + '**默认关（2026-11-06 改）**：163 次 assemble 实测命中率只有 1.8%——'
+          + 'assemble 紧跟消息到达，预热没有提前量；而且共享 in-flight 时 assemble 会继承预热的 '
+          + 'timeoutMs，绕过注入自己的 500ms 硬超时。等「消息到达 → assemble」有了稳定间隔再开。'),
+      timeoutMs: z.number().step(1).min(50).max(5_000).default(2_000)
+        .description('预热的硬超时（毫秒）。超时就放弃，assemble 时照常实时算——预热绝不能占住 Ollama 队列。'),
+      cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+        .description('预热向量的缓存窗口（毫秒）。默认 30s，与 cacheTtlMs 同量级：覆盖「一条消息 → 一次 assemble」，又不会长期持有旧模型的向量。'),
+      maxEntries: z.number().step(1).min(1).max(1_024).default(64)
+        .description('缓存条数上限。1024 维 float 约 4KB/条，64 条 ≈ 256KB。'),
+    }).default({}),
   }),
 })
 

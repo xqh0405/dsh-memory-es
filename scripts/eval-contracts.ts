@@ -48,6 +48,8 @@ interface ContractBaseline {
   /** 基线时的失败数：should 只允许持平或减少 */
   mustFailed: number
   shouldFailed: number
+  /** must 契约的全集快照；`check-contracts.ts` 靠它发现「must 被降级成 should」 */
+  mustIds?: string[]
   passedIds: string[]
   failedIds: string[]
 }
@@ -154,6 +156,8 @@ async function main() {
       createdAt: new Date().toISOString(),
       mustFailed: summary.mustFailed,
       shouldFailed: summary.shouldFailed,
+      // 快照 must 全集：只有计数的话，「把 must 改成 should」一个数字都不动（实测漏过）
+      mustIds: cases.filter((c) => c.severity === 'must').map((c) => c.id),
       passedIds: cases.filter((c) => outcomes.get(c.id)?.pass === true).map((c) => c.id),
       failedIds: summary.failures.map((f) => f.id),
     }

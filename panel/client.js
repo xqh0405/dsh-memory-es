@@ -202,6 +202,25 @@ window.__ModuleLoader__.load({
       stateActive: '生效中',
       stateArchived: '已拒绝',
       tabSearchLog: '检索',
+      tabInject: '注入',
+      injHint: '数据源只有 recall-inject.jsonl（每回合最多一行）；统计按本次读到的全部记录算，明细只显示最近 50 条。',
+      injTotal: '注入尝试',
+      injInjected: '注入率',
+      injTimeout: '超时率',
+      injAvgItems: '条均',
+      injAvgChars: '字符均',
+      injDropped: '被预算挤掉',
+      injColItems: '注入条数',
+      injColChars: '字符',
+      injCached: '预热命中',
+      injEmpty: '还没有注入记录 —— recallInject.enabled 关着，或者这一段还没发过消息。',
+      injOutcomeInjected: '已注入',
+      injOutcomeTimeout: '超时',
+      injOutcomeLow: '低置信',
+      injOutcomeLowScore: '低分',
+      injOutcomeNoMatch: '无匹配',
+      injOutcomeError: '错误',
+      injOutcomeDegraded: '降级',
       slDays: '统计范围',
       slDays7: '近 7 天',
       slDays30: '近 30 天',
@@ -510,6 +529,25 @@ window.__ModuleLoader__.load({
       stateActive: 'active',
       stateArchived: 'rejected',
       tabSearchLog: 'Search log',
+      tabInject: 'Injection',
+      injHint: 'Single source: recall-inject.jsonl (at most one line per turn). Stats cover everything read; the list shows the latest 50.',
+      injTotal: 'Attempts',
+      injInjected: 'Injected',
+      injTimeout: 'Timeout',
+      injAvgItems: 'Items avg',
+      injAvgChars: 'Chars avg',
+      injDropped: 'Dropped',
+      injColItems: 'items',
+      injColChars: 'chars',
+      injCached: 'prewarm hit',
+      injEmpty: 'No injection records yet — recallInject.enabled is off, or no messages in this period.',
+      injOutcomeInjected: 'injected',
+      injOutcomeTimeout: 'timeout',
+      injOutcomeLow: 'low confidence',
+      injOutcomeLowScore: 'low score',
+      injOutcomeNoMatch: 'no match',
+      injOutcomeError: 'error',
+      injOutcomeDegraded: 'degraded',
       slDays: 'Range',
       slDays7: 'Last 7 days',
       slDays30: 'Last 30 days',
@@ -4041,6 +4079,85 @@ window.__ModuleLoader__.load({
      * 簇由后端按 `query_norm` 聚合，前端只负责展示与分档着色。
      * 呈现纪律：没有数据就显示「—」，不要把 0 当成"有人问过但没答案"。
      */
+    /**
+     * 阶段 22：回合记忆栏。
+     *
+     * 回答的是「这一轮为什么没用到记忆」——所以四态必须分开显示：
+     * 注入了 / 超时 / 低分·低置信 / 无匹配。全糊成一个「命中率」就没法定位了。
+     * 数据只在后端从 `recall-inject.jsonl` 尾部算，前端不做二次聚合。
+     */
+    function InjectLog({ t }) {
+      const [state, setState] = React.useState({ loading: true, error: '', data: null })
+      const load = React.useCallback(() => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        apiGet('/inject-log', { limit: '50' })
+          .then((data) => setState({ loading: false, error: '', data }))
+          .catch((error) => setState({ loading: false, error: String(error.message ?? error), data: null }))
+      }, [])
+      React.useEffect(() => {
+        load()
+      }, [load])
+
+      const data = state.data
+      const stats = data?.stats ?? null
+      const pct = (v) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : t('noData'))
+      const outcomeLabel = (outcome) =>
+        ({
+          injected: t('injOutcomeInjected'),
+          timeout: t('injOutcomeTimeout'),
+          low_confidence: t('injOutcomeLow'),
+          low_score: t('injOutcomeLowScore'),
+          no_match: t('injOutcomeNoMatch'),
+          error: t('injOutcomeError'),
+          degraded: t('injOutcomeDegraded'),
+        })[outcome] ?? String(outcome)
+      const outcomeTone = (outcome) =>
+        outcome === 'injected' ? 'ok' : outcome === 'timeout' || outcome === 'error' ? 'warn' : 'muted'
+      const metric = (label, value) =>
+        h('div', { style: { minWidth: 96 } },
+          h('div', { style: S.muted }, label),
+          h('div', { style: { fontSize: 18, fontWeight: 600 } }, value),
+        )
+
+      return h('div', { style: { display: 'grid', gap: 12 } },
+        h('div', { style: S.muted }, t('injHint')),
+        state.loading ? h('div', { style: S.muted }, t('loading')) : null,
+        state.error ? h('div', { style: S.err }, state.error) : null,
+        stats
+          ? h('div', { style: { ...S.card, display: 'flex', gap: 24, flexWrap: 'wrap' } },
+              metric(t('injTotal'), String(stats.total)),
+              metric(t('injInjected'), pct(stats.injectedRate)),
+              metric(t('injTimeout'), pct(stats.timeoutRate)),
+              metric(t('injAvgItems'), String(stats.avgItems)),
+              metric(t('injAvgChars'), String(stats.avgChars)),
+              metric(t('injDropped'), String(stats.droppedTotal)),
+            )
+          : null,
+        data && data.exists === false
+          ? h('div', { style: S.muted }, t('injEmpty'))
+          : (data?.records ?? []).map((record, index) =>
+              h('div', { key: `${record.ts}-${index}`, style: { ...S.card, display: 'grid', gap: 6 } },
+                h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+                  h('span', { style: S.pill(outcomeTone(record.outcome)) }, outcomeLabel(record.outcome)),
+                  h('span', { style: S.muted }, String(record.ts ?? '').replace('T', ' ').replace('Z', '').slice(0, 19)),
+                  typeof record.ms === 'number' ? h('span', { style: S.muted }, `${record.ms} ms`) : null,
+                  record.embedCached === true ? h('span', { style: S.pill('ok') }, t('injCached')) : null,
+                ),
+                h('div', { style: { fontSize: 13 } }, String(record.query ?? '')),
+                h('div', { style: { ...S.muted, display: 'flex', gap: 14, flexWrap: 'wrap' } },
+                  h('span', {}, `${t('injColItems')} ${(record.items ?? []).length}`),
+                  h('span', {}, `${t('injColChars')} ${record.chars ?? 0}`),
+                  typeof record.top1Score === 'number' ? h('span', {}, `top1 ${record.top1Score.toFixed(3)}`) : null,
+                  Array.isArray(record.dropped) && record.dropped.length > 0
+                    ? h('span', { style: { color: 'var(--dsw-alias-state-warn-primary)' } },
+                        `${t('injDropped')} ${record.dropped.length}`)
+                    : null,
+                ),
+              ),
+            ),
+      )
+    }
+
     function SearchLog({ t }) {
       // 时间窗进 URL：分享「最近 90 天」的视图时对方看到的该是同一个窗口
       const [days, setDays] = React.useState(() => readUrlNumber('logDays', [7, 30, 90], 7))
@@ -4745,7 +4862,9 @@ window.__ModuleLoader__.load({
      * 两边共用同一份组件与同一套数据接口，只是页签不同，所以搬动没有第二套实现。
      */
     function MemoryPanel({ t, onStatus }) {
-      const TAB_ORDER = ['overview', 'browse', 'searchlog', 'graph', 'identity', 'persona', 'review', 'maint', 'config']
+      // 这份清单同时是**URL 白名单**（readUrlEnum 不在里面就回退 overview），
+      // 所以新增页签只加渲染分支、忘了加这里，`?tab=xxx` 会静默失效 —— 2026-11-06 踩过。
+      const TAB_ORDER = ['overview', 'browse', 'searchlog', 'inject', 'graph', 'identity', 'persona', 'review', 'maint', 'config']
       // 页签从 URL 还原：刷新/分享链接/从别的会话切回来都停在同一页
       const [tab, setTab] = React.useState(() => readUrlEnum('tab', TAB_ORDER, 'overview'))
       // 状态写回 URL。放进 effect 而不是 setTab 里，是因为概览页的「记忆浏览 →」也调 setTab，
@@ -4818,6 +4937,7 @@ window.__ModuleLoader__.load({
             ['overview', t('tabOverview')],
             ['browse', t('tabBrowse')],
             ['searchlog', t('tabSearchLog')],
+            ['inject', t('tabInject')],
             ['graph', t('tabGraph')],
             // 自述 = 个人库的候选采纳，只需要单账号（不依赖 teamWrite），所以总是显示
             ['identity', t('tabIdentity')],
@@ -4848,6 +4968,8 @@ window.__ModuleLoader__.load({
           ? h(Persona, { t })
           : tab === 'searchlog'
           ? h(SearchLog, { t })
+          : tab === 'inject'
+          ? h(InjectLog, { t })
           : tab === 'graph'
           ? h(GraphView, { t })
           : tab === 'overview'

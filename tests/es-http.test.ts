@@ -327,3 +327,136 @@ describe('取消信号（exec.signal 一路传到请求）', () => {
     }
   })
 })
+
+describe('_msearch（阶段 20）', () => {
+  test('按 NDJSON 发，按顺序返回；只发一次 HTTP', async () => {
+    const fake = await startFakeEs((req, res) => {
+      const index = /^\/([^/]+)\/_search/.exec(req.path)?.[1] ?? ''
+      const body = JSON.parse(req.body) as { size?: number }
+      sendJson(res, 200, {
+        took: 2,
+        hits: {
+          total: { value: 1, relation: 'eq' },
+          hits: [{ _id: `${index}-1`, _score: body.size ?? 0, _source: { from: index } }],
+        },
+      })
+    })
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      const results = await client.msearch([
+        { index: 'personal_memory_xqh', body: { size: 1 } },
+        { index: 'team_knowledge', body: { size: 2 } },
+      ])
+
+      assert.equal(fake.msearchCalls, 1, '两条子查询必须只走一次往返')
+      assert.equal(results.length, 2)
+      assert.equal(results[0]!.hits[0]!.id, 'personal_memory_xqh-1')
+      assert.equal(results[1]!.hits[0]!.id, 'team_knowledge-1')
+      assert.deepEqual(results[1]!.hits[0]!.source, { from: 'team_knowledge' })
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('空请求不发 HTTP，直接返回空数组', async () => {
+    const fake = await startFakeEs(() => undefined)
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      assert.deepEqual(await client.msearch([]), [])
+      assert.equal(fake.requests.length, 0)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('单条报错 → 整体抛，错误里带子查询下标与索引名', async () => {
+    const fake = await startFakeEs((req, res) => {
+      if (req.path.includes('team_knowledge')) {
+        sendEsError(res, 404, 'index_not_found_exception', 'no such index [team_knowledge]')
+        return
+      }
+      sendJson(res, 200, { took: 1, hits: { total: { value: 0, relation: 'eq' }, hits: [] } })
+    })
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      await assert.rejects(
+        () =>
+          client.msearch([
+            { index: 'personal_memory_xqh', body: { size: 1 } },
+            { index: 'team_knowledge', body: { size: 1 } },
+          ]),
+        (err: unknown) =>
+          err instanceof EsError
+          && err.kind === 'not_found'
+          && err.message.includes('msearch[1]')
+          && err.message.includes('team_knowledge'),
+      )
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('响应条数与请求不一致 → protocol（错位合并比报错难查得多）', async () => {
+    // 这里必须绕过「拆开再拼」的默认行为，否则造不出畸形响应
+    const fake = await startFakeEs(
+      (_req, res) => sendJson(res, 200, { responses: [{ hits: { total: 0, hits: [] } }] }),
+      { rawMsearch: true },
+    )
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      await assert.rejects(
+        () =>
+          client.msearch([
+            { index: 'a', body: {} },
+            { index: 'b', body: {} },
+          ]),
+        (err: unknown) => err instanceof EsError && err.kind === 'protocol',
+      )
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+describe('_bulk 命中回写（阶段 20）', () => {
+  test('一次往返更新多条；部分失败只体现在结果里，不抛', async () => {
+    const fake = await startFakeEs((req, res) => {
+      const pairs = req.body.split('\n').filter((line) => line.trim() !== '').length / 2
+      sendJson(res, 200, {
+        items: Array.from({ length: pairs }, (_, i) => ({
+          update:
+            i === 0
+              ? { status: 200, result: 'updated' }
+              : { status: 404, error: { type: 'document_missing_exception', reason: 'missing doc' } },
+        })),
+      })
+    })
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      const results = await client.bulkUpdateScript([
+        { index: 'personal_memory_xqh', id: 'a', script: { source: 'ctx._source.hit_count += 1' } },
+        { index: 'team_knowledge', id: 'b', script: { source: 'ctx._source.hit_count += 1' } },
+      ])
+
+      assert.equal(fake.requests.length, 1, '两条更新必须只走一次 HTTP')
+      assert.equal(results.length, 2)
+      assert.equal(results[0]!.ok, true)
+      assert.equal(results[1]!.ok, false)
+      assert.equal(results[1]!.status, 404)
+      assert.match(results[1]!.error ?? '', /missing doc/)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('空数组不发请求', async () => {
+    const fake = await startFakeEs(() => undefined)
+    try {
+      const client = createEsClient({ url: fake.url, username: 'u', password: PASSWORD })
+      assert.deepEqual(await client.bulkUpdateScript([]), [])
+      assert.equal(fake.requests.length, 0)
+    } finally {
+      await fake.close()
+    }
+  })
+})

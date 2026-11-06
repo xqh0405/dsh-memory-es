@@ -166,6 +166,32 @@ put_index team_knowledge <<'JSON'
 }
 JSON
 
+# ── 共享审计库（memory_audit）────────────────────────────────────
+# 以前只由 migrate-s9.sh 创建，于是「全新装机」这条路上它是缺的：第一次晋升/驳回写不进去
+# （ES 会自动建一个 dynamic 映射的索引，字段类型不可控）。开箱路径必须自己建它。
+# 映射与 migrate-s9.sh 保持一致；已存在的索引不受影响（put_index 会跳过）。
+put_index memory_audit <<'JSON'
+{
+  "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "event":        { "type": "keyword" },
+      "actor":        { "type": "keyword" },
+      "at":           { "type": "date" },
+      "subject_type": { "type": "keyword" },
+      "subject_id":   { "type": "keyword" },
+      "memory_id":    { "type": "keyword" },
+      "team_doc_id":  { "type": "keyword" },
+      "from_state":   { "type": "keyword" },
+      "to_state":     { "type": "keyword" },
+      "reason":       { "type": "keyword" },
+      "note":         { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" }
+    }
+  }
+}
+JSON
+
 # ── 个人审计流水（阶段 7.3 补强）──────────────────────────────────
 # 为什么单独一份而不是只写 memory_audit：
 #   · memory_audit 是**共享**索引，只有 teamWrite 身份能写；普通用户采纳/拒绝自己的候选时

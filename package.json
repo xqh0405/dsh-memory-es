@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-es",
-  "version": "0.6.25",
+  "version": "0.6.40",
   "description": "DSH 记忆插件：Elasticsearch 双层记忆库（团队知识 + 个人记忆）",
   "keywords": [
     "dsh",
@@ -75,6 +75,7 @@
     "eval:thresholds": "node scripts/eval-thresholds.ts",
     "eval:contracts": "node scripts/eval-contracts.ts",
     "eval:contracts:gate": "node scripts/eval-contracts.ts --gate",
+    "check:contracts": "node scripts/check-contracts.ts",
     "tune": "node scripts/tune.ts"
   },
   "icon": "./panel/icon.svg"

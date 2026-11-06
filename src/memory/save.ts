@@ -89,6 +89,11 @@ export interface SaveInput {
 }
 
 export interface SaveResult {
+  /**
+   * 阶段 23：三态回执。给模型一个不用自己拼的结论——
+   * 之前要同时看 deduped / quarantined 才能猜出「到底写没写进去」。
+   */
+  status: 'created' | 'merged' | 'rejected'
   /** 新写入或命中去重时已有的文档 id */
   memory_id: string
   /** true = 已有同内容（归一化后哈希相同），本次没有写入 */
@@ -406,6 +411,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
     const existingId = typeof existing.source.memory_id === 'string' ? existing.source.memory_id : existing.id
     log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, degraded: false })
     return {
+      status: 'merged',
       memory_id: existingId,
       deduped: true,
       degraded: false,
@@ -455,6 +461,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
       category: admission.category ?? 'unknown',
     })
     return {
+      status: 'rejected',
       memory_id: String(quarantined.doc.memory_id),
       deduped: false,
       degraded: false,
@@ -528,6 +535,7 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
       : `；库里有 ${similarTo.length} 条内容相近（${similarTo.slice(0, 3).join(' / ')}），若是同一条请用 memory_update_status 标记取代`
 
   return {
+    status: 'created',
     memory_id: String(built.doc.memory_id),
     deduped: false,
     degraded,
@@ -538,13 +546,12 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
 }
 
 const DESCRIPTION = [
-  '记住一条事实，存进个人记忆库，跨会话可查。',
-  '时机：用户明确要求记住；做了非显然的决定；踩到可复现的坑；约定、口径或路径变了。',
-  '不要存：临时进度、会话摘要、能从代码或文档直接读到的内容、凭证与个人隐私。',
-  '凭据（口令、令牌、私钥、带密码的连接串）不会入库：命中会被隔离待审（quarantined=true），不要换个说法重试。',
-  '刚用 memory_search 查到的原文不要再抄回来（没有新增信息的搬运同样会被隔离）；要记的是从它得出的结论与增量。',
-  '一次一条——content 写一句能独立成立的事实，不要贴整段对话。',
-  '相同内容（忽略空白与全角/半角差异）会命中去重，返回 deduped=true，不会产生第二份；内容相近时会回 similar_to 提示。',
+  '把「一条能独立成立的事实」存进个人记忆库，跨会话可查。',
+  '—— 该用我：用户明确要求记住；做了非显然的决定（尤其被否掉的方案与原因）；踩到可复现的坑；约定、口径、路径变了。',
+  '—— 别用我：临时进度、会话摘要、能从代码或文档直接读到的内容、整段对话；凭证与个人隐私（会被隔离待审）；已经有的事实（先 memory_search 查，别重复写）。',
+  '一次一条：content 写一句能独立成立的事实，不要贴整段对话。',
+  '凭据（口令、令牌、私钥、带密码的连接串）命中 → quarantined=true；换个说法重试仍然会被隔离，不要试。',
+  '相同内容会命中去重（deduped=true）；内容相近会回 similar_to 提示。',
 ].join(' ')
 
 /** 把编排封成模型可见的工具定义 */
@@ -598,6 +605,7 @@ export function defineSaveTool(deps: SaveDeps) {
         type: 'object',
         additionalProperties: false,
         properties: {
+          status: { type: 'string', enum: ['created', 'merged', 'rejected'], required: true },
           memory_id: { type: 'string', required: true },
           deduped: { type: 'boolean', required: true },
           degraded: { type: 'boolean', required: true },

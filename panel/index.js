@@ -13,7 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
@@ -41,9 +41,31 @@ function readPanelVersion() {
 // 但 /overview 每次请求都现读——升级插件后页面不该还显示旧版本号，也不必为此重启整个 dsh web。
 const PANEL_VERSION = readPanelVersion()
 
+/**
+ * CA 路径解析：配置留空 = 自动找。
+ *
+ * 与 `src/es/http.ts` 的 `resolveCaCertPath` **同序**（面板不 import 主插件产物，
+ * 两边各留一份；改一处必须改另一处）：
+ *   1. `$DSH_HOME/memory-es/es/certs/ca.crt` —— es/setup.sh 的标准落点
+ *   2. `$DSH_HOME/memory-es/ca.crt`          —— 手工拷贝的别名
+ *   3. `./deploy/es/certs/ca.crt`            —— 仓库内开发
+ * 都不存在时返回第 1 个（报错因此指向「应该放哪」）。
+ */
+function resolveCaCertPath(raw) {
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  if (trimmed !== '') return trimmed
+  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  const base = join(home, 'memory-es')
+  const candidates = [join(base, 'es', 'certs', 'ca.crt'), join(base, 'ca.crt'), 'deploy/es/certs/ca.crt']
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return candidates[0]
+}
+
 /** 配置默认值与 `src/config.ts` 保持一致（只用于面板兜底，不替代插件校验） */
 const DEFAULTS = {
-  es: { url: 'https://127.0.0.1:9200', caCertPath: 'deploy/es/certs/ca.crt', requestTimeoutMs: 8000 },
+  es: { url: 'https://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 8000 },
   index: { personalPrefix: 'personal_memory_', docPrefix: 'personal_doc_', team: 'team_knowledge' },
   identity: {
     userId: '',
@@ -157,6 +179,12 @@ function resolveClientConfig(ctx, role = 'reader') {
   const config = findEntryRow(ctx)
   if (!config.ok) return config
   const value = config.value
+  // CA 留空 = 按约定位置自动找（发行包里没有仓库相对路径可依赖），只解析一次。
+  // ⚠️ **只有 https 才解析**，与 src/es/http.ts 的 isTls 判断必须一致：
+  // http 端点（测试里的 fake ES、反代后的明文入口）不用证书，却会因为「找不到文件」
+  // 在建客户端时就抛错 → 权限探测失败 → 面板接口一律 403。2026-11-06 CI 上就是这样。
+  const isTls = String(value.es.url ?? '').startsWith('https:')
+  const caCertPath = isTls ? resolveCaCertPath(value.es.caCertPath) : ''
   // 单账号模式：一个人一个 ES 账号，个人库读写 + 团队库按 teamWrite 授权
   const single = value.identity.username && value.identity.password ? value.identity : null
 
@@ -167,7 +195,7 @@ function resolveClientConfig(ctx, role = 'reader') {
         ok: true,
         value: {
           url: value.es.url,
-          caCertPath: value.es.caCertPath,
+          caCertPath,
           timeoutMs: value.es.requestTimeoutMs,
           auth: { username: single.username, password: single.password },
         },
@@ -186,7 +214,7 @@ function resolveClientConfig(ctx, role = 'reader') {
         ok: true,
         value: {
           url: value.es.url,
-          caCertPath: value.es.caCertPath,
+          caCertPath,
           timeoutMs: value.es.requestTimeoutMs,
           auth: { username: single.username, password: single.password },
         },
@@ -204,7 +232,7 @@ function resolveClientConfig(ctx, role = 'reader') {
       ok: true,
       value: {
         url: value.es.url,
-        caCertPath: value.es.caCertPath,
+        caCertPath,
         timeoutMs: value.es.requestTimeoutMs,
         auth: { username, password },
       },
@@ -215,7 +243,7 @@ function resolveClientConfig(ctx, role = 'reader') {
       ok: true,
       value: {
         url: value.es.url,
-        caCertPath: value.es.caCertPath,
+        caCertPath,
         timeoutMs: value.es.requestTimeoutMs,
         auth: { username: single.username, password: single.password },
       },
@@ -229,7 +257,7 @@ function resolveClientConfig(ctx, role = 'reader') {
     ok: true,
     value: {
       url: value.es.url,
-      caCertPath: value.es.caCertPath,
+      caCertPath,
       timeoutMs: value.es.requestTimeoutMs,
       auth: credential,
     },
@@ -847,6 +875,107 @@ export function classifyCluster(input) {
 }
 
 /** GET /search-log：最近检索记录 + 按查询归一化键聚类的覆盖率（阶段 11） */
+/**
+ * 阶段 22：回合记忆栏。
+ *
+ * 数据源只有一份——插件落盘的 `recall-inject.jsonl`（与 `recall-shadow.jsonl` 同目录）。
+ * **不新增埋点索引**：注入是每回合都可能发生的高频写，进 ES 只会又养一张要清理的表。
+ *
+ * 文件会一直增长，所以**只读尾部**（512 KB）：整文件读进来在跑了几周之后迟早出事。
+ */
+function readTailText(file, maxBytes) {
+  let fd
+  try {
+    fd = openSync(file, 'r')
+    const size = statSync(file).size
+    const start = Math.max(0, size - maxBytes)
+    const length = size - start
+    const buf = Buffer.alloc(length)
+    let read = 0
+    while (read < length) {
+      const n = readSync(fd, buf, read, length - read, start + read)
+      if (n <= 0) break
+      read += n
+    }
+    const text = buf.subarray(0, read).toString('utf8')
+    // 从中间切进去的第一行一定是半行：丢掉它（除非正好从 0 开始）
+    return start === 0 ? text : text.slice(text.indexOf('\n') + 1)
+  } catch {
+    return ''
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function summarizeInjectRecords(records) {
+  const byOutcome = {}
+  let msSum = 0
+  let msCount = 0
+  const itemCounts = []
+  const charCounts = []
+  let dropped = 0
+  for (const r of records) {
+    const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
+    byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
+    if (typeof r.ms === 'number' && Number.isFinite(r.ms)) {
+      msSum += r.ms
+      msCount += 1
+    }
+    if (outcome === 'injected') {
+      if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+      if (typeof r.chars === 'number') charCounts.push(r.chars)
+    }
+    if (Array.isArray(r.dropped)) dropped += r.dropped.length
+  }
+  const total = records.length
+  const avg = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length)
+  return {
+    total,
+    byOutcome,
+    // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
+    timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
+    injectedRate: total === 0 ? 0 : (byOutcome.injected ?? 0) / total,
+    avgItems: Number(avg(itemCounts).toFixed(2)),
+    avgChars: Math.round(avg(charCounts)),
+    avgMs: msCount === 0 ? 0 : Math.round(msSum / msCount),
+    droppedTotal: dropped,
+  }
+}
+
+async function handleInjectLog(_ctx, res, url) {
+  const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '30', 10)
+  const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 30))
+  const file = join(DSH_HOME, 'memory-es', 'recall-inject.jsonl')
+  // ⚠️ 面板 API 的统一包络是 `{ ok, value }`，前端 apiGet 取的是 body.value。
+  // 这里若直接摊开字段（`{ ok, stats, records }`），`data` 会是 undefined，
+  // 页面只剩一行说明、什么数都不显示（2026-11-06 就这样白查了一轮）。
+  if (!existsSync(file)) {
+    return json(res, 200, {
+      ok: true,
+      value: { exists: false, path: file, records: [], stats: summarizeInjectRecords([]) },
+    })
+  }
+  const records = []
+  for (const line of readTailText(file, 512 * 1024).split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    try {
+      records.push(JSON.parse(trimmed))
+    } catch {
+      // 半行（正在写）直接忽略
+    }
+  }
+  return json(res, 200, {
+    ok: true,
+    value: {
+      exists: true,
+      // 统计按全部读到的记录算，明细只回尾部 limit 条（新的在前）
+      stats: summarizeInjectRecords(records),
+      records: records.slice(-limit).reverse(),
+    },
+  })
+}
+
 async function handleSearchLog(ctx, res, url) {
   const configRow = findEntryRow(ctx)
   if (!configRow.ok) return json(res, 503, { ok: false, error: configRow.error })
@@ -1837,6 +1966,28 @@ async function handleIdentityPending(ctx, res, url) {
   return json(res, 200, { ok: true, value: { rows } })
 }
 
+/**
+ * 采纳闸门的规则判定（纯函数，导出给测试）。
+ *
+ * ⚠️ 分支顺序是硬要求：anchor 的目标状态就是 active，所以必须先判 anchor、再判 pending。
+ * 反过来写会让「设为锚点」永远返回「只有 pending 能被采纳」（2026-11-05 的 bug）。
+ * 规则与 src/memory/review.ts 的 setAnchor 保持一致：identity + active。
+ */
+export function classifyIdentityAction(memoryType, status, action) {
+  const type = typeof memoryType === 'string' ? memoryType : ''
+  const state = typeof status === 'string' ? status : ''
+  if (!['identity', 'persona'].includes(type)) {
+    return { ok: false, error: `这条是 ${type || '未知'}，不能走采纳闸门（只收 identity / persona）` }
+  }
+  if (action === 'anchor') {
+    if (type !== 'identity') return { ok: false, error: `这条的类型是 ${type || '未知'}，不是 identity，不能设锚点` }
+    if (state !== 'active') return { ok: false, error: `只有生效中的自述能设锚点（当前 ${state}）` }
+    return { ok: true }
+  }
+  if (state !== 'pending') return { ok: false, error: `这条当前状态是 ${state}（只有 pending 能被采纳）` }
+  return { ok: true }
+}
+
 /** 采纳 / 拒绝一条候选。规则与 src/memory/review.ts 必须一致（两份实现，改一处要改两处）。 */
 async function handleIdentityReview(ctx, res, req) {
   const body = await readJsonBody(req)
@@ -1856,7 +2007,7 @@ async function handleIdentityReview(ctx, res, req) {
   const writer = createReadClient(() => resolveClientConfig(ctx, 'personal-writer'))
   const reader = createReadClient(() => resolveClientConfig(ctx))
 
-  // 先读校验：只有 pending + (identity | persona) 能动
+  // 先读校验：类型与状态的可操作性统一由 classifyIdentityAction 判定（顺序见该函数的注释）。
   const found = await reader.search(names.personal, {
     size: 1,
     query: { bool: { filter: [{ term: { memory_id: memoryId } }] } },
@@ -1864,20 +2015,11 @@ async function handleIdentityReview(ctx, res, req) {
   })
   const src = found.hits?.hits?.[0]?._source
   if (!src) return json(res, 404, { ok: false, error: `找不到条目 ${memoryId}` })
-  if (!['identity', 'persona'].includes(str(src.memory_type))) {
-    return json(res, 409, { ok: false, error: `这条是 ${str(src.memory_type) || '未知'}，不能走采纳闸门（只收 identity / persona）` })
-  }
-  if (str(src.status) !== 'pending') return json(res, 409, { ok: false, error: `这条当前状态是 ${str(src.status)}（只有 pending 能被采纳）` })
+  const verdict = classifyIdentityAction(str(src.memory_type), str(src.status), action)
+  if (!verdict.ok) return json(res, 409, { ok: false, error: verdict.error })
 
   // 锚点：不改 status，只改 anchor 标志（规则与 src/memory/review.ts 的 setAnchor 一致）
   if (action === 'anchor') {
-    // 与 src/memory/review.ts 的 setAnchor 同规则：只有 identity 且 active 才能设锚点
-    if (String(src.memory_type) !== 'identity') {
-      return json(res, 409, { ok: false, error: `这条的类型是 ${String(src.memory_type) || '未知'}，不是 identity，不能设锚点` })
-    }
-    if (String(src.status) !== 'active') {
-      return json(res, 409, { ok: false, error: `只有生效中的自述能设锚点（当前 ${String(src.status)}）` })
-    }
     const anchor = body.value.anchor !== false
     const anchorAt = new Date().toISOString()
     await writer.update(names.personal, memoryId, { anchor, updated_at: anchorAt }, { refresh: 'wait_for' })
@@ -1910,6 +2052,7 @@ async function handleIdentityReview(ctx, res, req) {
     return json(res, 200, { ok: true, value: { memoryId, status: 'active', anchor, audit: anchorAuditState } })
   }
 
+  // 走到这里只剩采纳 / 拒绝（pending 校验已在 classifyIdentityAction 里）
   const target = action === 'approve' ? 'active' : 'archived'
   const at = new Date().toISOString()
   await writer.update(
@@ -2846,6 +2989,8 @@ async function handle(ctx, req, res) {
     if (path === '/memories') return await handleMemories(ctx, res, url)
     // 阶段 11：检索埋点的覆盖率与反查
     if (path === '/search-log' && req.method === 'GET') return await handleSearchLog(ctx, res, url)
+    // 阶段 22：回合记忆栏（本轮注入 / 超时 / 低分 / 无消息，数据源是 recall-inject.jsonl）
+    if (path === '/inject-log' && req.method === 'GET') return await handleInjectLog(ctx, res, url)
     if (path === '/search-log/used-in' && req.method === 'GET') return await handleSearchLogUsedIn(ctx, res, url)
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
@@ -3216,6 +3361,9 @@ export function apply(ctx) {
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
   admitRequest,
+  summarizeInjectRecords,
+  readTailText,
+  handleInjectLog,
   applyConfigChanges,
   coerceFieldValue,
   fieldTypeOf,

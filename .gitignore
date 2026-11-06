@@ -223,3 +223,6 @@ scratch-research/
 # 本机实验脚本与临时凭据（评审 / 召回 A/B 用；.es.env 里是真实账号，绝不能入库）
 scratch-usage/
 scratch-recall/
+
+# npm 命令偶然留下的缓存目录（不是构建产物，别进仓库也别碍眼）
+.npm-cache-tmp/

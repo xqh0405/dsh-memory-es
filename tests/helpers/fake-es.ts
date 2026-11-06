@@ -22,7 +22,10 @@ export interface CapturedRequest {
 
 export interface FakeEs {
   url: string
+  /** 逻辑查询（`_msearch` 已拆成逐条），每条带自己的 `/<index>/_search` 路径 */
   requests: CapturedRequest[]
+  /** `_msearch` 的实际 HTTP 往返次数（阶段 20 用它断言「4 路查询合成 1 次」） */
+  readonly msearchCalls: number
   close(): Promise<void>
 }
 
@@ -43,8 +46,12 @@ export function sendEsError(res: ServerResponse, status: number, type: string, r
 /**
  * 启一个监听随机端口的假 ES。`seq` 是从 1 开始的请求序号，方便“第一次 409、第二次 200”。
  */
-export async function startFakeEs(handler: FakeHandler): Promise<FakeEs> {
+export async function startFakeEs(
+  handler: FakeHandler,
+  options: { /** 不拆 `_msearch`，原样交给 handler（用于测协议层的畸形响应） */ rawMsearch?: boolean } = {},
+): Promise<FakeEs> {
   const requests: CapturedRequest[] = []
+  let msearchCalls = 0
   const server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -55,6 +62,17 @@ export async function startFakeEs(handler: FakeHandler): Promise<FakeEs> {
         headers: req.headers,
         body: Buffer.concat(chunks).toString('utf8'),
         at: Date.now(),
+      }
+      // 阶段 20：检索改成一次 `_msearch`（NDJSON）。假 ES 在**这里**把它拆回逐条，
+      // 每条子查询仍走调用方原来的 handler——测试不用为「合并成几次往返」改一行。
+      // requests 只记**逻辑查询**（拆开的子查询），msearch 的实际往返次数看 msearchCalls。
+      if (captured.path.includes('/_msearch') && options.rawMsearch !== true) {
+        msearchCalls += 1
+        void replyMsearch(captured, res, handler, requests).catch((err: unknown) => {
+          res.writeHead(500, { 'content-type': 'text/plain' })
+          res.end(String(err))
+        })
+        return
       }
       requests.push(captured)
       void Promise.resolve(handler(captured, res, requests.length)).catch((err: unknown) => {
@@ -68,6 +86,84 @@ export async function startFakeEs(handler: FakeHandler): Promise<FakeEs> {
   return {
     url: `http://127.0.0.1:${address.port}`,
     requests,
+    get msearchCalls() {
+      return msearchCalls
+    },
     close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
   }
+}
+
+/** 只收集、不真写的 Response：把 handler 对单条子查询的输出截下来 */
+function createCollector(): { res: ServerResponse; status: () => number; text: () => string } {
+  let status = 200
+  const chunks: string[] = []
+  const res = {
+    statusCode: 200,
+    headersSent: false,
+    setHeader: () => undefined,
+    writeHead: (code: number) => {
+      status = code
+      return res
+    },
+    end: (payload?: string | Buffer) => {
+      chunks.push(typeof payload === 'string' ? payload : (payload ?? '').toString('utf8'))
+    },
+  }
+  return {
+    res: res as unknown as ServerResponse,
+    status: () => status,
+    text: () => chunks.join(''),
+  }
+}
+
+/**
+ * `_msearch` = NDJSON：每两条一组（header + 查询体）。
+ * 拆开后逐条喂给原 handler，再按顺序拼回 ES 的 `{responses: [...]}` 形状。
+ *
+ * 为什么不在各测试里各写一份：六个测试文件都有假 ES，逐个适配等于把
+ * 「合并请求」这件事散进测试——一处漏改就是假绿。
+ */
+async function replyMsearch(
+  captured: CapturedRequest,
+  res: ServerResponse,
+  handler: FakeHandler,
+  requests: CapturedRequest[],
+): Promise<void> {
+  const lines = captured.body.split('\n').filter((line) => line.trim() !== '')
+  const responses: unknown[] = []
+  for (let i = 0; i + 1 < lines.length; i += 2) {
+    let index = ''
+    try {
+      const header = JSON.parse(lines[i]!) as { index?: unknown }
+      index = typeof header.index === 'string' ? header.index : ''
+    } catch {
+      index = ''
+    }
+    const sub: CapturedRequest = {
+      ...captured,
+      method: 'POST',
+      path: `/${index}/_search`,
+      body: lines[i + 1] ?? '',
+    }
+    requests.push(sub)
+    const collector = createCollector()
+    await handler(sub, collector.res, i / 2 + 1)
+    const text = collector.text()
+    if (text.trim() === '') {
+      responses.push({ status: 200, hits: { total: 0, hits: [] } })
+      continue
+    }
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>
+      // handler 用 sendEsError 时会带 error：透传成 msearch 的单条 error 形态
+      responses.push(
+        typeof parsed.error === 'object' && parsed.error !== null
+          ? { status: collector.status(), error: parsed.error }
+          : parsed,
+      )
+    } catch {
+      responses.push({ status: collector.status(), error: { type: 'parse_exception', reason: text.slice(0, 120) } })
+    }
+  }
+  sendJson(res, 200, { responses })
 }

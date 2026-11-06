@@ -4,7 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ES_DIR="$ROOT/deploy/es"
+# 与 es-up.sh 一致：允许外部指定 ES_DIR（发行包 / 已装机器）
+ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 VER="${ES_VERSION:-8.19.23}"
 DEST="$ES_DIR/plugins/analysis-ik"
 URL="https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-$VER.zip"

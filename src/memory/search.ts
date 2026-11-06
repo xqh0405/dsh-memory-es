@@ -15,7 +15,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { Embedder } from '../embedding.ts'
-import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFilterOptions } from '../es/dsl.ts'
+import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFilterOptions, type SearchBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
@@ -67,6 +67,15 @@ export const PERSONAL_WEIGHT = 1.2
  */
 export interface ConfidenceConfig {
   floorTop1: number
+  /**
+   * 阶段 21：中间区下限（绝对分闸）。
+   *
+   * 0.6~autoPassTop1 这段原本只靠 margin/bm25 判断，而**闲聊恰好落在 0.72~0.74**：
+   * 2026-11-05 实测闲聊 top1 0.7227~0.7430、真相关 0.7920~0.8314（中间 0.049 空档），
+   * 但两者的 note 全是 ok —— margin 分不开它们。低于这条线直接判低置信，不再看区分度。
+   * 0 = 关闭（回到旧行为）。
+   */
+  midBandFloor: number
   autoPassTop1: number
   minMargin: number
   minBm25: number
@@ -83,6 +92,8 @@ export interface ConfidenceConfig {
  */
 export const DEFAULT_CONFIDENCE: ConfidenceConfig = {
   floorTop1: 0.6,
+  /** 与注入的 recallInject.minScore 同源（都是 2026-11-05 那批实测定出来的分界） */
+  midBandFloor: 0.76,
   autoPassTop1: 0.8,
   minMargin: 0.025,
   minBm25: 30,
@@ -97,7 +108,7 @@ export interface ConfidenceInput {
   bm25Top1: number
 }
 
-export type ConfidenceReason = 'ok' | 'narrow' | 'too-low' | 'no-vector'
+export type ConfidenceReason = 'ok' | 'narrow' | 'too-low' | 'mid-floor' | 'no-vector'
 
 /**
  * 分层置信判定（阶段 0.5，替代原来的单一 marginFloor）。
@@ -121,6 +132,12 @@ export function judgeConfidence(
 ): { low: boolean; reason: ConfidenceReason } {
   if (input.top1 === null) return { low: false, reason: 'no-vector' }
   if (input.top1 < cfg.floorTop1) return { low: true, reason: 'too-low' }
+  // 阶段 21：中间区下限。这一段 margin 不可靠——闲聊 top1 就落在 0.72~0.74，
+  // 与真相关（≥0.79）只差 0.05，而候选池一大 margin 就整体塌到 0.02 量级。
+  // 低于 midBandFloor 直接判低置信，不再看区分度；0 = 关闭。
+  if (cfg.midBandFloor > 0 && input.top1 < cfg.midBandFloor) {
+    return { low: true, reason: 'mid-floor' }
+  }
   if (input.top1 >= cfg.autoPassTop1) return { low: false, reason: 'ok' }
   // 只有一条候选时没有「区分度」可言：不能因为第二名不存在就判窄。
   // （否则库里只存了一条相关记忆时，查询永远被判低置信。）
@@ -190,7 +207,11 @@ export interface SearchDeps {
   personalPrefix: string
   teamIndex: string
   /** 读身份：检索一律走只读凭证 */
-  reader: Pick<EsClient, 'search'>
+  /**
+   * `msearch` 可选：生产环境总是有（真 EsClient），测试里的手写 fake 往往只实现 search。
+   * 有它就把四路召回合并成一次往返（阶段 20），没有就退回逐个 search——语义完全一致。
+   */
+  reader: Pick<EsClient, 'search'> & { msearch?: EsClient['msearch'] }
   /**
    * 阶段 6.3：当前心情（同步读缓存，不额外打 ES）。缺省 = 当没有情绪。
    * 传函数而不是值，是为了每次检索都拿到最新状态。
@@ -207,8 +228,13 @@ export interface SearchDeps {
   /**
    * 命中回写（热度信号）：必须给写身份。不给就不记，检索结果不受影响。
    * 用脚本 `+= 1`，并发检索时才不会丢更新。
+   *
+   * 阶段 20：`bulkUpdateScript` 可选——有它就一次 `_bulk` 写完（省 N-1 次往返），
+   * 没有就退回逐条 `updateScript`（语义相同，只是慢）。
    */
-  hitRecorder?: Pick<EsClient, 'updateScript'> | null
+  hitRecorder?:
+    | (Pick<EsClient, 'updateScript'> & { bulkUpdateScript?: EsClient['bulkUpdateScript'] })
+    | null
   /** 注入时钟（团队库兜底时间窗要用） */
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
@@ -403,35 +429,56 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   // 标识符（lot.bd_write_sync / class 名 / 主机名）单独走 content_exact 精确匹配加分；
   // IK 会把它们切碎，纯 BM25 分数压不住噪声（实测 13.9）。
   const identifiers = extractIdentifiers(query)
-  const tasks: Array<{ scope: Scope; route: 'bm25' | 'knn'; run: Promise<Hit[]> }> = []
+  // 先收集查询、不立即发：能一次 `_msearch` 就一次（阶段 20），没有 msearch 才逐条。
+  const queries: Array<{ scope: Scope; route: 'bm25' | 'knn'; index: string; body: SearchBody }> = []
 
-  const pushRoute = (target: Scope, indexName: string, targetMeta: MetaFilterOptions): void => {
-    tasks.push({
+  const pushQuery = (target: Scope, indexName: string, targetMeta: MetaFilterOptions): void => {
+    queries.push({
       scope: target,
       route: 'bm25',
-      run: deps.reader
-        .search(indexName, bm25Body(expandedQuery, targetMeta, topK, identifiers), { signal: deps.signal })
-        .then((r) => r.hits),
+      index: indexName,
+      body: bm25Body(expandedQuery, targetMeta, topK, identifiers),
     })
     if (vector) {
-      tasks.push({
+      queries.push({
         scope: target,
         route: 'knn',
-        run: deps.reader
-          .search(indexName, knnBody(vector, deps.dims, targetMeta, topK), { signal: deps.signal })
-          .then((r) => r.hits),
+        index: indexName,
+        body: knnBody(vector, deps.dims, targetMeta, topK),
       })
     }
   }
 
-  if (scope !== 'team') pushRoute('personal', personalIndex, meta)
+  if (scope !== 'team') pushQuery('personal', personalIndex, meta)
   if (scope !== 'personal') {
-    pushRoute('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
+    pushQuery('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
   }
 
   let settled: Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>
   try {
-    settled = await Promise.all(tasks.map(async (task) => ({ ...task, hits: await task.run })))
+    const msearch = deps.reader.msearch
+    if (msearch !== undefined && queries.length > 1) {
+      // 一次往返打完全部子查询。ES 允许 `_msearch` 跨索引，响应顺序与请求严格一致；
+      // 任一条失败会整体抛（见 http.ts 的 msearch），与逐条版「任一路出错就失败」同一语义。
+      const results = await msearch.call(
+        deps.reader,
+        queries.map((item) => ({ index: item.index, body: item.body })),
+        { signal: deps.signal },
+      )
+      settled = queries.map((item, index) => ({
+        scope: item.scope,
+        route: item.route,
+        hits: results[index]?.hits ?? [],
+      }))
+    } else {
+      settled = await Promise.all(
+        queries.map(async (item) => ({
+          scope: item.scope,
+          route: item.route,
+          hits: (await deps.reader.search(item.index, item.body, { signal: deps.signal })).hits,
+        })),
+      )
+    }
   } catch (err) {
     // 任一路 ES 出错就明确失败（§6.5）；不做“猜到一半结果”的降级
     log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
@@ -657,19 +704,41 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   if (deps.hitRecorder !== null && deps.hitRecorder !== undefined && topMerged.length > 0) {
     const stamp = now.toISOString()
     const recorder = deps.hitRecorder
-    void Promise.all(
-      topMerged.map((hit) => {
-        const index = hit.origin === 'team' ? deps.teamIndex : personalIndex
-        return recorder
-          .updateScript(index, hit.id, {
-            source: HIT_UPDATE_SCRIPT,
-            params: { now: stamp },
-          })
-          .catch((err: unknown) => {
+    const updates = topMerged.map((hit) => ({
+      index: hit.origin === 'team' ? deps.teamIndex : personalIndex,
+      id: hit.id,
+      script: { source: HIT_UPDATE_SCRIPT, params: { now: stamp } },
+    }))
+    if (typeof recorder.bulkUpdateScript === 'function') {
+      // 阶段 20：一次 `_bulk` 写完。部分失败只记一条汇总日志——回写是观测通道，
+      // 坏一条不该让整次检索失败，也不该刷 N 条日志把真错误淹掉。
+      void recorder
+        .bulkUpdateScript(updates)
+        .then((results) => {
+          const failed = results.filter((item) => !item.ok)
+          if (failed.length > 0) {
+            log({
+              tool: 'search',
+              event: 'hit_record_partial',
+              failed: failed.length,
+              total: results.length,
+              first_error: failed[0]?.error ?? '',
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          log({ tool: 'search', event: 'hit_record_degraded', error: formatEsError(err) })
+        })
+    } else {
+      // 没有 bulk 能力（测试里的手写 fake / 旧实现）：退回逐条，语义完全一致
+      void Promise.all(
+        updates.map((item) =>
+          recorder.updateScript(item.index, item.id, item.script).catch((err: unknown) => {
             log({ tool: 'search', event: 'hit_record_degraded', error: formatEsError(err) })
-          })
-      }),
-    )
+          }),
+        ),
+      )
+    }
   }
 
   // 低置信不再丢弃结果：返回 + 标注，让模型自己判断。
@@ -747,12 +816,12 @@ export function renderReceipts(receipts: readonly HitReceipt[]): string {
 }
 
 const DESCRIPTION = [
-  '查记忆库（个人 + 团队），混合检索：关键词与语义都能命中。',
-  '时机：动手前确认「这个项目以前怎么定的」；用户提到「之前说过 / 记过」；遇到似曾相识的报错。',
+  '按「一句事实」检索个人 + 团队记忆库：关键词与语义混合。',
+  '—— 该用我：动手前确认「以前怎么定的」；用户说「之前说过 / 记过」；遇到似曾相识的报错；需要某条具体的约定、口径、踩坑。',
+  '—— 别用我：找方案 / 复盘 / 开发文档这类长文（用 doc_search）；已知 memory_id 要读全文（用 memory_get）；还没查过就想存（先查再存，否则重复写会命中去重）。',
   '同一问题最多查一次，拿到结果就往前走；查不到就问人，不要凭印象编。',
-  '返回精简结果（正文截断 500 字，不带向量）。note=no_match 表示确实没有；',
-  'note=low_confidence 表示候选区分度偏低：结果仍会给出，但要谨慎采信。',
-  '想省 context 可传 detail=summary（只给摘要 + 120 字）；需要全文时用 memory_get 按 id 展开。',
+  '返回正文截断 500 字、不带向量。note 含义：ok 正常；no_match 确实没有；low_confidence 候选区分度不足（结果照给，但要谨慎采信）；degraded 向量不可用、本轮只走了关键词。',
+  '想省 context 传 detail=summary（摘要 + 120 字）；要全文用 memory_get 按 id 展开。',
 ].join(' ')
 
 /** 把编排封成模型可见的工具定义 */

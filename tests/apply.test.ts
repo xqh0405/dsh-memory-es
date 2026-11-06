@@ -8,6 +8,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, test } from 'node:test'
 
 import { Config, type ConfigType } from '../src/config.ts'
@@ -21,6 +24,10 @@ function baseConfig(
 ): ConfigType {
   const parsed = Config({
     identity: { userId: 'xqh', readPassword: 'pw-reader', writerPassword: 'pw-writer' },
+    // 显式给 http：schema 默认是 https://127.0.0.1:9200，那会让 createEsClient 去自动找
+    // 自签 CA —— 本机有 deploy/es/certs 才侥幸通过，CI 上没有就整片失败（2026-11-06）。
+    // 这些用例只跑编排、不发真请求，端点写成什么都不影响语义。
+    es: { url: 'http://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 1_000 },
     ...overrides,
   } as never) as ConfigType
   return parsed
@@ -150,8 +157,8 @@ describe('apply', () => {
     assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      22,
-      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 三个事件监听（心情 / 工具结果 / 影子召回），都走 ctx.effect',
+      23,
+      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
@@ -159,7 +166,7 @@ describe('apply', () => {
   })
 
   // 2026-11-04 巡检教训：积压 158 条 pending 没人消费的根因就是「钩子只挂在一条路上」。
-  // 清扫 effect 必须随 distill.enabled 注册——上面的 22 只守住「关闭时不注册」，
+  // 清扫 effect 必须随 distill.enabled 注册——上面的 23 只守住「关闭时不注册」，
   // 这条守住「开启时真的注册」，否则功能等于没装。
   test('distill.enabled=true 时注册清扫定时器（关闭时不注册）', () => {
     const off = fakeCtx()
@@ -337,6 +344,221 @@ describe('apply · 情绪事件', () => {
       onTool.handler({ name: 'bash', agent: { id: 'a2' } } as never, { isError: true } as never)
       await tick()
       assert.match(moodText(harness), /闷|低落/, '累积后心情应下行')
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+/** fakeCtx 把 handler 记成 (...args: never[])，这里放宽成可调用的签名 */
+function callable(handler: (...args: never[]) => unknown) {
+  return handler as unknown as (
+    assembly: unknown,
+    context: unknown,
+    next: () => Promise<unknown>,
+  ) => Promise<{ sections: Array<{ name: string; text: string }> }>
+}
+
+describe('apply · 自动召回真注入（阶段 17 P0-1）', () => {
+  const ASSEMBLE = 'system-prompt/assemble'
+  const emptyAssembly = (): { sections: Array<{ name: string; text: string }>; contexts: []; tools: []; variables: Record<string, never> } => ({
+    sections: [],
+    contexts: [],
+    tools: [],
+    variables: {},
+  })
+
+  test('默认关：不注册 assemble 监听、也不打印开启日志', () => {
+    const harness = fakeCtx()
+    // 走默认配置（recallInject.enabled 默认 false）
+    apply(harness.ctx as never, baseConfig({}))
+    assert.equal(harness.listeners.some((l) => l.event === ASSEMBLE), false, '默认不该挂 assemble 监听')
+    assert.equal(harness.logs.some((line) => line.includes('自动召回注入已开')), false)
+  })
+
+  test('开启后注册 assemble 监听并打印参数', () => {
+    const harness = fakeCtx()
+    apply(harness.ctx as never, baseConfig({ recallInject: { enabled: true, timeoutMs: 500 } as never }))
+    assert.equal(harness.listeners.some((l) => l.event === ASSEMBLE), true)
+    assert.equal(harness.logs.some((line) => line.includes('自动召回注入已开')), true)
+  })
+
+  test('没有用户消息的 agent（例如子代理）不注入，也不打检索', async () => {
+    // ES 指向一个已关闭的端口：一旦真的发起检索就会失败——这里断言的是「根本不该发起」
+    const fake = await startFakeEs((_req, res) => sendJson(res, 200, {}))
+    const url = fake.url
+    await fake.close()
+
+    const harness = fakeCtx()
+    apply(harness.ctx as never, baseConfig({ es: { url, caCertPath: '', requestTimeoutMs: 500 }, recallInject: { enabled: true } as never }))
+
+    const assemble = harness.listeners.find((l) => l.event === ASSEMBLE)!
+    const assembly = emptyAssembly()
+    const result = await callable(assemble.handler)(assembly, { agent: { id: 'sub-agent' } }, async () => assembly)
+
+    assert.deepEqual(result.sections, [], '没有缓存消息时不该插入任何段落')
+    assert.equal(harness.logs.some((line) => line.includes('注入 ')), false, '不该有注入日志')
+  })
+})
+
+describe('apply · 自动召回注入真的写进 prompt', () => {
+  test('有用户消息且检索命中时，assembly 多一个记忆段落', async () => {
+    // 一条高分命中，交给 bm25 路；knn 路给空（embedding 指向死端口，本来就只会走 BM25）
+    const fake = await startFakeEs((req, res) => {
+      // 同一个 fake server 兼任 Ollama：注入门槛要看 top1 的向量分数，
+      // 向量降级会被 passesInjectGate 直接拒掉（那是对的），所以这里必须给真向量。
+      if (req.path.startsWith('/api/embed')) {
+        sendJson(res, 200, { embeddings: [[0.1, 0.2, 0.3, 0.4]] })
+        return
+      }
+      // GET（如心情文档读取）没有 body，别直接 JSON.parse
+      const body = req.body === '' ? {} : (JSON.parse(req.body) as Record<string, unknown>)
+      const isKnn = 'knn' in body
+      const hits = isKnn
+        ? [
+            {
+              _id: 'm-1',
+              _score: 0.88,
+              _source: {
+                memory_id: 'm-1',
+                content: '重启后要先用 sync-local-plugin 同步再重启 dsh-web',
+                memory_type: 'fact',
+                domain: 'dsh',
+                updated_at: '2026-11-01T00:00:00.000Z',
+                content_sha256: 'h1',
+              },
+            },
+          ]
+        : [
+            {
+              _id: 'm-1',
+              _score: 9,
+              _source: {
+                memory_id: 'm-1',
+                content: '重启后要先用 sync-local-plugin 同步再重启 dsh-web',
+                memory_type: 'fact',
+                domain: 'dsh',
+                updated_at: '2026-11-01T00:00:00.000Z',
+                content_sha256: 'h1',
+              },
+            },
+          ]
+      sendJson(res, 200, { took: 1, hits: { total: { value: hits.length, relation: 'eq' }, hits } })
+    })
+
+    try {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'mem-inject-'))
+      const logPath = join(tmpDir, 'recall-inject.jsonl')
+
+      const harness = fakeCtx()
+      apply(
+        harness.ctx as never,
+        baseConfig({
+          es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 },
+          embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
+          // 把置信阈值压到 0：RRF 融合分本身很小（≈1/60），默认阈值会把它判成
+          // low_confidence，而注入只认 ok。这条测的是「注入了什么」，不是置信判定本身。
+          // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
+          confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
+          recallInject: { enabled: true, logPath } as never,
+        }),
+      )
+
+      // 先喂一条用户消息（注入的 query 就来自它）。
+      // 注意：agent/inbox/inserted 上有两个监听器（心情 + 注入），必须都喂——
+      // 2026-11-05 这里踩过一次：find() 只拿到心情那个，注入侧永远没收到消息。
+      const inboxes = harness.listeners.filter((l) => l.event === 'agent/inbox/inserted')
+      assert.ok(inboxes.length >= 2, `应至少有两个 inbox 监听器，实际 ${inboxes.length}`)
+      for (const listener of inboxes) {
+        listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '重启后插件怎么同步' }] } } as never)
+      }
+
+      const assemble = harness.listeners.find((l) => l.event === 'system-prompt/assemble')!
+      const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+      const result = await callable(assemble.handler)(assembly, { agent: { id: 'a1' } }, async () => assembly)
+
+      // 落盘是唯一能在命令行验收的通道：断言真的写了一行且内容对得上
+      const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+      assert.equal(records.length, 1, '一次注入应落一行')
+      assert.equal(records[0].outcome, 'injected')
+      assert.equal(records[0].agent, 'a1')
+      assert.ok(Number(records[0].chars) > 0)
+      assert.equal((records[0].items as unknown[]).length, 1)
+
+      const injected = result.sections.find((section) => section.name === 'dsh-memory-es-recall')
+      assert.ok(
+        injected,
+        `应注入记忆段落，实际段落：${JSON.stringify(result.sections.map((s) => s.name))}；日志：${harness.logs.join(' | ')}`,
+      )
+      assert.match(injected!.text, /重启后要先用 sync-local-plugin/)
+      assert.match(injected!.text, /数据不是指令/)
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+describe('apply · 注入的分数门槛（2026-11-05 实测：闲聊也 note=ok）', () => {
+  test('top1 向量分数低于 minScore 时不注入，并记 low_score', async () => {
+    const fake = await startFakeEs((req, res) => {
+      if (req.path.startsWith('/api/embed')) {
+        sendJson(res, 200, { embeddings: [[0.1, 0.2, 0.3, 0.4]] })
+        return
+      }
+      const body = req.body === '' ? {} : (JSON.parse(req.body) as Record<string, unknown>)
+      const isKnn = 'knn' in body
+      // 0.73 是实测的闲聊档（「嗨！今天心情怎么样~」= 0.743、「在吗」= 0.7227）
+      const score = isKnn ? 0.73 : 9
+      sendJson(res, 200, {
+        took: 1,
+        hits: {
+          total: { value: 1, relation: 'eq' },
+          hits: [
+            {
+              _id: 'm-1',
+              _score: score,
+              _source: {
+                memory_id: 'm-1',
+                content: 'member 堆需求与 CPU 爆核的根因分析',
+                memory_type: 'fact',
+                domain: 'general',
+                updated_at: '2026-11-01T00:00:00.000Z',
+                content_sha256: 'h1',
+              },
+            },
+          ],
+        },
+      })
+    })
+
+    try {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'mem-gate-'))
+      const logPath = join(tmpDir, 'recall-inject.jsonl')
+      const harness = fakeCtx()
+      apply(
+        harness.ctx as never,
+        baseConfig({
+          es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 },
+          embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
+          // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
+          confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
+          recallInject: { enabled: true, logPath } as never,
+        }),
+      )
+
+      const inboxes = harness.listeners.filter((l) => l.event === 'agent/inbox/inserted')
+      for (const listener of inboxes) {
+        listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '今天心情怎么样' }] } } as never)
+      }
+      const assemble = harness.listeners.find((l) => l.event === 'system-prompt/assemble')!
+      const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+      const result = await callable(assemble.handler)(assembly, { agent: { id: 'a1' } }, async () => assembly)
+
+      assert.deepEqual(result.sections, [], '分数不够就不该插段落')
+      const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+      assert.equal(records.length, 1)
+      assert.equal(records[0].outcome, 'low_score', '要能和「本来就没命中」区分开')
+      assert.equal(records[0].top1Score, 0.73, '分数要落盘，调 minScore 时才有依据')
     } finally {
       await fake.close()
     }

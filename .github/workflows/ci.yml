@@ -43,3 +43,10 @@ jobs:
 
       - name: 单测
         run: npm test
+
+      # 契约闸门·离线层：不连 ES，只校验契约文件与基线有没有腐化
+      # （语法错 / id 重复 / 恒真契约 / must 被降级 / 基线漂移）。
+      # 真实召回质量仍是 `npm run eval:contracts:gate`，它按 memory_id 命中真实记忆，
+      # 只能在能连 ES 的内网环境跑——这台 runner 没有索引，也不该有。
+      - name: 契约静态闸
+        run: npm run check:contracts
