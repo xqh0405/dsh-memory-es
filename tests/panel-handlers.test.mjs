@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction, summarizeInjectRecords } = await import(
+const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction, summarizeInjectRecords, handleInjectLog } = await import(
   '../panel/index.js'
 )
 
@@ -1097,4 +1097,23 @@ test('summarizeInjectRecords：空输入不产生 NaN', () => {
   assert.equal(stats.injectedRate, 0)
   assert.equal(stats.avgItems, 0)
   assert.equal(stats.avgMs, 0)
+})
+
+
+test('handleInjectLog 必须包在 { ok, value } 里（前端 apiGet 取的是 body.value）', async () => {
+  // 2026-11-06 踩过：直接摊开 { ok, stats, records } 时，前端拿到 data=undefined，
+  // 页面只剩一行说明、一个数都不显示，而接口本身是 200 —— 光看网络面板看不出来。
+  const res = {
+    status: 0,
+    body: '',
+    writeHead(status) { this.status = status },
+    end(chunk) { this.body = chunk },
+  }
+  await handleInjectLog({}, res, new URL('http://localhost/inject-log?limit=3'))
+  const body = JSON.parse(res.body)
+  assert.equal(res.status, 200)
+  assert.equal(body.ok, true)
+  assert.ok(Object.prototype.hasOwnProperty.call(body, 'value'), '响应必须带 value 包络')
+  assert.ok(body.value && typeof body.value === 'object')
+  assert.ok(Object.prototype.hasOwnProperty.call(body.value, 'stats'), 'value.stats 必须存在（哪怕为空统计）')
 })

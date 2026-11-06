@@ -942,8 +942,14 @@ async function handleInjectLog(_ctx, res, url) {
   const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '30', 10)
   const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 30))
   const file = join(DSH_HOME, 'memory-es', 'recall-inject.jsonl')
+  // ⚠️ 面板 API 的统一包络是 `{ ok, value }`，前端 apiGet 取的是 body.value。
+  // 这里若直接摊开字段（`{ ok, stats, records }`），`data` 会是 undefined，
+  // 页面只剩一行说明、什么数都不显示（2026-11-06 就这样白查了一轮）。
   if (!existsSync(file)) {
-    return json(res, 200, { ok: true, exists: false, path: file, records: [], stats: summarizeInjectRecords([]) })
+    return json(res, 200, {
+      ok: true,
+      value: { exists: false, path: file, records: [], stats: summarizeInjectRecords([]) },
+    })
   }
   const records = []
   for (const line of readTailText(file, 512 * 1024).split('\n')) {
@@ -957,10 +963,12 @@ async function handleInjectLog(_ctx, res, url) {
   }
   return json(res, 200, {
     ok: true,
-    exists: true,
-    // 统计按全部读到的记录算，明细只回尾部 limit 条（新的在前）
-    stats: summarizeInjectRecords(records),
-    records: records.slice(-limit).reverse(),
+    value: {
+      exists: true,
+      // 统计按全部读到的记录算，明细只回尾部 limit 条（新的在前）
+      stats: summarizeInjectRecords(records),
+      records: records.slice(-limit).reverse(),
+    },
   })
 }
 
@@ -3351,6 +3359,7 @@ export {
   admitRequest,
   summarizeInjectRecords,
   readTailText,
+  handleInjectLog,
   applyConfigChanges,
   coerceFieldValue,
   fieldTypeOf,
