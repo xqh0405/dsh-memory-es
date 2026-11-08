@@ -25,3 +25,14 @@ describe('配置默认值', () => {
     assert.equal(prewarm.maxEntries, 64)
   })
 })
+describe('阶段 28 文档库配置', () => {
+  test('doc.limitBytes 默认 10 MiB（与 mnemon Documents 同口径）', () => {
+    const cfg = Config({} as never)
+    assert.equal(cfg.doc.limitBytes, 10 * 1024 * 1024)
+  })
+
+  test('doc.limitBytes=0 合法，表示不限', () => {
+    const cfg = Config({ doc: { limitBytes: 0 } } as never)
+    assert.equal(cfg.doc.limitBytes, 0)
+  })
+})

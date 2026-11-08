@@ -23,6 +23,12 @@ const PROJECT_SNIPPET_CHARS = 600
 /** 阶段 23 分级读取：summary 时每个片段只给这么多字（只够判断「是不是这篇」） */
 const SUMMARY_SNIPPET_CHARS = 120
 
+/**
+ * 阶段 28：命中回写的 painless 脚本。只动 `last_accessed_at` 一个字段——
+ * 回写不碰检索用到的任何字段，所以不会因为并发写把内容改坏。
+ */
+const DOC_HIT_SCRIPT = 'ctx._source.last_accessed_at = params.now'
+
 export interface DocSearchInput {
   query: string
   domain?: string[]
@@ -40,6 +46,15 @@ export interface DocSearchDeps {
   /** 文档索引前缀，实际索引 = 前缀 + userId */
   docPrefix: string
   reader: Pick<EsClient, 'search'>
+  /**
+   * 阶段 28：命中回写 `last_accessed_at`（热度）。可选——不给就不记。
+   * 有 `bulkUpdateScript` 时一次 `_bulk` 写完，否则退回逐条 `updateScript`。
+   * **失败只记日志**：热度是观测信号，不能因为它挂了把检索一起弄失败
+   * （与 `search.ts` 的 hitRecorder 同一条纪律）。
+   */
+  writer?:
+    | (Pick<EsClient, 'updateScript'> & { bulkUpdateScript?: EsClient['bulkUpdateScript'] })
+    | null
   embed?: Pick<Embedder, 'embed'> | null
   /** 索引 mapping 的向量维度；与 embedder 输出不一致时抛错（换模型必须重建索引） */
   dims: number
@@ -155,6 +170,48 @@ export async function searchDocs(deps: DocSearchDeps, input: DocSearchInput): Pr
 
   const hits = await Promise.all(routes)
   const fused = rrfFuse(hits, deps.retrieval.rrfK)
+
+  // 阶段 28：命中回写热度。fire-and-forget，失败只记日志——
+  // 热度是观测信号，它的可用性不该拖累检索（与 search.ts 的命中回写同一纪律）。
+  // 回写 fused（本次检索的命中候选），不是最终截断后的那几条：热度记的是
+  // 「检索路径碰过它」，埋点口径要看的是命中面，不是展示面。
+  if (deps.writer !== null && deps.writer !== undefined && fused.length > 0) {
+    const stamp = new Date().toISOString()
+    const writer = deps.writer
+    const updates = fused.map((f) => ({
+      index,
+      id: f.id,
+      script: { source: DOC_HIT_SCRIPT, params: { now: stamp } },
+    }))
+    if (typeof writer.bulkUpdateScript === 'function') {
+      void writer
+        .bulkUpdateScript(updates)
+        .then((results) => {
+          const failed = results.filter((item) => !item.ok)
+          if (failed.length > 0) {
+            log({
+              tool: 'doc_search',
+              event: 'doc_hit_record_partial',
+              failed: failed.length,
+              total: results.length,
+              first_error: failed[0]?.error ?? '',
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          log({ tool: 'doc_search', event: 'doc_hit_record_degraded', error: String(err).slice(0, 200) })
+        })
+    } else {
+      // 没有 bulk 能力（测试里的手写 fake / 旧实现）：退回逐条，语义一致
+      void Promise.all(
+        updates.map((item) =>
+          writer.updateScript(item.index, item.id, item.script).catch((err: unknown) => {
+            log({ tool: 'doc_search', event: 'doc_hit_record_degraded', error: String(err).slice(0, 200) })
+          }),
+        ),
+      )
+    }
+  }
 
   // 按 doc_id 聚合：同一篇的多个 chunk 合并成一条，取最相关的片段做摘要
   const perDoc = new Map<

@@ -318,6 +318,8 @@ export function apply(ctx: Context, config: ConfigType): void {
           userId,
           docPrefix: config.index.docPrefix,
           reader,
+          // 阶段 28：命中回写 last_accessed_at 的热度；失败静默（doc-search 内部处理）
+          writer,
           embed,
           dims: config.embedding.dims,
           retrieval,

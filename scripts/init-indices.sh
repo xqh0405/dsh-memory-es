@@ -168,6 +168,57 @@ put_index team_knowledge <<'JSON'
 }
 JSON
 
+# ── 文档库模板（personal_doc_*，阶段 28）────────────────────────────
+# ⚠️ 这个模板在 2026-11-08 之前**只存在于线上、仓库里没有任何脚本管它**——
+# 也就是「重装即丢」：新装的 ES 上 personal_doc_* 没有模板，doc_search 一写就
+# 撞 strict mapping（或者 ES 自动推断出不可控的类型）。28 顺手补上。
+#
+# 阶段 28 新增两字段：
+#   · status           —— active / archived。归档后默认不进检索（29 用它做冷热分层）。
+#   · last_accessed_at —— 每次检索命中后回写（bulk，失败静默）。它撑起「热度」与
+#                         将来的 LRU 归档；空表示「入库后还没被用过」。
+es -X PUT "$ES/_index_template/personal_doc_template" -d @- >/dev/null <<'JSON'
+{
+  "index_patterns": ["personal_doc_*"],
+  "priority": 100,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "doc_id":            { "type": "keyword" },
+        "user_id":           { "type": "keyword" },
+        "chunk_index":       { "type": "integer" },
+        "chunk_total":       { "type": "integer" },
+
+        "title":             { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "title_keyword":     { "type": "keyword" },
+        "content":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "description":       { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "section_path":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
+        "tags":              { "type": "keyword" },
+        "domain":            { "type": "keyword" },
+        "source":            { "type": "keyword" },
+        "source_path":       { "type": "keyword" },
+        "source_paths":      { "type": "keyword" },
+        "content_sha256":    { "type": "keyword" },
+        "embedding":         { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
+
+        "status":            { "type": "keyword" },
+        "last_accessed_at":  { "type": "date" },
+
+        "created_at":        { "type": "date" },
+        "updated_at":        { "type": "date" }
+      }
+    }
+  }
+}
+JSON
+
 # ── 共享审计库（memory_audit）────────────────────────────────────
 # 以前只由 migrate-s9.sh 创建，于是「全新装机」这条路上它是缺的：第一次晋升/驳回写不进去
 # （ES 会自动建一个 dynamic 映射的索引，字段类型不可控）。开箱路径必须自己建它。

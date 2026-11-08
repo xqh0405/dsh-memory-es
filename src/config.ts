@@ -106,6 +106,11 @@ export interface ConfigType {
     /** 按域覆盖；未命中的域回落到 `write` */
     perDomain: Record<string, WriteMode>
   }
+  /** 阶段 28：文档库的容量与热度口径 */
+  doc: {
+    /** 文档库容量上限（字节）；0 = 不限。只计 `status=active`（与 mnemon Documents 同口径） */
+    limitBytes: number
+  }
   /** 写入时建边（阶段 5.2） */
   edges: {
     enabled: boolean
@@ -371,6 +376,17 @@ export const Config: z<ConfigType> = z.object({
         '按域覆盖写开关，如 { "huoxin-data": "readonly" }；未命中的域回落到 write。'
         + '只在「通知类」domain 上试用，别整片关——那会让人以为插件坏了。',
       ),
+  }),
+  /**
+   * 阶段 28：文档库容量与热度。
+   *
+   * 默认 10 MiB 是**照抄 mnemon Documents 的口径**（那边也是 10 MiB、只计 active）——
+   * 同一个概念用同一个默认值，省得以后两边对不上。0 = 不限（给「先观察一阵再说」的部署）。
+   * 注意：这个上限目前**只用于统计与面板提示**，超限拒写在阶段 29 随归档一起做。
+   */
+  doc: z.object({
+    limitBytes: z.number().step(1).min(0).default(10 * 1024 * 1024)
+      .description('文档库容量上限（字节），0 = 不限；只计 status=active。默认 10 MiB（与 mnemon Documents 一致）。'),
   }),
   /**
    * 阶段 5.2：写入时给记忆建边。
