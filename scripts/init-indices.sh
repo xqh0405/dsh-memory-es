@@ -147,6 +147,7 @@ put_index team_knowledge <<'JSON'
       "hit_count":         { "type": "integer" },
       "last_hit_at":       { "type": "date" },
       "superseded_at":     { "type": "date" },
+      "related":           { "type": "object", "enabled": false },
 
       "source_user":       { "type": "keyword" },
       "source_memory_id":  { "type": "keyword" },
