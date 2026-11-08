@@ -156,6 +156,9 @@ export function apply(ctx: Context, config: ConfigType): void {
           userId,
           personalPrefix,
           defaultDomain: config.defaults.domain,
+          // 阶段 24：写开关（全局 + 按域覆盖）；闸在 saveMemory 里，内部调用也过
+          writeMode: config.governance.write,
+          writeModeByDomain: config.governance.perDomain,
           reader,
           writer,
           embed,

@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 
 // 置信阈值的唯一来源在 search.ts（实现与默认值放在一起，避免两处漂移）
 import { DEFAULT_CONFIDENCE } from './memory/search.ts'
+import type { WriteMode } from './memory/save.ts'
 import { DEFAULT_RANKING } from './fragment.ts'
 
 export interface ConfigType {
@@ -98,6 +99,12 @@ export interface ConfigType {
   }
   defaults: {
     domain: string
+  }
+  /** 阶段 24：治理开关包（本轮只做写开关） */
+  governance: {
+    write: WriteMode
+    /** 按域覆盖；未命中的域回落到 `write` */
+    perDomain: Record<string, WriteMode>
   }
   /** 写入时建边（阶段 5.2） */
   edges: {
@@ -343,6 +350,27 @@ export const Config: z<ConfigType> = z.object({
   defaults: z.object({
     domain: z.string().default('general')
       .description('memory_save 未显式给 domain 时的缺省值；建议按项目填（如 lottery-cloud）。'),
+  }),
+  /**
+   * 阶段 24：治理开关包。本轮只做「写开关」——敏感硬黑名单、域外只回清单、
+   * 被拒留痕三项按路线 24.2 的 2026-11-08 调整推迟（现状 ES 写入量太低，做了是空转）。
+   *
+   * 为什么默认 `on`：这是**刹车不是默认限速**。默认关会让「装完不能存」变成第一印象；
+   * 要只读的场景（接手别人的库、改数据前观察）显式配 readonly 就行。
+   */
+  governance: z.object({
+    write: z.union([z.const('on'), z.const('readonly'), z.const('off')]).default('on')
+      .description(
+        '写入开关。on=正常；readonly=拒绝 memory_save 并返回明确原因（检索照常）；'
+        + 'off=彻底关闭写入（语义同 readonly，保留给「停机维护」这种更强表态）。'
+        + '挡在 saveMemory 里，所以导入/蒸馏回写/将来的 pinned 写入都走同一道闸。',
+      ),
+    perDomain: z.dict(z.union([z.const('on'), z.const('readonly'), z.const('off')]))
+      .default({})
+      .description(
+        '按域覆盖写开关，如 { "huoxin-data": "readonly" }；未命中的域回落到 write。'
+        + '只在「通知类」domain 上试用，别整片关——那会让人以为插件坏了。',
+      ),
   }),
   /**
    * 阶段 5.2：写入时给记忆建边。

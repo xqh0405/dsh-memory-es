@@ -110,6 +110,9 @@ export interface SaveResult {
   text: string
 }
 
+/** 阶段 24：写入模式。`on` 正常；`readonly` / `off` 拒绝一切写入。 */
+export type WriteMode = 'on' | 'readonly' | 'off'
+
 /** 建边配置（阶段 5.2）。缺省 = 不建边。 */
 export interface EdgeWriteConfig {
   enabled: boolean
@@ -138,6 +141,16 @@ export interface SimilarConfig {
 }
 
 export interface SaveDeps {
+  /**
+   * 阶段 24：写开关。`on`（缺省）正常写；`readonly` / `off` 一律拒绝。
+   *
+   * 闸放在 `saveMemory` 而不是工具层，是因为走这个函数的入口不止 `memory_save`：
+   * 导入脚本、蒸馏回写、将来的 pinned 写入都要过同一道闸。只在工具描述层拦，
+   * 等于给内部调用留后门。
+   */
+  writeMode?: WriteMode
+  /** 阶段 24：按域覆盖写开关；`saveMemory` 用 `input.domain ?? defaultDomain` 查表 */
+  writeModeByDomain?: Record<string, WriteMode>
   /**
    * 写入成功后触发（**不要 await**）：插件层用它排队后台蒸馏。
    * save 必须立刻返回——蒸馏是"事后整理"，不能把入库卡在模型上。
@@ -401,6 +414,30 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   const newId = deps.newId ?? randomUUID
   const log = deps.log ?? (() => {})
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
+
+  // 阶段 24：写开关在最前面挡——放在 buildMemoryDoc 之前，避免白算 sha 与校验，
+  // 更避免「拒绝了但还是打了一次 ES 去重查询」。
+  // 返回 rejected 而不是抛错：模型能看到一句明确的话（与「静默丢弃」相对），
+  // 调用方也能按 status 分流，不用靠 catch 猜。
+  // 按域覆盖优先：查不到就回落全局，再缺省 on。
+  const domainForMode = input.domain ?? deps.defaultDomain
+  const writeMode: WriteMode =
+    deps.writeModeByDomain?.[domainForMode] ?? deps.writeMode ?? 'on'
+  if (writeMode !== 'on') {
+    log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, rejected: writeMode })
+    return {
+      status: 'rejected',
+      memory_id: '',
+      deduped: false,
+      degraded: false,
+      quarantined: false,
+      reason: `写入已关闭（governance.write=${writeMode}）`,
+      text:
+        writeMode === 'readonly'
+          ? '当前是只读模式（governance.write=readonly），这条没有写入。要写入请把 governance.write 改回 on。'
+          : '写入已彻底关闭（governance.write=off），这条没有写入。',
+    }
+  }
 
   // 先算一遍拿到 sha 与校验（也会在这里拦空内容/超长），再决定是否去重
   const probe = buildMemoryDoc(input, deps, { now, memoryId: newId(), embedding: null })
