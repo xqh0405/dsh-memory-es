@@ -110,6 +110,11 @@ export interface ConfigType {
   doc: {
     /** 文档库容量上限（字节）；0 = 不限。只计 `status=active`（与 mnemon Documents 同口径） */
     limitBytes: number
+    /**
+     * 阶段 29：超限时是否自动按 `last_accessed_at` 最旧优先归档。
+     * **默认 false**——自动归档会改变「搜得到什么」却不经过人，与「护栏优先」相违。
+     */
+    autoArchive: boolean
   }
   /** 写入时建边（阶段 5.2） */
   edges: {
@@ -387,6 +392,11 @@ export const Config: z<ConfigType> = z.object({
   doc: z.object({
     limitBytes: z.number().step(1).min(0).default(10 * 1024 * 1024)
       .description('文档库容量上限（字节），0 = 不限；只计 status=active。默认 10 MiB（与 mnemon Documents 一致）。'),
+    autoArchive: z.boolean().default(false)
+      .description(
+        '超限时自动归档（按 last_accessed_at 最旧优先）。默认 false：自动归档会在人不知情的情况下'
+        + '改变「搜得到什么」。要开就在面板上先看一轮候选再决定。',
+      ),
   }),
   /**
    * 阶段 5.2：写入时给记忆建边。

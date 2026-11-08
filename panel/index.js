@@ -2901,6 +2901,126 @@ async function handleMaintenanceGet(ctx, res, url) {
 }
 
 /** POST /maintenance/consolidate：跑一次整理（默认 dry-run） */
+/**
+ * 阶段 29：文档归档 / 恢复（管理动作，只改 status 位，不删数据）。
+ *
+ * 为什么放在面板而不是只做 CLI：归档是「清容量」的日常动作，管理员看到容量满了
+ * 应该能直接处理，而不是先 ssh 上去跑脚本。
+ *
+ * 冷引用由面板**直写** personal_memory（不走 saveMemory）：
+ * 面板没有 embedding 服务，走 saveMemory 会强制降级还要占一次向量调用；
+ * 而冷引用的正文是我们自己拼的（标题 + doc_id + 源文件），不是用户/模型自由输入，
+ * 不存在「需要准入过滤」的内容。origin 标 `tool`，与正常写入区分得开。
+ */
+async function setDocStatus(ctx, res, body, nextStatus) {
+  const input = body.value ?? {}
+  const docId = str(input.docId).trim()
+  if (docId === '') return json(res, 400, { ok: false, error: '缺少 docId（文档的 doc_id，不是切片 _id）' })
+
+  const config = requireAdmin(ctx, res)
+  if (!config) return
+  const names = indexNames(config)
+  const client = createReadClient(() => resolveClientConfig(ctx))
+
+  // 该 doc_id 的**全部切片**一起改：只改一部分会让同一篇文档一半出现一半消失
+  const found = await client.search(names.docs, {
+    size: 1000,
+    _source: ['doc_id', 'title', 'domain', 'source_path', 'source_paths', 'chunk_total'],
+    query: { term: { doc_id: docId } },
+  })
+  const hits = found.hits?.hits ?? []
+  if (hits.length === 0) {
+    return json(res, 404, { ok: false, error: `文档不存在：doc_id=${docId}（索引 ${names.docs}）` })
+  }
+
+  const src = hits[0]._source ?? {}
+  const title = str(src.title) || docId
+  const domain = str(src.domain) || 'general'
+  const paths = Array.isArray(src.source_paths)
+    ? src.source_paths.map(String)
+    : str(src.source_path) !== ''
+      ? [str(src.source_path)]
+      : []
+  const chunkTotal = typeof src.chunk_total === 'number' ? src.chunk_total : hits.length
+
+  let changed = 0
+  const failures = []
+  for (const hit of hits) {
+    try {
+      await client.update(names.docs, hit._id, { status: nextStatus })
+      changed++
+    } catch (error) {
+      failures.push(`${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
+    }
+  }
+  if (changed === 0) {
+    return json(res, 500, { ok: false, error: `一条都没改成功：${failures[0] ?? '未知原因'}` })
+  }
+
+  const now = new Date().toISOString()
+  let coldMemoryId = ''
+  let note = ''
+  if (nextStatus === 'archived') {
+    // 归档必须先留冷引用，否则「归档」等于「失踪」
+    const reason = str(input.reason).trim()
+    const content =
+      `【已归档文档】${title}\n`
+      + `doc_id: ${docId}\n`
+      + `切片 ${chunkTotal} 个已归档，日常检索不再出现。`
+      + `需要正文时用 doc_search 加 includeArchived=true 按 doc_id 查。`
+      + (paths.length > 0 ? `\n源文件：${paths.join('、')}` : '')
+      + (reason !== '' ? `\n归档原因：${reason}` : '')
+    coldMemoryId = `coldref-${docId.slice(0, 8)}-${Date.now().toString(36)}`
+    try {
+      await client.index(names.personal, {
+        memory_id: coldMemoryId,
+        user_id: config.identity.userId,
+        content,
+        memory_type: 'context',
+        domain,
+        importance: 'normal',
+        status: 'active',
+        privacy: 'normal',
+        origin: 'tool',
+        promote_state: 'none',
+        distill_state: 'skipped',
+        created_at: now,
+        updated_at: now,
+      }, { id: coldMemoryId, refresh: 'wait_for' })
+    } catch (error) {
+      // 归档已完成，冷引用失败只提示——不回滚状态（回滚会变成半成品归档）
+      note = `冷引用写入失败：${String(error?.message ?? error).slice(0, 120)}`
+      coldMemoryId = ''
+    }
+  }
+
+  json(res, 200, {
+    ok: true,
+    value: {
+      docId,
+      title,
+      status: nextStatus,
+      chunks: changed,
+      total: hits.length,
+      failures,
+      coldMemoryId,
+      note,
+    },
+  })
+}
+
+async function handleDocArchive(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  return setDocStatus(ctx, res, body, 'archived')
+}
+
+async function handleDocRestore(ctx, res, req) {
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  return setDocStatus(ctx, res, body, 'active')
+}
+
 async function handleConsolidate(ctx, res, req) {
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
@@ -2971,6 +3091,9 @@ async function handle(ctx, req, res) {
     const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw)$/.exec(path)
     if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
     if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
+    // 阶段 29：文档归档 / 恢复（只改 status 位，不删数据）
+    if (path === '/maintenance/doc-archive' && req.method === 'POST') return await handleDocArchive(ctx, res, req)
+    if (path === '/maintenance/doc-restore' && req.method === 'POST') return await handleDocRestore(ctx, res, req)
     if (path === '/maintenance' && req.method === 'GET') return await handleMaintenanceGet(ctx, res, url)
     if (path === '/maintenance/mirror' && req.method === 'GET') return await handleMirrorFile(ctx, res, url)
     if (path === '/facets' && req.method === 'GET') return await handleFacets(ctx, res)
@@ -3378,6 +3501,8 @@ export {
   handleCapabilities,
   handleConsolidate,
   handleDeleteMemory,
+  handleDocArchive,
+  handleDocRestore,
   buildGraph,
   handleExport,
   handleGraph,

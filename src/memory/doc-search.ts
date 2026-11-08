@@ -31,6 +31,11 @@ const DOC_HIT_SCRIPT = 'ctx._source.last_accessed_at = params.now'
 
 export interface DocSearchInput {
   query: string
+  /**
+   * 阶段 29：连归档文档一起查。缺省 false = 只查 active
+   * （归档的意义就是退出日常检索；要找回时才显式深查）。
+   */
+  includeArchived?: boolean
   domain?: string[]
   limit?: number
   /**
@@ -93,7 +98,19 @@ function clampLimit(requested: number | undefined, fallback: number): number {
  * 不用 dsl.ts 的 bm25Body —— 那个按「记忆」的字段（memory_type/status）构造过滤，
  * 文档索引里没有这些字段，套上去会静默筛成 0 条。
  */
-function docBm25Body(query: string, domain: string[] | undefined, topK: number) {
+/**
+ * 阶段 29：默认只查 active。归档的意义就是「不再出现在日常检索里」——
+ * 如果默认还查得到，「归档」只是给文档贴了个标签。
+ * `includeArchived` 时**完全不加 status 条件**（不是 status: [active, archived]）：
+ * 后者会让本来没有 status 字段的老文档永远漏掉。
+ */
+function docStatusFilter(includeArchived: boolean): Record<string, unknown>[] {
+  return includeArchived ? [] : [{ term: { status: 'active' } }]
+}
+
+function docBm25Body(query: string, domain: string[] | undefined, topK: number, includeArchived: boolean) {
+  const filter: Record<string, unknown>[] = [...docStatusFilter(includeArchived)]
+  if (domain && domain.length > 0) filter.push({ terms: { domain } })
   return {
     size: topK,
     _source: { excludes: ['embedding'] },
@@ -107,17 +124,25 @@ function docBm25Body(query: string, domain: string[] | undefined, topK: number) 
             },
           },
         ],
-        ...(domain && domain.length > 0 ? { filter: [{ terms: { domain } }] } : {}),
+        ...(filter.length > 0 ? { filter } : {}),
       },
     },
   }
 }
 
 /** 向量路：knn.filter 没有条件时**整个字段都不给**（传 null 会 400） */
-function docKnnBody(vector: readonly number[], dims: number, domain: string[] | undefined, topK: number) {
+function docKnnBody(
+  vector: readonly number[],
+  dims: number,
+  domain: string[] | undefined,
+  topK: number,
+  includeArchived: boolean,
+) {
   if (vector.length !== dims) {
     throw new Error(`doc_search: 向量维度 ${vector.length} 与索引 dims ${dims} 不一致（换模型必须重建索引）`)
   }
+  const filter: Record<string, unknown>[] = [...docStatusFilter(includeArchived)]
+  if (domain && domain.length > 0) filter.push({ terms: { domain } })
   return {
     size: topK,
     _source: { excludes: ['embedding'] },
@@ -126,9 +151,8 @@ function docKnnBody(vector: readonly number[], dims: number, domain: string[] | 
       query_vector: [...vector],
       k: topK,
       num_candidates: topK * 5,
-      ...(domain && domain.length > 0
-        ? { filter: { bool: { filter: [{ terms: { domain } }] } } }
-        : {}),
+      // knn.filter 没有条件时**整个字段都不给**（传 null 或空 filter 会 400）
+      ...(filter.length > 0 ? { filter: { bool: { filter } } } : {}),
     },
   }
 }
@@ -143,6 +167,7 @@ export async function searchDocs(deps: DocSearchDeps, input: DocSearchInput): Pr
   const index = `${deps.docPrefix}${deps.userId}`
   const topK = Math.max(deps.retrieval.topK, limit * 4)
   const domain = input.domain && input.domain.length > 0 ? input.domain : undefined
+  const includeArchived = input.includeArchived === true
 
   let vector: number[] | null = null
   let degraded = false
@@ -158,12 +183,12 @@ export async function searchDocs(deps: DocSearchDeps, input: DocSearchInput): Pr
   }
 
   const routes: Array<Promise<Hit[]>> = [
-    deps.reader.search(index, docBm25Body(query, domain, topK), { signal: deps.signal }).then((r) => r.hits),
+    deps.reader.search(index, docBm25Body(query, domain, topK, includeArchived), { signal: deps.signal }).then((r) => r.hits),
   ]
   if (vector) {
     routes.push(
       deps.reader
-        .search(index, docKnnBody(vector, deps.dims, domain, topK), { signal: deps.signal })
+        .search(index, docKnnBody(vector, deps.dims, domain, topK, includeArchived), { signal: deps.signal })
         .then((r) => r.hits),
     )
   }
@@ -300,6 +325,12 @@ export function defineDocSearchTool(deps: DocSearchDeps) {
         type: 'array',
         items: { type: 'string' },
         description: '按业务域收窄（可多选），如 lottery-cloud、huoxin-data、backup-server。',
+      },
+      includeArchived: {
+        type: 'boolean',
+        description:
+          '连归档文档一起查（默认 false = 只查 active）。归档文档平时不出现——'
+          + '只有「我记得写过但搜不到」时才打开它；配合冷引用记忆里的 doc_id 精确定位更省。',
       },
       limit: {
         type: 'integer',
