@@ -135,6 +135,7 @@ put_index team_knowledge <<'JSON'
       "doc_id":            { "type": "keyword" },
       "content":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "content_exact":     { "type": "text", "analyzer": "standard" },
+      "summary":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "semantic_keywords": { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "embedding":         { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
 
