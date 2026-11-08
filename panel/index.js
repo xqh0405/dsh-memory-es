@@ -1242,6 +1242,12 @@ async function handleMemories(ctx, res, url) {
     if (query !== '') return (b.score ?? 0) - (a.score ?? 0)
     return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0
   })
+  // 阶段 27：名次按**合并后**的全局顺序算（两库一起排），切片后仍保留。
+  // 为什么不在前端算：`.slice()` 之后前端只知道页内序号，翻到第 2 页又从 1 开始，
+  // 「第 37 名」这种信息只有后端还知道。空查询（按时间排）也带名次，但前端只在有 query 时展示。
+  merged.forEach((row, i) => {
+    row.rank = i + 1
+  })
   const rows = merged.slice(page * size, page * size + size)
 
   json(res, 200, {

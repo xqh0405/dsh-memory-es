@@ -4592,6 +4592,12 @@ window.__ModuleLoader__.load({
                 : rows.map((row) =>
                     h('div', { key: `${row.scope}:${row.id}`, style: S.row },
                       h('div', { style: S.rowMain },
+                        // 阶段 27：搜索时显示全局名次（两库合并排序后的位置）。
+                        // 用 score 是否存在当「是否在搜索」的标志——与后端同口径：
+                        // 只有带 q 的请求才给 score，空查询按时间排、名次没有意义。
+                        row.score === undefined
+                          ? null
+                          : h('span', { style: { ...S.mono, ...S.muted, fontSize: 11, flex: 'none', minWidth: 26 } }, `#${row.rank ?? '-'}`),
                         h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
                         // 单行省略：全文放 title，悬停可看；不再靠换行撑高行
                         h('span', { style: S.rowTitle, title: row.content }, row.content),
