@@ -83,6 +83,7 @@ es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSO
         "reviewed_by":       { "type": "keyword" },
         "review_note":       { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
         "anchor":            { "type": "boolean" },
+        "pinned":            { "type": "boolean" },
         "day":               { "type": "keyword" },
         "review_state":      { "type": "keyword" },
         "blocked_reason":    { "type": "keyword" },

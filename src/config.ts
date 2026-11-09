@@ -214,6 +214,14 @@ export interface ConfigType {
       cacheTtlMs: number
       maxEntries: number
     }
+    /**
+     * 阶段 32：pinned 常驻段。
+     *
+     * 与检索段的区别是**它不看 query**：pinned=true 且 active 的条目每轮都在，
+     * 占一份独立预算（不挤检索段的 maxChars）。
+     */
+    pinnedEnabled: boolean
+    pinnedMaxChars: number
   }
 }
 
@@ -584,6 +592,12 @@ export const Config: z<ConfigType> = z.object({
       maxEntries: z.number().step(1).min(1).max(1_024).default(64)
         .description('缓存条数上限。1024 维 float 约 4KB/条，64 条 ≈ 256KB。'),
     }).default({}),
+    pinnedEnabled: z.boolean().default(false)
+      .description('阶段 32：把 pinned=true 且 active 的记忆每轮注入（与当前问题无关也会出现）。'
+        + '**默认关**：它改变的是「每轮上下文的固定成本」，先在同一批 query 上对照再开。'),
+    pinnedMaxChars: z.number().step(1).min(0).default(600)
+      .description('pinned 段的独立字符预算，**不挤占** maxChars（检索段仍用完整预算）。'
+        + '默认 600 ≈ 300 token；0 = 不注入 pinned（等价于关掉这一段，但保留开关语义）。'),
   }),
 })
 

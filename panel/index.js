@@ -914,6 +914,12 @@ function summarizeInjectRecords(records) {
   const itemCounts = []
   const charCounts = []
   let dropped = 0
+  // 阶段 32：pinned 段单独统计——「被预算挤掉」要能分清是哪一段的预算不够
+  let pinnedRuns = 0
+  let pinnedOnlyRuns = 0
+  let pinnedItemsSum = 0
+  let pinnedCharsSum = 0
+  let pinnedDropped = 0
   for (const r of records) {
     const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
     byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
@@ -925,7 +931,18 @@ function summarizeInjectRecords(records) {
       if (Array.isArray(r.items)) itemCounts.push(r.items.length)
       if (typeof r.chars === 'number') charCounts.push(r.chars)
     }
-    if (Array.isArray(r.dropped)) dropped += r.dropped.length
+    if (Array.isArray(r.dropped)) {
+      dropped += r.dropped.length
+      pinnedDropped += r.dropped.filter((item) => item && item.reason === 'pinned-budget').length
+    }
+    if (Array.isArray(r.pinnedItems) && r.pinnedItems.length > 0) {
+      pinnedRuns += 1
+      pinnedItemsSum += r.pinnedItems.length
+      for (const item of r.pinnedItems) {
+        if (item && typeof item.chars === 'number') pinnedCharsSum += item.chars
+      }
+    }
+    if (r.pinnedOnly === true) pinnedOnlyRuns += 1
   }
   const total = records.length
   const avg = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length)
@@ -939,6 +956,15 @@ function summarizeInjectRecords(records) {
     avgChars: Math.round(avg(charCounts)),
     avgMs: msCount === 0 ? 0 : Math.round(msSum / msCount),
     droppedTotal: dropped,
+    pinned: {
+      // 注入了常驻段的次数（含 pinnedOnly）——「pinned 到底有没有在工作」的直接判据
+      runs: pinnedRuns,
+      // 只有常驻段、检索段没进来的次数：这个数高说明检索段在挨饿（门槛太严或库太偏）
+      onlyRuns: pinnedOnlyRuns,
+      avgItems: pinnedRuns === 0 ? 0 : Number((pinnedItemsSum / pinnedRuns).toFixed(2)),
+      avgChars: pinnedRuns === 0 ? 0 : Math.round(pinnedCharsSum / pinnedRuns),
+      droppedTotal: pinnedDropped,
+    },
   }
 }
 

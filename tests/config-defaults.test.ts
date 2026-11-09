@@ -18,6 +18,12 @@ describe('配置默认值', () => {
     assert.equal(cfg.recallInject.prewarm.enabled, false, '预热默认关：实测无效且有超时副作用')
   })
 
+  test('阶段 32：pinned 段默认关，预算默认 600 字符', () => {
+    const cfg = Config({} as never).recallInject
+    assert.equal(cfg.pinnedEnabled, false, '每轮常驻是上下文固定成本，必须显式打开')
+    assert.equal(cfg.pinnedMaxChars, 600, '与检索段 maxChars 同量级，但互不挤占')
+  })
+
   test('prewarm 的护栏仍在（关掉不等于删掉）', () => {
     const prewarm = Config({} as never).recallInject.prewarm
     assert.equal(prewarm.timeoutMs, 2_000)
