@@ -234,12 +234,14 @@ if need_persona or need_stickers:
             added = [a for a in added if a]
 
 open(dst, "w", encoding="utf-8").write("\n".join(lines))
-print(json.dumps({
-    "removed_mcp": removed_ids,
-    "identity": ident_changed,
-    "added_sections": added,
-    "password_set": bool(pw),
-}, ensure_ascii=False))
+if removed_ids:
+    print("  [clean]    移除 MCP 条目 %d 个（新容器 MCP 全空、不带任何凭据）" % len(removed_ids))
+else:
+    print("  [skip]     没有 mcp-* 条目")
+if ident_changed:
+    print("  [identity] 身份 → mem-user-%s（teamWrite=false）" % uid)
+if added:
+    print("  [add]      已补配置段：" + " / ".join(added))
 PY
 
 # 校验 YAML 语法再落盘（写临时文件 + rename，打破与黄金模板的硬链接）
