@@ -21,6 +21,8 @@ import { DEFAULT_CONFIG_PATH, parsePluginConfig } from './lib/plugin-config.ts'
 
 const MIN_SCORE_DEFAULT = 0.55
 const TOPK_DEFAULT = 3
+/** 单条记忆最多挂多少条**文档**边：防止反复跑把邻接表撑爆（记忆↔记忆的边不计入此上限） */
+const MAX_DOC_EDGES_DEFAULT = 24
 
 const argv = process.argv.slice(2)
 const apply = argv.includes('--apply')
@@ -34,6 +36,7 @@ const num = (flag: string, fallback: number): number => {
 const limit = num('--limit', 50)
 const minScore = num('--min-score', MIN_SCORE_DEFAULT)
 const topk = num('--topk', TOPK_DEFAULT)
+const maxDocEdges = num('--max-doc-edges', MAX_DOC_EDGES_DEFAULT)
 
 const cfg = parsePluginConfig(DEFAULT_CONFIG_PATH)
 const es = createEsClient({
@@ -147,21 +150,46 @@ async function main(): Promise<void> {
   }
 
   let written = 0
+  let capped = 0
   for (const [memoryId, bucket] of incoming) {
     const current = await es.get(memIndex, memoryId)
     const existing = readEdges((current.source as Record<string, unknown>).related)
-    // 关键：上限必须 ≥ 已有条数 + 本次新增条数，**不允许挤掉记忆↔记忆的边**。
-    // 2026-11-09 第一版用固定 12，结果 8 条记忆的原有边被文档边整组顶掉（已回滚重修）。
-    // 文档边是「补充线索」，不该以删除既有邻接为代价。
-    const next = mergeEdges(
-      existing,
-      [...bucket.entries()].map(([id, weight]) => ({ id, weight })),
-      existing.length + bucket.size,
-    )
-    if (next.length === existing.length) continue
+
+    // 已有边里哪些是「文档边」：拿 id 去文档索引问一次（批量 terms，不是逐条）。
+    // 不这么分的话，反复跑会让文档边无限累积——2026-11-09 首版就有这个隐患。
+    const existingIds = existing.map((e) => e.id)
+    const docIds = new Set<string>()
+    if (existingIds.length > 0) {
+      const probe = await es.search(docIndex, {
+        size: existingIds.length,
+        query: { ids: { values: existingIds } },
+        _source: false,
+      })
+      for (const hit of probe.hits) docIds.add(String(hit.id ?? ''))
+    }
+    const existingDocCount = existing.filter((e) => docIds.has(e.id)).length
+    const room = Math.max(0, maxDocEdges - existingDocCount)
+    const keptIncoming = [...bucket.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, room)
+      .map(([id, weight]) => ({ id, weight }))
+    if (keptIncoming.length < bucket.size) capped += 1
+
+    // 上限 = 已有全部 + 本次实际新增：**不允许挤掉记忆↔记忆的边**。
+    // 2026-11-09 第一版写死 12，结果 8 条记忆的原有边被文档边整组顶掉（已回滚重修）。
+    const merged = mergeEdges(existing, keptIncoming, existing.length + keptIncoming.length)
+    // 硬上限最后再裁一道：文档边按权重留前 maxDocEdges 条，记忆边全留。
+    // 只挡新增不修剪的话，首版跑出来的超量会一直留在库里（实测有 36 条的）。
+    const mergedDoc = merged.filter((e) => docIds.has(e.id) || bucket.has(e.id))
+    const mergedMem = merged.filter((e) => !docIds.has(e.id) && !bucket.has(e.id))
+    const trimmedDoc = mergedDoc.sort((a, b) => b.weight - a.weight).slice(0, maxDocEdges)
+    if (mergedDoc.length > trimmedDoc.length) capped += 1
+    const next = [...mergedMem, ...trimmedDoc].sort((a, b) => (b.weight !== a.weight ? b.weight - a.weight : a.id.localeCompare(b.id)))
+    if (next.length === existing.length && next.every((e, i) => e.id === existing[i]?.id)) continue
     await es.update(memIndex, memoryId, { related: next })
     written += 1
   }
+  if (capped > 0) console.log(`其中 ${capped} 条记忆已到文档边上限 ${maxDocEdges}，本次少写了一些`)
   console.log(`已写入：${written} 条记忆的 related 有变化`)
 }
 
