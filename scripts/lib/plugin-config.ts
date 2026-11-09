@@ -19,6 +19,8 @@ export interface PluginConfig {
   password: string
   userId: string
   personalPrefix: string
+  /** 文档索引前缀（文档索引 = 前缀 + userId），默认 personal_doc_ */
+  docPrefix: string
   teamIndex: string
   embedUrl: string
   embedModel: string
@@ -47,6 +49,7 @@ export function parsePluginConfig(path: string = DEFAULT_CONFIG_PATH): PluginCon
     password: first(/^\s*password:\s*(.+)$/m, seg) ?? '',
     userId: first(/^\s*userId:\s*(.+)$/m, seg) ?? 'xqh',
     personalPrefix: first(/^\s*personalPrefix:\s*(.+)$/m, seg) ?? 'personal_memory_',
+    docPrefix: first(/^\s*docPrefix:\s*(.+)$/m, seg) ?? 'personal_doc_',
     teamIndex: first(/^\s*team:\s*(.+)$/m, seg) ?? 'team_knowledge',
     embedUrl: first(/^\s*url:\s*(.+)$/m, embSeg) ?? 'http://127.0.0.1:11434',
     embedModel: first(/^\s*model:\s*(.+)$/m, embSeg) ?? 'bge-m3',
