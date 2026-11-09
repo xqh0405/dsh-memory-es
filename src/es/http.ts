@@ -182,6 +182,12 @@ export interface EsSearchResult {
   /** 命中总数（ES 7+ 是对象，这里归一成数字） */
   total: number
   hits: Hit[]
+  /**
+   * 阶段 29：聚合结果原样透传（只有传了 `aggs` 才有）。
+   * 之前这层会把 `aggregations` 丢掉，于是「按 doc_id 数篇数」「按 status 算容量」
+   * 这类统计在主插件里根本拿不到数——只能绕过 client 自己发请求。
+   */
+  aggregations?: Record<string, unknown>
 }
 
 /** `_msearch` 的一条子请求：目标索引 + 查询体 */
@@ -282,6 +288,8 @@ interface RawSearchResponse {
     total?: unknown
     hits?: unknown
   }
+  /** 阶段 29：原样透传给上层（需要按聚合做统计的调用方用） */
+  aggregations?: Record<string, unknown>
 }
 
 interface RawErrorResponse {
@@ -581,6 +589,7 @@ export function createEsClient(config: EsClientConfig): EsClient {
         took: typeof raw.took === 'number' ? raw.took : 0,
         total: normalizeTotal(raw.hits?.total),
         hits: mapRawHits(raw.hits?.hits),
+        ...(raw.aggregations === undefined ? {} : { aggregations: raw.aggregations }),
       }
     },
 

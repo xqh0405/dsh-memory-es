@@ -460,7 +460,9 @@ describe('apply · 自动召回注入真的写进 prompt', () => {
           // low_confidence，而注入只认 ok。这条测的是「注入了什么」，不是置信判定本身。
           // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
           confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
-          recallInject: { enabled: true, logPath } as never,
+          // 这两条只钉检索段：32 起 pinnedEnabled 默认 true，若不关掉，pinned 的
+          // filter 查询会先吃掉 fake ES 的应答序列（段与段的预算/顺序在 inject-compose 里单测）
+          recallInject: { enabled: true, logPath, pinnedEnabled: false } as never,
         }),
       )
 
@@ -542,7 +544,9 @@ describe('apply · 注入的分数门槛（2026-11-05 实测：闲聊也 note=ok
           embedding: { url: fake.url, model: 'bge-m3', dims: 4 },
           // midBandFloor 也关掉：这条测的是注入自己的 minScore 门槛，不能先被低置信闸拦下
           confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 },
-          recallInject: { enabled: true, logPath } as never,
+          // 这两条只钉检索段：32 起 pinnedEnabled 默认 true，若不关掉，pinned 的
+          // filter 查询会先吃掉 fake ES 的应答序列（段与段的预算/顺序在 inject-compose 里单测）
+          recallInject: { enabled: true, logPath, pinnedEnabled: false } as never,
         }),
       )
 

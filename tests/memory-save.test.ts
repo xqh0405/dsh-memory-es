@@ -391,6 +391,7 @@ describe('defineSaveTool', () => {
       'domain',
       'importance',
       'memory_type',
+      'pinned',
       'privacy',
       'ttl_days',
       'valence',
@@ -449,6 +450,104 @@ describe('defineSaveTool', () => {
       assert.deepEqual(def.output.render({ content: '一条事实' }, value as never), [
         { type: 'text', text: '已保存' },
       ])
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+/**
+ * 阶段 24：写开关（governance.write）。
+ *
+ * 三条断言都围绕「闸在最前面」这个设计：拒绝时**不该**发生去重查询、
+ * 不该花 embedding、不该写 ES——否则「只读」只是把结果盖住，代价照付。
+ */
+describe('写开关（阶段 24）', () => {
+  test('readonly：拒绝写入，返回可读原因，且一次 ES 请求都不发', async () => {
+    const { fake, written } = await startSaveFake()
+    try {
+      const result = await saveMemory(
+        makeDeps(fake, { writeMode: 'readonly' }),
+        { content: '只读模式下这条不该落库' },
+      )
+      assert.equal(result.status, 'rejected')
+      assert.equal(result.memory_id, '')
+      assert.match(result.text, /只读模式/)
+      assert.match(result.reason ?? '', /governance\.write=readonly/)
+      assert.equal(written.length, 0, '不该写入')
+      assert.equal(fake.requests.length, 0, '闸在最前面：连去重查询都不该发')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('阶段 24.3：readonly 下 pinned=true 同样被拒（置顶不能绕过后门）', async () => {
+    // 这条是 32 阶段留下的挂账：当时 pinned 参数还没进 SaveInput，测不了。
+    // 现在闸在 saveMemory 最前面、pinned 只是入参之一——必须证明它没有单独的旁路。
+    const { fake, written } = await startSaveFake()
+    try {
+      const result = await saveMemory(
+        makeDeps(fake, { writeMode: 'readonly' }),
+        { content: '只读模式下这条也不该置顶', pinned: true },
+      )
+      assert.equal(result.status, 'rejected')
+      assert.match(result.reason ?? '', /governance\.write=readonly/)
+      assert.equal(written.length, 0, '不能因为带 pinned 就写进去')
+      assert.equal(fake.requests.length, 0, '闸在最前面：连去重查询都不该发')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('off：同样拒绝，但文案与 readonly 区分（更强表态）', async () => {
+    const { fake } = await startSaveFake()
+    try {
+      const result = await saveMemory(
+        makeDeps(fake, { writeMode: 'off' }),
+        { content: '关闭写入时这条不该落库' },
+      )
+      assert.equal(result.status, 'rejected')
+      assert.match(result.text, /彻底关闭/)
+      assert.notEqual(result.text, '')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('改回 on 即恢复写入（回滚路径）', async () => {
+    const { fake, written } = await startSaveFake()
+    try {
+      const result = await saveMemory(
+        makeDeps(fake, { writeMode: 'on' }),
+        { content: '恢复正常后这条应该落库' },
+      )
+      assert.equal(result.status, 'created')
+      assert.equal(written.length, 1)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('按域覆盖：命中域用域上的值，未命中回落全局', async () => {
+    const { fake, written } = await startSaveFake()
+    try {
+      const deps = makeDeps(fake, {
+        writeMode: 'on',
+        writeModeByDomain: { 'huoxin-data': 'readonly' },
+      })
+      const blocked = await saveMemory(deps, {
+        content: 'huoxin-data 域被设为只读',
+        domain: 'huoxin-data',
+      })
+      assert.equal(blocked.status, 'rejected')
+      assert.equal(written.length, 0, '被域开关挡住')
+
+      const allowed = await saveMemory(deps, {
+        content: '其它域照常写',
+        domain: 'lottery-cloud',
+      })
+      assert.equal(allowed.status, 'created')
+      assert.equal(written.length, 1, '未命中的域回落到全局 on')
     } finally {
       await fake.close()
     }

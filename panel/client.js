@@ -210,6 +210,10 @@ window.__ModuleLoader__.load({
       injAvgItems: '条均',
       injAvgChars: '字符均',
       injDropped: '被预算挤掉',
+      injPinnedRuns: '常驻注入',
+      injPinnedItems: '常驻条均',
+      injPinnedDropped: '常驻被挤掉',
+      injPinnedOnly: '仅常驻',
       injColItems: '注入条数',
       injColChars: '字符',
       injCached: '预热命中',
@@ -537,6 +541,10 @@ window.__ModuleLoader__.load({
       injAvgItems: 'Items avg',
       injAvgChars: 'Chars avg',
       injDropped: 'Dropped',
+      injPinnedRuns: 'Pinned runs',
+      injPinnedItems: 'Pinned avg',
+      injPinnedDropped: 'Pinned dropped',
+      injPinnedOnly: 'Pinned only',
       injColItems: 'items',
       injColChars: 'chars',
       injCached: 'prewarm hit',
@@ -4131,6 +4139,19 @@ window.__ModuleLoader__.load({
               metric(t('injAvgItems'), String(stats.avgItems)),
               metric(t('injAvgChars'), String(stats.avgChars)),
               metric(t('injDropped'), String(stats.droppedTotal)),
+              // 阶段 32：pinned 段有数据才显示——关着的时候多出四个 0 只会让人以为配置错了
+              stats.pinned && (stats.pinned.runs > 0 || stats.pinned.droppedTotal > 0)
+                ? metric(t('injPinnedRuns'), String(stats.pinned.runs))
+                : null,
+              stats.pinned && stats.pinned.runs > 0
+                ? metric(t('injPinnedItems'), String(stats.pinned.avgItems))
+                : null,
+              stats.pinned && stats.pinned.runs > 0
+                ? metric(t('injPinnedOnly'), String(stats.pinned.onlyRuns))
+                : null,
+              stats.pinned && stats.pinned.droppedTotal > 0
+                ? metric(t('injPinnedDropped'), String(stats.pinned.droppedTotal))
+                : null,
             )
           : null,
         data && data.exists === false
@@ -4146,6 +4167,10 @@ window.__ModuleLoader__.load({
                 h('div', { style: { fontSize: 13 } }, String(record.query ?? '')),
                 h('div', { style: { ...S.muted, display: 'flex', gap: 14, flexWrap: 'wrap' } },
                   h('span', {}, `${t('injColItems')} ${(record.items ?? []).length}`),
+                  Array.isArray(record.pinnedItems) && record.pinnedItems.length > 0
+                    ? h('span', {}, `${t('injPinnedRuns')} ${record.pinnedItems.length}`)
+                    : null,
+                  record.pinnedOnly === true ? h('span', { style: S.pill('muted') }, t('injPinnedOnly')) : null,
                   h('span', {}, `${t('injColChars')} ${record.chars ?? 0}`),
                   typeof record.top1Score === 'number' ? h('span', {}, `top1 ${record.top1Score.toFixed(3)}`) : null,
                   Array.isArray(record.dropped) && record.dropped.length > 0
@@ -4592,6 +4617,12 @@ window.__ModuleLoader__.load({
                 : rows.map((row) =>
                     h('div', { key: `${row.scope}:${row.id}`, style: S.row },
                       h('div', { style: S.rowMain },
+                        // 阶段 27：搜索时显示全局名次（两库合并排序后的位置）。
+                        // 用 score 是否存在当「是否在搜索」的标志——与后端同口径：
+                        // 只有带 q 的请求才给 score，空查询按时间排、名次没有意义。
+                        row.score === undefined
+                          ? null
+                          : h('span', { style: { ...S.mono, ...S.muted, fontSize: 11, flex: 'none', minWidth: 26 } }, `#${row.rank ?? '-'}`),
                         h('span', { style: S.pill('') }, row.scope === 'team' ? t('scopeTeam') : t('scopePersonal')),
                         // 单行省略：全文放 title，悬停可看；不再靠换行撑高行
                         h('span', { style: S.rowTitle, title: row.content }, row.content),

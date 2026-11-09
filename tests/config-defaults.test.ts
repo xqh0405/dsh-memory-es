@@ -18,10 +18,27 @@ describe('配置默认值', () => {
     assert.equal(cfg.recallInject.prewarm.enabled, false, '预热默认关：实测无效且有超时副作用')
   })
 
+  test('阶段 32：pinned 段默认关，预算默认 600 字符', () => {
+    const cfg = Config({} as never).recallInject
+    assert.equal(cfg.pinnedEnabled, true, '2026-11-09 用户决定默认打开（32 已对照过，33 已下沉规则）')
+    assert.equal(cfg.pinnedMaxChars, 800, '2026-11-09 上调到 800：成员下沉的规则条数比预估多')
+  })
+
   test('prewarm 的护栏仍在（关掉不等于删掉）', () => {
     const prewarm = Config({} as never).recallInject.prewarm
     assert.equal(prewarm.timeoutMs, 2_000)
     assert.equal(prewarm.cacheTtlMs, 30_000)
     assert.equal(prewarm.maxEntries, 64)
+  })
+})
+describe('阶段 28 文档库配置', () => {
+  test('doc.limitBytes 默认 10 MiB（与 mnemon Documents 同口径）', () => {
+    const cfg = Config({} as never)
+    assert.equal(cfg.doc.limitBytes, 10 * 1024 * 1024)
+  })
+
+  test('doc.limitBytes=0 合法，表示不限', () => {
+    const cfg = Config({ doc: { limitBytes: 0 } } as never)
+    assert.equal(cfg.doc.limitBytes, 0)
   })
 })

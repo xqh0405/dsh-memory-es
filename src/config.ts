@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 
 // 置信阈值的唯一来源在 search.ts（实现与默认值放在一起，避免两处漂移）
 import { DEFAULT_CONFIDENCE } from './memory/search.ts'
+import type { WriteMode } from './memory/save.ts'
 import { DEFAULT_RANKING } from './fragment.ts'
 
 export interface ConfigType {
@@ -98,6 +99,22 @@ export interface ConfigType {
   }
   defaults: {
     domain: string
+  }
+  /** 阶段 24：治理开关包（本轮只做写开关） */
+  governance: {
+    write: WriteMode
+    /** 按域覆盖；未命中的域回落到 `write` */
+    perDomain: Record<string, WriteMode>
+  }
+  /** 阶段 28：文档库的容量与热度口径 */
+  doc: {
+    /** 文档库容量上限（字节）；0 = 不限。只计 `status=active`（与 mnemon Documents 同口径） */
+    limitBytes: number
+    /**
+     * 阶段 29：超限时是否自动按 `last_accessed_at` 最旧优先归档。
+     * **默认 false**——自动归档会改变「搜得到什么」却不经过人，与「护栏优先」相违。
+     */
+    autoArchive: boolean
   }
   /** 写入时建边（阶段 5.2） */
   edges: {
@@ -197,6 +214,14 @@ export interface ConfigType {
       cacheTtlMs: number
       maxEntries: number
     }
+    /**
+     * 阶段 32：pinned 常驻段。
+     *
+     * 与检索段的区别是**它不看 query**：pinned=true 且 active 的条目每轮都在，
+     * 占一份独立预算（不挤检索段的 maxChars）。
+     */
+    pinnedEnabled: boolean
+    pinnedMaxChars: number
   }
 }
 
@@ -343,6 +368,43 @@ export const Config: z<ConfigType> = z.object({
   defaults: z.object({
     domain: z.string().default('general')
       .description('memory_save 未显式给 domain 时的缺省值；建议按项目填（如 lottery-cloud）。'),
+  }),
+  /**
+   * 阶段 24：治理开关包。本轮只做「写开关」——敏感硬黑名单、域外只回清单、
+   * 被拒留痕三项按路线 24.2 的 2026-11-08 调整推迟（现状 ES 写入量太低，做了是空转）。
+   *
+   * 为什么默认 `on`：这是**刹车不是默认限速**。默认关会让「装完不能存」变成第一印象；
+   * 要只读的场景（接手别人的库、改数据前观察）显式配 readonly 就行。
+   */
+  governance: z.object({
+    write: z.union([z.const('on'), z.const('readonly'), z.const('off')]).default('on')
+      .description(
+        '写入开关。on=正常；readonly=拒绝 memory_save 并返回明确原因（检索照常）；'
+        + 'off=彻底关闭写入（语义同 readonly，保留给「停机维护」这种更强表态）。'
+        + '挡在 saveMemory 里，所以导入/蒸馏回写/将来的 pinned 写入都走同一道闸。',
+      ),
+    perDomain: z.dict(z.union([z.const('on'), z.const('readonly'), z.const('off')]))
+      .default({})
+      .description(
+        '按域覆盖写开关，如 { "huoxin-data": "readonly" }；未命中的域回落到 write。'
+        + '只在「通知类」domain 上试用，别整片关——那会让人以为插件坏了。',
+      ),
+  }),
+  /**
+   * 阶段 28：文档库容量与热度。
+   *
+   * 默认 10 MiB 是**照抄 mnemon Documents 的口径**（那边也是 10 MiB、只计 active）——
+   * 同一个概念用同一个默认值，省得以后两边对不上。0 = 不限（给「先观察一阵再说」的部署）。
+   * 注意：这个上限目前**只用于统计与面板提示**，超限拒写在阶段 29 随归档一起做。
+   */
+  doc: z.object({
+    limitBytes: z.number().step(1).min(0).default(10 * 1024 * 1024)
+      .description('文档库容量上限（字节），0 = 不限；只计 status=active。默认 10 MiB（与 mnemon Documents 一致）。'),
+    autoArchive: z.boolean().default(false)
+      .description(
+        '超限时自动归档（按 last_accessed_at 最旧优先）。默认 false：自动归档会在人不知情的情况下'
+        + '改变「搜得到什么」。要开就在面板上先看一轮候选再决定。',
+      ),
   }),
   /**
    * 阶段 5.2：写入时给记忆建边。
@@ -530,6 +592,14 @@ export const Config: z<ConfigType> = z.object({
       maxEntries: z.number().step(1).min(1).max(1_024).default(64)
         .description('缓存条数上限。1024 维 float 约 4KB/条，64 条 ≈ 256KB。'),
     }).default({}),
+    pinnedEnabled: z.boolean().default(true)
+      .description('阶段 32：把 pinned=true 且 active 的记忆每轮注入（与当前问题无关也会出现）。'
+        + '**2026-11-09 起默认开**（用户决定）：32 已在本机对照过，33 把成员规则下沉进 ES 后，'
+        + '默认关等于下沉的规则一条都不会注入。要关就显式配 false。'),
+    pinnedMaxChars: z.number().step(1).min(0).default(800)
+      .description('pinned 段的独立字符预算，**不挤占** maxChars（检索段仍用完整预算）。'
+        + '默认 800 ≈ 400 token（2026-11-09 从 600 上调：成员下沉的规则条数比预估多，600 会把第 3 条挤掉）；'
+        + '0 = 不注入 pinned（等价于关掉这一段，但保留开关语义）。'),
   }),
 })
 

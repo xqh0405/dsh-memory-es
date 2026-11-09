@@ -54,6 +54,23 @@ function textSim(a: string, b: string): number {
   return (2 * inter) / (A.size + B.size)
 }
 
+/**
+ * 规则版确定性摘要（19.3 第 3 步）：取正文首句，最长 80 字，**不调 LLM**。
+ *
+ * 为什么必须有兜底：历史候选在蒸馏时大多没产出 summary（`Candidate.summary` 是可选），
+ * 而团队文档的 `summary` 若恒为空，阶段 25 的「回填」和 19.4 的「三字段非空」都无从谈起。
+ * 代价是零（纯字符串处理），对检索的价值与 LLM 摘要在同一量级——
+ * 它只是让 `summary^1.5` 那一档有东西可打。
+ */
+function deterministicSummary(text: string, max = 80): string {
+  const trimmed = text.trim()
+  if (trimmed === '') return ''
+  const brk = trimmed.search(/[。！？\n]/)
+  // 末尾 trim：换行属于分句符，但不该进摘要正文
+  const sentence = (brk >= 0 ? trimmed.slice(0, brk + 1) : trimmed).trim()
+  return sentence.length <= max ? sentence : `${sentence.slice(0, max - 1)}…`
+}
+
 interface Candidate {
   content: string
   content_exact?: string
@@ -222,6 +239,8 @@ async function main(): Promise<void> {
         domain: c.domain ?? 'general',
         topic_key: o.topic_key ?? `${c.domain ?? 'general'}:${docId.slice(0, 16).replace(/-/g, '')}`,
         importance: c.importance ?? 'normal',
+        // summary 必须有值：候选带了就用，没带就确定性兜底（见 deterministicSummary）。
+        summary: (c.summary ?? deterministicSummary(content)),
         ...(Array.isArray(c.semantic_keywords) && c.semantic_keywords.length > 0
           ? { semantic_keywords: c.semantic_keywords.join(' ') }
           : {}),

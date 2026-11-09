@@ -192,6 +192,49 @@ def build_chunks(meta: dict, body: str, fallback_title: str):
     return title, desc, chunks
 
 
+def fetch_existing(es: str, index: str, auth: str, ctx) -> dict:
+    """
+    阶段 30：拉 ES 里现有的 (doc_id → 各 chunk 的 sha256 与 status 集合)。
+
+    为什么要比 content_sha256 而不是 updatedAt：md 的 mtime 会因为 checkout、
+    touch、编辑器另存而变，但内容没变；按时间比会把「没改的」当「改过的」全量重灌，
+    而这个脚本最贵的一步是 embedding。sha256 是内容指纹，才是「变没变」的真判据。
+
+    一次拉 10000 条：单用户文档索引的 chunk 数远小于 `index.max_result_window`；
+    真超了宁可报错也别悄悄截断（截断会让「已同步」的判断建立在半个库上）。
+    """
+    body = {
+        "size": 10000,
+        "_source": ["doc_id", "chunk_index", "content_sha256", "status"],
+        "query": {"match_all": {}},
+    }
+    status, r = http_json(f"{es}/{index}/_search", method="POST", body=body,
+                          headers={"authorization": auth}, ctx=ctx)
+    if status != 200 or r is None:
+        raise SystemExit(f"拉取现有文档失败：HTTP {status}")
+    r = r
+    total = r.get("hits", {}).get("total", {})
+    total = total.get("value") if isinstance(total, dict) else total
+    hits = r.get("hits", {}).get("hits", [])
+    if isinstance(total, int) and total > len(hits):
+        raise SystemExit(
+            f"ES 里有 {total} 个 chunk，但只拉到 {len(hits)} 条"
+            f"（超过 index.max_result_window）——先分片处理或调大窗口，别用半个库做增量判断"
+        )
+    out: dict = {}
+    for h in hits:
+        src = h.get("_source") or {}
+        did = src.get("doc_id")
+        if not did:
+            continue
+        rec = out.setdefault(did, {"chunks": {}, "statuses": set()})
+        rec["chunks"][src.get("chunk_index")] = src.get("content_sha256")
+        st = src.get("status")
+        if st:
+            rec["statuses"].add(st)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--index-json", required=True)
@@ -207,6 +250,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 篇（0=全部）")
     ap.add_argument("--batch", type=int, default=8, help="每次请求 Ollama 的 chunk 数")
     ap.add_argument("--prune", action="store_true", help="写前先按 doc_id 删除旧 chunk")
+    ap.add_argument("--incremental", action="store_true",
+                    help="阶段 30：只灌新增/变更（按 doc_id + content_sha256 比对），并输出差集报告")
     args = ap.parse_args()
 
     password = os.environ.get(args.password_env, "")
@@ -225,6 +270,14 @@ def main() -> int:
         docs = docs[: args.limit]
     print(f"文档 {len(docs)} 篇 → {index}" + ("（dry-run）" if args.dry_run else ""))
 
+    # 阶段 30：增量模式的基线（ES 现有的 doc_id → chunk 指纹）
+    existing = {}
+    if args.incremental:
+        existing = fetch_existing(es, index, auth, ctx)
+        print(f"ES 现有 {len(existing)} 篇文档，按 doc_id + content_sha256 比对")
+    added = changed = unchanged = skipped_archived = 0
+    mnemon_ids = set()
+
     total_chunks = written = failed = 0
     for n, d in enumerate(docs, 1):
         doc_id = d.get("id") or ""
@@ -240,13 +293,40 @@ def main() -> int:
         title, desc, chunks = build_chunks(meta, body, d.get("title") or "")
         if not chunks:
             continue
+        mnemon_ids.add(doc_id)
+
+        # 阶段 30：增量模式先判断这篇要不要写
+        prune_needed = False
+        if args.incremental:
+            rec = existing.get(doc_id)
+            if rec is not None and rec["statuses"] == {"archived"}:
+                # ES 里已归档：不复活它（归档是人的决定，同步不该覆盖）
+                skipped_archived += 1
+                continue
+            sig = {ci: hashlib.sha256(c["content"].encode()).hexdigest()
+                   for ci, c in enumerate(chunks)}
+            if rec is None:
+                added += 1
+            elif rec["chunks"] == sig:
+                if rec["statuses"]:
+                    unchanged += 1
+                    continue
+                # 内容没变但缺 status（阶段 29 之前灌的老数据）：补写一次，否则永远搜不到
+                added += 0
+                changed += 1
+                prune_needed = True
+            else:
+                changed += 1
+                # chunk 数变了就要清尾巴，否则旧的 9、10 号切片会留在索引里
+                prune_needed = True
+
         total_chunks += len(chunks)
         if args.dry_run:
             if n <= 3:
                 print(f"  [{n}] {title[:40]} → {len(chunks)} 块")
             continue
 
-        if args.prune:
+        if args.prune or prune_needed:
             try:
                 http_json(f"{es}/{index}/_delete_by_query?conflicts=proceed&refresh=false",
                           method="POST", headers={"authorization": auth}, ctx=ctx,
@@ -285,6 +365,10 @@ def main() -> int:
                 "content_sha256": hashlib.sha256(c["content"].encode()).hexdigest(),
                 "created_at": d.get("createdAt"),
                 "updated_at": d.get("updatedAt"),
+                # 阶段 29：**必须显式给 status**。doc_search 默认只查 status=active，
+                # 缺这个字段的老数据会「灌进去了但搜不到」——2026-11-08 首跑就踩了：
+                # 149 篇写成功、容量统计却还是 537 篇，因为那批没有 status。
+                "status": "active",
             }
             if vec:
                 doc["embedding"] = vec
@@ -302,6 +386,20 @@ def main() -> int:
                 failed += 1
         if n % 20 == 0:
             print(f"  进度 {n}/{len(docs)} 篇，chunk 已写 {written}")
+
+    if args.incremental:
+        es_only = sorted(set(existing) - mnemon_ids)
+        print("")
+        print("== 差集报告（阶段 30）==")
+        print(f"  新增（ES 没有）：{added} 篇")
+        print(f"  变更（sha256 不同）：{changed} 篇")
+        print(f"  未变（跳过）：{unchanged} 篇")
+        print(f"  ES 已归档（跳过，不复活）：{skipped_archived} 篇")
+        print(f"  ES 独有、mnemon 侧已无：{len(es_only)} 篇"
+              + (f"（例：{', '.join(es_only[:3])}）" if es_only else ""))
+        print("")
+        print("  口径：『ES 独有』通常是 mnemon 侧改名/删除后留下的旧切片，"
+              "或停写前的残留——要么手工归档，要么等停写后清一次。")
 
     print(f"完成：{total_chunks} 个 chunk" + ("（dry-run，未写）" if args.dry_run
           else f"，写入 {written}，失败 {failed}"))

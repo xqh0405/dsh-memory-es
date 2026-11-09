@@ -34,8 +34,9 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, formatInjection, passesInjectGate, pickForInjectionDetailed, RECALL_SECTION_NAME, resolveInjectPath, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_MAX_ITEMS, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
+import type { Projected } from './fragment.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
 import { defineHistoryTool } from './memory/history.ts'
@@ -156,6 +157,9 @@ export function apply(ctx: Context, config: ConfigType): void {
           userId,
           personalPrefix,
           defaultDomain: config.defaults.domain,
+          // 阶段 24：写开关（全局 + 按域覆盖）；闸在 saveMemory 里，内部调用也过
+          writeMode: config.governance.write,
+          writeModeByDomain: config.governance.perDomain,
           reader,
           writer,
           embed,
@@ -315,6 +319,8 @@ export function apply(ctx: Context, config: ConfigType): void {
           userId,
           docPrefix: config.index.docPrefix,
           reader,
+          // 阶段 28：命中回写 last_accessed_at 的热度；失败静默（doc-search 内部处理）
+          writer,
           embed,
           dims: config.embedding.dims,
           retrieval,
@@ -884,6 +890,30 @@ export function apply(ctx: Context, config: ConfigType): void {
         },
       )
 
+      /**
+       * 阶段 32：取 pinned 段。
+       *
+       * 与检索段的三点不同，都是刻意的：
+       *  · **不看 query**：pinned 的意义就是「与当前问题无关也在」；
+       *  · **不过分数门**：它没有相似度可比，`passesInjectGate` 那套不适用；
+       *  · **失败即空**：这里出错只影响这一段的增益，绝不能拖累检索或把回合拖慢。
+       */
+      const pinnedIndex = personalIndexName(config)
+      const fetchPinned = async (): Promise<Projected[]> => {
+        if (!inject.pinnedEnabled || inject.pinnedMaxChars <= 0) return []
+        try {
+          const res = await reader.search(
+            pinnedIndex,
+            pinnedSearchBody(PINNED_MAX_ITEMS * 2),
+            { signal: AbortSignal.timeout(inject.timeoutMs) },
+          )
+          return normalizePinnedHits(res.hits)
+        } catch {
+          // pinned 只是增益：取不到就当这轮没有常驻段，绝不拖累检索或把回合拖慢
+          return []
+        }
+      }
+
       const recall = async (query: string, agentId: string): Promise<string> => {
         const startedAt = Date.now()
         // 预热命中与否：只看缓存里有没有这条向量（与 search 内部用的是同一个 key）。
@@ -901,6 +931,34 @@ export function apply(ctx: Context, config: ConfigType): void {
             ...record,
           })
         }
+        // pinned 段先取：它不依赖检索结果，检索超时/低分时它仍然要进
+        const pinnedHits = await fetchPinned()
+
+        type ItemPairs = Array<{ memory_id: string; chars: number }>
+        const compose = (hits: readonly Projected[]): {
+          text: string
+          items: ItemPairs
+          pinnedItems: ItemPairs
+          chars: number
+          dropped: DroppedItem[]
+        } => {
+          const composed = composeInjection({
+            pinned: pinnedHits,
+            hits,
+            pinnedEnabled: inject.pinnedEnabled,
+            pinnedMaxChars: inject.pinnedMaxChars,
+            maxItems: inject.maxItems,
+            maxChars: inject.maxChars,
+          })
+          return {
+            text: composed.text,
+            items: composed.items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
+            pinnedItems: composed.pinned.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
+            chars: composed.text.length,
+            dropped: composed.dropped,
+          }
+        }
+
         try {
           const result = await searchMemories(
             {
@@ -930,30 +988,58 @@ export function apply(ctx: Context, config: ConfigType): void {
             minScore: inject.minScore,
           })
           if (!gate) {
-            // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）
+            // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）。
+            // 阶段 32：检索段不注入 ≠ 整段不注入——pinned 不经过这道门，仍要出。
             const outcome = result.note !== 'ok' ? result.note : 'low_score'
-            writeRecord({ outcome, hits: result.hits.length, items: [], chars: 0, ...(top1Score === undefined ? {} : { top1Score }) })
-            return ''
+            const only = compose([])
+            writeRecord({
+              outcome: only.text === '' ? outcome : 'injected',
+              hits: result.hits.length,
+              items: only.items,
+              pinnedItems: only.pinnedItems,
+              chars: only.chars,
+              ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
+              ...(only.text === '' ? {} : { pinnedOnly: true }),
+              ...(top1Score === undefined ? {} : { top1Score }),
+            })
+            return only.text
           }
-          const { picked: items, dropped } = pickForInjectionDetailed(result.hits, inject.maxItems, inject.maxChars)
-          const text = formatInjection(items)
+          const composed = compose(result.hits)
           writeRecord({
-            outcome: text === '' ? 'no_match' : 'injected',
+            outcome: composed.text === '' ? 'no_match' : 'injected',
             hits: result.hits.length,
-            items: items.map((item) => ({ memory_id: item.memory_id, chars: item.chars })),
-            chars: text.length,
-            ...(dropped.length === 0 ? {} : { dropped }),
+            items: composed.items,
+            pinnedItems: composed.pinnedItems,
+            chars: composed.chars,
+            ...(composed.dropped.length === 0 ? {} : { dropped: composed.dropped }),
             ...(top1Score === undefined ? {} : { top1Score }),
           })
-          if (text !== '') {
-            logger.info('注入 %d 条记忆（%d ms，%d 字符）', items.length, Date.now() - startedAt, text.length)
+          if (composed.text !== '') {
+            logger.info(
+              '注入 %d 条记忆（其中常驻 %d 条，%d ms，%d 字符）',
+              composed.items.length + composed.pinnedItems.length,
+              composed.pinnedItems.length,
+              Date.now() - startedAt,
+              composed.chars,
+            )
           }
-          return text
+          return composed.text
         } catch (err) {
-          // 超时/异常 = 这一轮没有记忆。注入是增强，绝不能把回合拖住或报错给用户
-          writeRecord({ outcome: classifyInjectError(err), hits: 0, items: [], chars: 0 })
-          logger.info('注入跳过（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
-          return ''
+          // 超时/异常 = 这一轮没有检索段。注入是增强，绝不能把回合拖住或报错给用户。
+          // 阶段 32：pinned 段不依赖检索，异常路径也要把它发出去。
+          const only = compose([])
+          const failure = classifyInjectError(err)
+          writeRecord({
+            outcome: only.text === '' ? failure : 'injected',
+            hits: 0,
+            items: only.items,
+            pinnedItems: only.pinnedItems,
+            chars: only.chars,
+            ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
+            ...(only.text === '' ? {} : { pinnedOnly: true }),
+          })
+          logger.info('注入跳过检索段（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
+          return only.text
         }
       }
 

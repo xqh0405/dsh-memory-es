@@ -1117,3 +1117,81 @@ test('handleInjectLog 必须包在 { ok, value } 里（前端 apiGet 取的是 b
   assert.ok(body.value && typeof body.value === 'object')
   assert.ok(Object.prototype.hasOwnProperty.call(body.value, 'stats'), 'value.stats 必须存在（哪怕为空统计）')
 })
+
+test('记忆浏览：搜索时给全局名次 rank，跨两库一起排（阶段 27）', async () => {
+  // 名次必须是**合并后**的全局位置：个人 #1、团队 #2、个人 #3。
+  // 如果只在页内算，翻到第 2 页又会从 1 开始——所以 rank 由后端算并随行下发。
+  const server = createServer((req, res) => {
+    const send = (payload) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    }
+    if (req.url.startsWith('/_security/user/_has_privileges')) return send({ has_all_requested: true, index: {} })
+    if (req.url.includes('_search')) {
+      const isPersonal = req.url.startsWith('/personal_memory_')
+      const hits = isPersonal
+        ? [
+            { _id: 'p1', _score: 9.5, _source: { memory_id: 'p1', content: '个人最高分', status: 'active', updated_at: '2026-11-08T00:00:00Z' } },
+            { _id: 'p2', _score: 3.2, _source: { memory_id: 'p2', content: '个人最低分', status: 'active', updated_at: '2026-11-07T00:00:00Z' } },
+          ]
+        : [
+            { _id: 't1', _score: 6.1, _source: { doc_id: 't1', content: '团队中间分', status: 'active', review_state: 'approved', updated_at: '2026-11-06T00:00:00Z' } },
+          ]
+      return send({ hits: { total: { value: hits.length }, hits } })
+    }
+    return send({})
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const res = fakeRes()
+    await handleMemories(
+      ctxWithEs(SINGLE, `http://127.0.0.1:${port}`),
+      res,
+      new URL('http://x/memories?scope=both&q=测试'),
+    )
+    assert.equal(res.statusCode, 200)
+    const rows = JSON.parse(res.body).value.rows
+    assert.equal(rows.length, 3, '两库各回 2/1 条')
+    assert.deepEqual(rows.map((r) => r.id), ['p1', 't1', 'p2'], '按跨库可比的 score 降序')
+    assert.deepEqual(rows.map((r) => r.rank), [1, 2, 3], '名次是合并后的全局位置')
+    assert.deepEqual(rows.map((r) => r.scope), ['personal', 'team', 'personal'], '来源路由随行下发，前端据此出徽标')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('记忆浏览：空查询按时间排，不冒充名次（rank 仍给但有 score 才展示）', async () => {
+  // 空查询没有相关性可言，score 缺失即「不是在搜索」——前端靠这一点决定不显示 #N。
+  const server = createServer((req, res) => {
+    const send = (payload) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    }
+    if (req.url.startsWith('/_security/user/_has_privileges')) return send({ has_all_requested: true, index: {} })
+    if (req.url.includes('_search')) {
+      return send({
+        hits: {
+          total: { value: 1 },
+          hits: [{ _id: 'p9', _source: { memory_id: 'p9', content: '按时间排的条目', status: 'active', updated_at: '2026-11-08T00:00:00Z' } }],
+        },
+      })
+    }
+    return send({})
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const res = fakeRes()
+    await handleMemories(
+      ctxWithEs(SINGLE, `http://127.0.0.1:${port}`),
+      res,
+      new URL('http://x/memories?scope=personal'),
+    )
+    const rows = JSON.parse(res.body).value.rows
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].score, undefined, '空查询不该有 score——前端据此隐藏名次')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})

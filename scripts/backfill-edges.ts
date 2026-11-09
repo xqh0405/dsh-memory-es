@@ -115,7 +115,26 @@ for (const index of indexes) {
       )
       const existing = readEdges(hit.source.related)
       if (existing.length > 0) withEdges += 1
-      const merged = mergeEdges(existing, picked, TOP_K)
+      // 阶段 31：`related` 里可能已有**文档边**（scripts/link-docs.ts 写的，权重 0.83~0.86，
+      // 比记忆边的 0.55~0.85 更重）。旧写法 `mergeEdges(existing, picked, TOP_K)` 按权重截断到 5，
+      // 文档边会把记忆边整组挤掉（2026-11-09 实测 8 条记忆的记忆边被清空）。
+      // 正确做法：文档边原样保留，只对「记忆↔记忆」这一段做 topK 重建。
+      const docIds = new Set<string>()
+      if (existing.length > 0) {
+        try {
+          const probe = await reader.search(`${cfg.docPrefix ?? 'personal_doc_'}${cfg.userId}`, {
+            size: existing.length,
+            query: { ids: { values: existing.map((e) => e.id) } },
+            _source: false,
+          })
+          for (const h of probe.hits) docIds.add(String(h.id ?? ''))
+        } catch {
+          // 文档索引不存在（没灌文档的部署）就当作没有文档边，不影响主流程
+        }
+      }
+      const docEdges = existing.filter((e) => docIds.has(e.id))
+      const memEdges = existing.filter((e) => !docIds.has(e.id))
+      const merged = [...docEdges, ...mergeEdges(memEdges, picked, TOP_K)]
       if (merged.length === existing.length) continue
 
       planned += 1
