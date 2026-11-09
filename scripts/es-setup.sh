@@ -125,6 +125,16 @@ cat >"$SNIPPET" <<YAML
       url: http://127.0.0.1:11434
       model: bge-m3
       dims: 1024
+    # ⚠️ 自述（traits）与日记（journal）**默认开启**，两者共用下面这条模型路由——
+    # 与 distill.enabled 无关：蒸馏关着也必须填，否则 traits/journal 每次都静默失败：
+    # 选不到模型 → 自述恒 0 条候选、日记恒不写，而且不报错、不写日志。
+    # 按你 dsh 里已配置的 provider/model 填，例如：
+    #   provider: deepseek-official
+    #   model: deepseek-flash
+    distill:
+      enabled: false
+      provider: ""
+      model: ""
 YAML
 chmod 600 "$SNIPPET"
 

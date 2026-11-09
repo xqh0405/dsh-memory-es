@@ -19,7 +19,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { Config, personalIndexName, validateConfig, type ConfigType } from './config.ts'
+import { Config, missingRouteWarning, personalIndexName, validateConfig, type ConfigType } from './config.ts'
 import { createEmbedder } from './embedding.ts'
 import { createEsClient } from './es/http.ts'
 import { defineSaveTool } from './memory/save.ts'
@@ -84,6 +84,11 @@ export function apply(ctx: Context, config: ConfigType): void {
   if (problems.length > 0) {
     throw new Error(`dsh-memory-es: 配置非法，插件不加载\n  - ${problems.join('\n  - ')}`)
   }
+
+  // 路由缺失预警（2026-11-09）：理由与静默失败链见 config.ts 的 missingRouteWarning。
+  // 这里只负责把它打到 console —— console 才进容器 stdout，docker logs grep 得到。
+  const routeWarning = missingRouteWarning(config)
+  if (routeWarning !== null) console.error(routeWarning)
 
   const logger = ctx.logger('dsh-memory-es')
 

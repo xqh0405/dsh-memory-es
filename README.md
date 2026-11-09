@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.6.47**
+**当前版本：0.6.48**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -93,6 +93,11 @@ cd dsh-memory-es-<版本>
 它会在 `$DSH_HOME/memory-es/es` 落地数据与证书，并生成 `plugin-config.yml`——把里面那段并进
 profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到证书），再重启 dsh web。
 
+> ⚠️ **别漏了 `distill.provider` / `distill.model`**：自述（`traits`）与日记（`journal`）默认开启，
+> 两者共用这条模型路由，**与 `distill.enabled` 无关**（蒸馏关着也必须填）。留空不会报错——
+> 提炼每次静默返回 0 条、日记永不写，只在启动时打一行红字。填你 dsh 里已有的 provider/model，
+> 例如 `provider: deepseek-official` + `model: deepseek-flash`。
+
 装完自检（`install.sh` 会自动跑一遍，也可以随时手动）：
 
 ```bash
@@ -105,7 +110,7 @@ profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到�
 
 ## 版本
 
-当前 **0.6.47**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.6.48**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本
