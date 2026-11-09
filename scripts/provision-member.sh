@@ -270,11 +270,13 @@ fi
 # 3) 表情包贴图（只补缺，不覆盖已有）
 # ────────────────────────────────────────────────────────────
 say "③ 表情包目录：$DATA/stickers"
+SHARED_STICKERS="$BASE/shared/member-pack/stickers"
 REF_STICKERS="$BASE/instances/${REF_INSTANCE#dsh-}/data/dsh/stickers"
+[ -d "$SHARED_STICKERS" ] && REF_STICKERS="$SHARED_STICKERS"
 if [ -d "$DATA/stickers" ] && [ "$(ls -A "$DATA/stickers" 2>/dev/null | wc -l)" -gt 0 ]; then
   say "  [skip]    已有 $(ls "$DATA/stickers" | wc -l) 个文件"
 elif [ -d "$REF_STICKERS" ]; then
-  say "  [copy]    从 $REF_INSTANCE 复制"
+  say "  [copy]    从 $REF_STICKERS 复制"
   if [ "$DRY" = 0 ]; then
     mkdir -p "$DATA/stickers"
     cp -a -n "$REF_STICKERS/." "$DATA/stickers/"
