@@ -592,9 +592,10 @@ export const Config: z<ConfigType> = z.object({
       maxEntries: z.number().step(1).min(1).max(1_024).default(64)
         .description('缓存条数上限。1024 维 float 约 4KB/条，64 条 ≈ 256KB。'),
     }).default({}),
-    pinnedEnabled: z.boolean().default(false)
+    pinnedEnabled: z.boolean().default(true)
       .description('阶段 32：把 pinned=true 且 active 的记忆每轮注入（与当前问题无关也会出现）。'
-        + '**默认关**：它改变的是「每轮上下文的固定成本」，先在同一批 query 上对照再开。'),
+        + '**2026-11-09 起默认开**（用户决定）：32 已在本机对照过，33 把成员规则下沉进 ES 后，'
+        + '默认关等于下沉的规则一条都不会注入。要关就显式配 false。'),
     pinnedMaxChars: z.number().step(1).min(0).default(800)
       .description('pinned 段的独立字符预算，**不挤占** maxChars（检索段仍用完整预算）。'
         + '默认 800 ≈ 400 token（2026-11-09 从 600 上调：成员下沉的规则条数比预估多，600 会把第 3 条挤掉）；'

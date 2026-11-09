@@ -20,7 +20,7 @@ describe('配置默认值', () => {
 
   test('阶段 32：pinned 段默认关，预算默认 600 字符', () => {
     const cfg = Config({} as never).recallInject
-    assert.equal(cfg.pinnedEnabled, false, '每轮常驻是上下文固定成本，必须显式打开')
+    assert.equal(cfg.pinnedEnabled, true, '2026-11-09 用户决定默认打开（32 已对照过，33 已下沉规则）')
     assert.equal(cfg.pinnedMaxChars, 800, '2026-11-09 上调到 800：成员下沉的规则条数比预估多')
   })
 
