@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryStoreDeps } from './common.ts'
 import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
 
-export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private'] as const
+export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private', 'pin', 'unpin'] as const
 export type StatusAction = (typeof STATUS_ACTIONS)[number]
 
 /**
@@ -78,6 +78,12 @@ function describe(action: StatusAction, status: string, replacement: string): st
   if (action === 'expire') return '已标记为 expired（不再参与检索，但历史仍在）'
   if (action === 'archive') return '已归档（不再参与检索，仍可按 id 查回；没有删除）'
   if (action === 'restore') return '已恢复为 active（重新参与检索）'
+  if (action === 'pin') {
+    return status === 'active'
+      ? '已置为常驻：每轮注入都会带上它（与当前问题无关也在）'
+      : `已置为常驻，但它当前状态是 ${status}，不会注入——需要先 restore 成 active`
+  }
+  if (action === 'unpin') return '已取消常驻（不再每轮注入，但仍可被检索命中）'
   return `已标记为 private（不参与整理任务），状态仍为 ${status}`
 }
 
@@ -190,6 +196,36 @@ export async function updateStatus(
     }
   }
 
+  if (action === 'pin' || action === 'unpin') {
+    // 阶段 33：只改 pinned 一位。不改 status —— 置顶与「在不在检索里」是两条正交的轴：
+    // 把 archived 的条目 pin 起来不该让它复活，pin 一条 active 的也不该改它的可见性。
+    const written = await deps.writer.update(
+      index,
+      current.id,
+      { pinned: action === 'pin', updated_at: now },
+      { refresh: 'wait_for', signal: deps.signal },
+    )
+    const status = typeof current.source.status === 'string' ? current.source.status : 'active'
+    log({
+      tool: 'status',
+      user: deps.userId,
+      memory_id: current.id,
+      action,
+      reason: input.reason ?? '',
+      ms: Date.now() - startedAt,
+      changed: written.result !== 'noop',
+    })
+    return {
+      memory_id: current.id,
+      action,
+      status,
+      privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
+      superseded_by: typeof current.source.superseded_by === 'string' ? current.source.superseded_by : '',
+      changed: written.result !== 'noop',
+      text: describe(action, status, ''),
+    }
+  }
+
   const patch: Record<string, unknown> =
     action === 'expire'
       ? { status: 'expired', forget_reason: reason === '' ? 'expired' : reason, updated_at: now }
@@ -227,6 +263,7 @@ const DESCRIPTION = [
   '把一条记忆标成「过时」或「私有」，不物理删除（历史仍可审计，检索只取 active）。',
   'supersede：被新版本取代，必须给 replacement_memory_id，会在新旧两条之间双向连线。',
   'expire：直接作废。mark_private：涉及隐私、不再参与整理任务（状态不变）。',
+  'pin：置为常驻，之后每一轮注入都会带上它（不看当前问题）；unpin：取消常驻。用户说「记住这条、以后都要」时用 pin。',
   '什么时候用：记忆过时了、被新决定覆盖了、或用户说「这条别用了」。不要靠重复写同内容来覆盖。',
 ].join(' ')
 
@@ -244,7 +281,7 @@ export function defineStatusTool(deps: UpdateStatusDeps) {
         type: 'string',
         required: true,
         enum: [...STATUS_ACTIONS],
-        description: 'supersede=被新版本取代；expire=过期；mark_private=标记私有（不参与整理）。',
+        description: 'supersede=被新版本取代；expire=过期；archive=归档；restore=恢复；mark_private=标记私有；pin=置为常驻（每轮注入）；unpin=取消常驻。',
       },
       replacement_memory_id: {
         type: 'string',

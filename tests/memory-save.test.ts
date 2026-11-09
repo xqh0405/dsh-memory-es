@@ -391,6 +391,7 @@ describe('defineSaveTool', () => {
       'domain',
       'importance',
       'memory_type',
+      'pinned',
       'privacy',
       'ttl_days',
       'valence',

@@ -29,7 +29,7 @@ import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
-import { assertDocOwner, personalIndexFor } from './common.ts'
+import { assertDocOwner, nowIso, personalIndexFor } from './common.ts'
 import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 import {
   checkAdmission,
@@ -86,6 +86,13 @@ export interface SaveInput {
    * 缺省 `agent`——模型调这个工具是替代理记账；只有本机直接落库才算 `user`。
    */
   origin?: Origin
+  /**
+   * 阶段 33：写进来就置顶（每轮注入）。
+   *
+   * 缺省 false。只有 `memory_update_status` 的 pin 动作与工具参数能改它——
+   * 真正的「每轮都在」由注入侧读 `pinned=true AND status=active` 决定。
+   */
+  pinned?: boolean
 }
 
 export interface SaveResult {
@@ -294,6 +301,9 @@ export function buildMemoryDoc(
     // 阶段 9：谁把这条写进来的。审计与「巡检入库」追溯都靠它。
     origin,
     promote_state: 'none',
+    // 阶段 33：常驻标记。显式写 false 而不是省略——省略会让「没置顶」和「老文档没这字段」混淆，
+    // 而注入侧按 `pinned=true` 精确匹配，两种缺失在语义上等价，但在统计口径上不等价。
+    pinned: input.pinned === true,
     // 蒸馏状态：入库立刻可见（pending），后台子代理处理后改成 done。
     // 由插件自己写，不依赖 LLM —— 入库不能被模型可用性卡住。
     distill_state: 'pending',
@@ -446,14 +456,27 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   const existing = dup.hits[0]
   if (existing) {
     const existingId = typeof existing.source.memory_id === 'string' ? existing.source.memory_id : existing.id
-    log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, degraded: false })
+    // 阶段 33：去重分支不能把 pinned 丢掉——用户说「记住这条、以后每轮都要」，
+    // 而库里恰好已有同内容（未置顶）时，静默返回「未重复写入」会让置顶诉求凭空消失。
+    // 这里补一次只改 pinned 的写；不置顶的重复写入仍然什么都不做。
+    let pinnedUpgraded = false
+    if (input.pinned === true && existing.source.pinned !== true && deps.writer.update !== undefined) {
+      await deps.writer.update(index, existingId, { pinned: true, updated_at: nowIso(now) }, { refresh: 'wait_for', signal: deps.signal })
+      pinnedUpgraded = true
+      log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, pinned_upgraded: true })
+    }
+    if (!pinnedUpgraded) {
+      log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, degraded: false })
+    }
     return {
       status: 'merged',
       memory_id: existingId,
       deduped: true,
       degraded: false,
       quarantined: false,
-      text: `已存在相同内容（memory_id=${existingId}），未重复写入`,
+      text: pinnedUpgraded
+        ? `已存在相同内容（memory_id=${existingId}），未重复写入；已按本次要求置为常驻（每轮注入）`
+        : `已存在相同内容（memory_id=${existingId}），未重复写入`,
     }
   }
 
@@ -587,6 +610,7 @@ const DESCRIPTION = [
   '—— 该用我：用户明确要求记住；做了非显然的决定（尤其被否掉的方案与原因）；踩到可复现的坑；约定、口径、路径变了。',
   '—— 别用我：临时进度、会话摘要、能从代码或文档直接读到的内容、整段对话；凭证与个人隐私（会被隔离待审）；已经有的事实（先 memory_search 查，别重复写）。',
   '一次一条：content 写一句能独立成立的事实，不要贴整段对话。',
+  'pinned=true 表示「这条每轮都要在」——用户说「记住这个规则」、要求跨会话长期生效的偏好，才用；事实类不要置顶。',
   '凭据（口令、令牌、私钥、带密码的连接串）命中 → quarantined=true；换个说法重试仍然会被隔离，不要试。',
   '相同内容会命中去重（deduped=true）；内容相近会回 similar_to 提示。',
 ].join(' ')
@@ -635,6 +659,12 @@ export function defineSaveTool(deps: SaveDeps) {
       ttl_days: {
         type: 'integer',
         description: `可选：多少天后过期（1~${MAX_TTL_DAYS}）。只给确实会过期的临时约定用。`,
+      },
+      pinned: {
+        type: 'boolean',
+        description:
+          'true = 置顶：这条会**每轮都注入到上下文**（不看当前问题是否相关），适合「用户明确要求记住的规则/偏好」。'
+          + '默认 false，绝大多数事实不要置顶——每一条都会变成每轮的固定成本。',
       },
     },
     output: {
