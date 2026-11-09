@@ -157,6 +157,42 @@ else
       warn "检索埋点索引 $SL 不存在或不可读（跑 init-indices.sh + init-user.sh 后生效）"
     fi
 
+    # 文档体检（阶段 31，对标 mnemon-review 的五项里的两项）
+    # 口径：只看 active —— 归档文档「冷」是设计意图，不是问题
+    DC="personal_doc_${OWNER}"
+    if es "$ES_URL/$DC/_count" | grep -q '"count"'; then
+      DOC_TOTAL=$(es "$ES_URL/$DC/_count" -d '{"query":{"term":{"status":"active"}}}' | jq -r '.count // 0')
+      # 90 天冷文档：没被检索碰过（last_accessed_at 缺失）或上次命中早于 90 天
+      COLD=$(es "$ES_URL/$DC/_count" -d '{
+        "query":{"bool":{"filter":[{"term":{"status":"active"}}],"should":[
+          {"bool":{"must_not":{"exists":{"field":"last_accessed_at"}}}},
+          {"range":{"last_accessed_at":{"lt":"now-90d"}}}
+        ],"minimum_should_match":1}}}' | jq -r '.count // 0')
+      # 重复切片：content_sha256 撞车（>=2 个切片同文本）。同一篇的不同小节正常不会撞，
+      # 撞了通常是「同一份文档被灌了两遍」或切片边界重复
+      DUP=$(es "$ES_URL/$DC/_search?size=0" -d '{
+        "size":0,
+        "query":{"term":{"status":"active"}},
+        "aggs":{"dup":{"terms":{"field":"content_sha256","min_doc_count":2,"size":1},
+          "aggs":{"n":{"value_count":{"field":"content_sha256"}}}}}}' | jq -r '.aggregations.dup.buckets | length // 0')
+      DUP_DOCS=$(es "$ES_URL/$DC/_search?size=0" -d '{
+        "size":0,
+        "query":{"term":{"status":"active"}},
+        "aggs":{"sum":{"sum_bucket":{"buckets_path":"dup>_count"}},
+          "dup":{"terms":{"field":"content_sha256","min_doc_count":2,"size":1000}}}}' | jq -r '.aggregations.sum.value // 0')
+      kv "文档切片（active）" "$DOC_TOTAL"
+      kv "90 天冷文档（未被检索命中）" "$COLD"
+      kv "重复切片组 / 涉及切片" "$DUP 组 / $DUP_DOCS 片"
+      [ "${DOC_TOTAL:-0}" -gt 0 ] 2>/dev/null && [ "${COLD:-0}" -gt 0 ] 2>/dev/null && \
+        [ "$(( COLD * 100 / DOC_TOTAL ))" -ge 80 ] 2>/dev/null && \
+        warn "冷文档占比 ≥80%：文档建了但检索路径没用到它们（查 doc_search 的实际调用量）"
+      # 注意：**跨文档的模板小节也会撞车**（实测一组 12 片是 12 篇不同文档里同一段「可复用的是检查命令」）。
+      # 所以 1~2 组先抽查再动手，≥3 组才提示
+      [ "${DUP:-0}" -ge 3 ] 2>/dev/null && warn "有 ${DUP} 组重复切片：先抽查是「重复灌库」还是「跨文档的模板小节」"
+    else
+      warn "文档索引 $DC 不存在（还没灌文档）"
+    fi
+
     # 审计流水
     AUD=$(es "$ES_URL/memory_audit/_search?size=0" -d "{\"query\":{\"range\":{\"at\":{\"gte\":\"now-7d\"}}},\"aggs\":{\"e\":{\"terms\":{\"field\":\"event\"}}}}" 2>/dev/null)
     kv "审计事件（近 7 天）" "$(printf '%s' "$AUD" | jq -r '[.aggregations.e.buckets[]?|"\(.key)=\(.doc_count)"]|join(" ")' 2>/dev/null)"
