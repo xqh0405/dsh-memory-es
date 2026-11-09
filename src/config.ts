@@ -645,3 +645,34 @@ export function validateConfig(config: ConfigType): string[] {
   }
   return problems
 }
+
+/**
+ * 模型路由缺失的预警文案；`null` = 没问题。
+ *
+ * 为什么不并进 `validateConfig`：那会**阻止插件加载**，而缺路由只废掉 traits / journal /
+ * distill 三条产出链路——检索、保存、面板照常工作，带病启动并打一行红字，比整个记忆库不装了强。
+ *
+ * 背景是 2026-11-09 定位的一条静默失败链（对外发布的包同样会踩）：
+ * traits 与 journal **默认开启**，且共用 `distill.provider/model`（**不看 `distill.enabled`**，
+ * 蒸馏关着也走这条路由）。留空时 `pickRoute` 落到 `listModels('')` → `resolveApiKey` 抛
+ * `MISSING_CREDENTIAL` → 返回空数组 → `pickRoute` 为 null → `summarize` 返回
+ * 「[诊断] 选不到模型路由」→ 当正文喂给 JSON 解析 → 失败 → **每次 0 条候选、日记永不写，
+ * 且不抛错、不写日志**（`ctx.logger` 也不进容器 stdout），用户只会觉得"功能没生效"。
+ *
+ * 用 `console.error` 打出来而不是 logger：console 才进容器 stdout，`docker logs` grep 得到。
+ */
+export function missingRouteWarning(config: ConfigType): string | null {
+  const routeMissing = config.distill.provider.trim() === '' || config.distill.model.trim() === ''
+  if (!routeMissing) return null
+  const affected = [
+    config.traits.enabled ? '自述(traits)' : '',
+    config.journal.enabled ? '日记(journal)' : '',
+    config.distill.enabled ? '后台蒸馏(distill)' : '',
+  ].filter(Boolean)
+  if (affected.length === 0) return null
+  return (
+    `[dsh-memory-es] 配置缺失：${affected.join('、')} 已启用，但 distill.provider / distill.model 没填 —— ` +
+    '模型路由会选不到，提炼每次静默返回 0 条、日记永不写（不报错、不写日志）。' +
+    '请在 cordis.patch.yml 的 dsh-memory-es.config.distill 下补 provider/model 后重启 dsh web。'
+  )
+}

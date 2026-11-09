@@ -93,6 +93,11 @@ cd dsh-memory-es-<版本>
 它会在 `$DSH_HOME/memory-es/es` 落地数据与证书，并生成 `plugin-config.yml`——把里面那段并进
 profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到证书），再重启 dsh web。
 
+> ⚠️ **别漏了 `distill.provider` / `distill.model`**：自述（`traits`）与日记（`journal`）默认开启，
+> 两者共用这条模型路由，**与 `distill.enabled` 无关**（蒸馏关着也必须填）。留空不会报错——
+> 提炼每次静默返回 0 条、日记永不写，只在启动时打一行红字。填你 dsh 里已有的 provider/model，
+> 例如 `provider: deepseek-official` + `model: deepseek-flash`。
+
 装完自检（`install.sh` 会自动跑一遍，也可以随时手动）：
 
 ```bash
