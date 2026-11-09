@@ -595,9 +595,10 @@ export const Config: z<ConfigType> = z.object({
     pinnedEnabled: z.boolean().default(false)
       .description('阶段 32：把 pinned=true 且 active 的记忆每轮注入（与当前问题无关也会出现）。'
         + '**默认关**：它改变的是「每轮上下文的固定成本」，先在同一批 query 上对照再开。'),
-    pinnedMaxChars: z.number().step(1).min(0).default(600)
+    pinnedMaxChars: z.number().step(1).min(0).default(800)
       .description('pinned 段的独立字符预算，**不挤占** maxChars（检索段仍用完整预算）。'
-        + '默认 600 ≈ 300 token；0 = 不注入 pinned（等价于关掉这一段，但保留开关语义）。'),
+        + '默认 800 ≈ 400 token（2026-11-09 从 600 上调：成员下沉的规则条数比预估多，600 会把第 3 条挤掉）；'
+        + '0 = 不注入 pinned（等价于关掉这一段，但保留开关语义）。'),
   }),
 })
 

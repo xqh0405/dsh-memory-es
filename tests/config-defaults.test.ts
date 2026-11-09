@@ -21,7 +21,7 @@ describe('配置默认值', () => {
   test('阶段 32：pinned 段默认关，预算默认 600 字符', () => {
     const cfg = Config({} as never).recallInject
     assert.equal(cfg.pinnedEnabled, false, '每轮常驻是上下文固定成本，必须显式打开')
-    assert.equal(cfg.pinnedMaxChars, 600, '与检索段 maxChars 同量级，但互不挤占')
+    assert.equal(cfg.pinnedMaxChars, 800, '2026-11-09 上调到 800：成员下沉的规则条数比预估多')
   })
 
   test('prewarm 的护栏仍在（关掉不等于删掉）', () => {
