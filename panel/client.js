@@ -316,6 +316,9 @@ window.__ModuleLoader__.load({
       restoreBtn: '恢复为有效',
       restoreDone: '已恢复为有效',
       restoreDoneNoVector: '已恢复为有效（这条没有向量，此后只能关键词检索）',
+      // 2026-11-10 审查 #16：恢复时把 distill_state 从 skipped 重置回 pending，
+      // 「只能关键词检索」就不再是终局了 —— 下一轮清扫会改写正文并补回向量，文案要说准。
+      restoreDoneQueued: '已恢复为有效（已重新排队蒸馏：下一轮会改写正文并补回向量）',
       colUpdated: '更新时间',
       detail: '详情',
       delBtn: '删除',
@@ -650,6 +653,8 @@ window.__ModuleLoader__.load({
       restoreBtn: 'Restore',
       restoreDone: 'Restored',
       restoreDoneNoVector: 'Restored (no vector; keyword search only)',
+      // 见中文侧同名条目（#16：重排队后向量会被下一轮清扫补回）
+      restoreDoneQueued: 'Restored (re-queued for distillation: the next sweep rewrites it and restores the vector)',
       colUpdated: 'Updated',
       detail: 'Detail',
       delBtn: 'Delete',
@@ -4512,7 +4517,11 @@ window.__ModuleLoader__.load({
           .then((value) => {
             setRestoreResult({
               ok: true,
-              text: value?.embeddingMissing ? t('restoreDoneNoVector') : t('restoreDone'),
+              // requeueDistill 优先：重排队后下一轮清扫会改写正文并补回向量，
+              // 此时不能再说「此后只能关键词检索」（#16 改的正是这一点）。
+              text: value?.requeueDistill
+                ? t('restoreDoneQueued')
+                : (value?.embeddingMissing ? t('restoreDoneNoVector') : t('restoreDone')),
             })
             setSelected(null)
             load()

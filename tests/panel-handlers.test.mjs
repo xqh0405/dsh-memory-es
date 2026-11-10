@@ -125,7 +125,7 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
 
 // ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
 const panel = await import('../panel/index.js')
-const { handleCapabilities, handleDeleteMemory, handleMemories, handleMaintenanceGet, handleReviewAction, handleUsers } = panel
+const { handleCapabilities, handleDeleteMemory, handleMemories, handleMaintenanceGet, handleRestoreMemory, handleReviewAction, handleUsers } = panel
 
 const fs = await import('node:fs')
 const os = await import('node:os')
@@ -320,7 +320,7 @@ const { createServer } = await import('node:http')
 const SINGLE = { userId: 'xqh', username: 'mem-user-xqh', password: 'pw', teamWrite: true }
 
 /** 假 ES：_has_privileges 按索引名分别回答，DELETE / 审计写入按参数给状态码 */
-async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, auditStatus = 201, indexBuckets = [] } = {}) {
+async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, auditStatus = 201, indexBuckets = [], restoreSource = null } = {}) {
   const calls = []
   const server = createServer((req, res) => {
     const chunks = []
@@ -345,6 +345,13 @@ async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, del
       // /users 用的 _index 聚合：任何 personal_memory_* 的 _search 都回同一份 buckets；
       // 其他 _search 回空页（handleMemories 会拿它拼两库结果）
       if (req.url.includes('_search')) {
+        // restore 走 `ids` 查询取单条（面板读侧没有 get）——给了 restoreSource 就回它，
+        // 这样才能断言「恢复写出去的 patch 长什么样」
+        if (restoreSource !== null && body.includes('"ids"')) {
+          return send(200, {
+            hits: { total: { value: 1 }, hits: [{ _id: 'es-1', _score: 1, _source: restoreSource }] },
+          })
+        }
         return send(200, {
           hits: { total: { value: 0 }, hits: [] },
           // docs: 维护页"文档数"的 cardinality 聚合（固定 42，方便断言它不再是占位）
@@ -518,6 +525,55 @@ test('删除：个人库删除成功，且按设计不写审计', async () => {
     assert.equal(es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc')).length, 0)
     const del = es.calls.find((c) => c.method === 'DELETE')
     assert.match(del.url, /personal_memory_xqh\/_doc\/doc-2/)
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 恢复隔离：distill_state 必须跟着重置（2026-11-10 审查 #16）─────────────
+// 面板与工具侧是**两套独立实现**，历史上正是「一边修了另一边漏」反复出 bug
+// （工具侧恢复曾经不清 quarantine_reason，就是这么发现的）。所以两边都得钉。
+test('恢复：distill_state=skipped → 重置为 pending，回执带 requeueDistill', async () => {
+  const es = await startFakeEs({
+    restoreSource: { status: 'quarantine', distill_state: 'skipped', quarantine_reason: '命中赋值式凭证', embedding: null },
+  })
+  try {
+    const res = fakeRes()
+    await handleRestoreMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'es-1', scope: 'personal' }))
+    assert.equal(res.statusCode, 200, `实际：${res.body}`)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.status, 'active')
+    assert.equal(body.value.requeueDistill, true, '回执要告诉客户端「已重新排队蒸馏」')
+    assert.equal(body.value.embeddingMissing, true, '隔离条目按设计无向量')
+
+    const upd = es.calls.find((c) => c.url.includes('/_update/'))
+    assert.ok(upd, '应发出 update')
+    const patch = JSON.parse(upd.body).doc
+    assert.equal(patch.status, 'active')
+    assert.equal(patch.quarantine_reason, null)
+    assert.equal(patch.distill_state, 'pending', '不重置的话清扫只查 pending，这条永不蒸馏、永远补不回向量')
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：distill_state=done → 不动它（已蒸馏过，别白烧一轮模型）', async () => {
+  const es = await startFakeEs({
+    restoreSource: { status: 'quarantine', distill_state: 'done', embedding: [0.1] },
+  })
+  try {
+    const res = fakeRes()
+    await handleRestoreMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'es-1', scope: 'personal' }))
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.requeueDistill, false)
+    assert.equal(body.value.embeddingMissing, false)
+
+    const patch = JSON.parse(es.calls.find((c) => c.url.includes('/_update/')).body).doc
+    assert.equal(
+      'distill_state' in patch,
+      false,
+      `已蒸馏的条目不该被重置，实际 patch=${JSON.stringify(patch)}`,
+    )
   } finally {
     await es.close()
   }

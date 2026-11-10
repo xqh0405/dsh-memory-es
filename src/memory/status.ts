@@ -214,12 +214,42 @@ export async function updateStatus(
     // 只把 status 改回 active 会让原因残留，面板详情看起来像「已生效但还挂着隔离理由」，
     // 审的人分不清它到底恢复干净了没有。（面板的 /memories/restore 早就清了，工具侧漏了。）
     // 其它状态被误写这个字段时也一并无害——它只在 status=quarantine 时有语义。
+    //
+    // `distill_state` 要跟着重置（2026-11-10 审查 #16）：隔离与归档期间它可能被标成 `skipped`
+    // （save.ts 隔离时、distillRunner 对非 active 时），恢复成 active 后若不改回来，
+    // 清扫只查 `distill_state=pending` —— 这条**永远不会再蒸馏**，而隔离来的那批
+    // **按设计还没有向量**（隔离不写向量），恢复后只能关键词检索。
+    //
+    // 但 `skipped` 不等于「有病」——线上实测 status=active 且 distill_state=skipped 共 93 条，
+    // 其中 91 条是 `origin=import`（阶段 33 下沉的短规则，向量已补齐、本就是人工收紧过的），
+    // 另 1 条 `origin=tool` 是人工写的种子规则。无脑重置会把它们重新扔进蒸馏队列、
+    // 让 LLM 再改写一遍。所以分三种：
+    //  · `prevStatus=quarantine` → **一定重排**（skipped 是「隔离期间跑不了」写的，且没有向量）；
+    //  · `origin=import` → 不动（脚本下沉时**有意**标 skip）；
+    //  · 已有 `summary` → 不动（蒸馏的产物就是 summary，有它说明已经蒸馏过）；
+    //  · 其余（归档前还是 pending、从没蒸馏过）→ 重排。
+    //
+    // 注：面板 `/memories/restore` 与 `scripts/restore-quarantine.ts` 只处理 `status=quarantine`，
+    // 那里 skipped 无歧义、直接重置即可；只有工具侧 restore 是多状态入口才要分。
+    const prevStatus = typeof current.source.status === 'string' ? current.source.status : ''
+    const origin = typeof current.source.origin === 'string' ? current.source.origin : ''
+    const condensed = typeof current.source.summary === 'string' && current.source.summary.trim() !== ''
+    const requeued = current.source.distill_state === 'skipped'
+      && (prevStatus === 'quarantine' || (origin !== 'import' && !condensed))
     await deps.writer.update(
       index,
       current.id,
-      { status: 'active', superseded_by: null, quarantine_reason: null, forget_reason: null, updated_at: now },
+      {
+        status: 'active',
+        superseded_by: null,
+        quarantine_reason: null,
+        forget_reason: null,
+        ...(requeued ? { distill_state: 'pending' } : {}),
+        updated_at: now,
+      },
       { refresh: 'wait_for', signal: deps.signal },
     )
+    const base = describe(action, 'active', '')
     return {
       memory_id: current.id,
       action,
@@ -227,7 +257,9 @@ export async function updateStatus(
       privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
       superseded_by: '',
       changed: true,
-      text: describe(action, 'active', ''),
+      text: requeued
+        ? `${base}；已重新排队蒸馏（distill_state pending → 下一轮清扫会改写正文并补向量）`
+        : base,
     }
   }
 

@@ -226,6 +226,102 @@ describe('updateStatus', () => {
     }
   })
 
+  // 2026-11-10 审查 #16：隔离/归档期间 distill_state 被标 `skipped`，
+  // 恢复后不重置的话，清扫只查 `distill_state=pending` → 这条**永远不再蒸馏、也永远补不回向量**。
+  test('restore 一条 distill_state=skipped 的 → 重置回 pending，并在回执里说清', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'quarantine', distill_state: 'skipped', quarantine_reason: '命中赋值式凭证' }),
+    })
+    try {
+      const result = await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(h.state.updates[0].patch.distill_state, 'pending', '必须重新排队，否则永不蒸馏')
+      assert.match(result.text, /重新排队蒸馏/, '回执要说清它会回到蒸馏队列')
+      assert.equal(result.status, 'active')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('restore 一条 distill_state=done 的 → 不重置（已蒸馏过，别白烧一轮模型）', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'archived', distill_state: 'done' }),
+    })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(
+        'distill_state' in h.state.updates[0].patch,
+        false,
+        `不该动已蒸馏的条目，实际 patch=${JSON.stringify(h.state.updates[0].patch)}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // 线上实测：active + distill_state=skipped 的 93 条里 91 条是 `origin=import`
+  // （阶段 33 热记忆下沉，向量已补齐、本就是人工收紧的短规则）。
+  // 它们的 skipped 是**有意**的，归档后再恢复不能被重新扔进蒸馏队列让 LLM 改写。
+  test('restore 一条 origin=import 且 skipped（归档来的）→ 不重置', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'archived', distill_state: 'skipped', origin: 'import' }),
+    })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(
+        'distill_state' in h.state.updates[0].patch,
+        false,
+        `下沉那批的 skipped 是有意的，实际 patch=${JSON.stringify(h.state.updates[0].patch)}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // 但同样是 origin=import，只要它当前是 quarantine，说明 skipped 是「隔离时跑不了」写的
+  // （不是脚本下沉时写的）→ 必须重排，否则恢复后照旧永不蒸馏。
+  test('restore 一条 origin=import 但 status=quarantine → 仍要重置', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'quarantine', distill_state: 'skipped', origin: 'import', quarantine_reason: '命中赋值式凭证' }),
+    })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(h.state.updates[0].patch.distill_state, 'pending', '隔离来的必须重排')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // `summary` 是蒸馏的产物：有它说明已经蒸馏过，skipped 只是后来归档时被打上的标记，
+  // 重置等于拿 LLM 再改写一遍（线上 541e94f3 就是这种：有 summary、origin=agent、active+skipped）。
+  test('restore 一条 skipped 但已有 summary（蒸馏过了）→ 不重置', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'archived', distill_state: 'skipped', origin: 'agent', summary: '已经蒸馏过的摘要' }),
+    })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(
+        'distill_state' in h.state.updates[0].patch,
+        false,
+        `已蒸馏过的不该重排，实际 patch=${JSON.stringify(h.state.updates[0].patch)}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // 反过来：归档前还是 pending（从没蒸馏过、也没有 summary）→ 恢复后必须回到队列
+  test('restore 一条从没蒸馏过、归档来的 skipped → 重置回 pending', async () => {
+    const h = await startStateFake({
+      a: doc('a', { status: 'archived', distill_state: 'skipped', origin: 'agent' }),
+    })
+    try {
+      await updateStatus(h.deps, { memory_id: 'a', action: 'restore' })
+      assert.equal(h.state.updates[0].patch.distill_state, 'pending', '没蒸馏过的归档条目要回到队列')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
   test('mark_private：只改 privacy，状态保持不变', async () => {
     const h = await startStateFake({ a: doc('a') })
     try {

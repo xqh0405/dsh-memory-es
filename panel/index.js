@@ -1636,18 +1636,25 @@ async function handleRestoreMemory(ctx, res, req) {
   }
 
   const now = new Date().toISOString()
+  // distill_state 跟着重置（2026-11-10 审查 #16）：隔离时 saveMemory 把它标成 `skipped`，
+  // 只把 status 改回 active 的话，清扫只查 `distill_state=pending` —— 这条**永远不会再蒸馏、
+  // 也就永远补不回向量**（隔离条目按设计无向量）。改回 pending 后下一轮清扫会改写正文并重建向量。
+  // 只认 `skipped`：`done` 已蒸馏过不白烧，`traits/persona/journal` 归别的管线，
+  // `failed` 是连败放弃的，三者都保持原样。
+  const requeueDistill = str(source.distill_state) === 'skipped'
   await client.update(names.personal, esId, {
     status: 'active',
     // 置 null 而不是删字段：ES 的 exists 对 null 返回 false，效果等价且不需要脚本权限
     quarantine_reason: null,
+    ...(requeueDistill ? { distill_state: 'pending' } : {}),
     updated_at: now,
   }, { refresh: 'wait_for' })
 
   const embeddingMissing = !Array.isArray(source.embedding) || source.embedding.length === 0
-  console.error(`[memory-es-panel] 恢复隔离 esId=${esId} embeddingMissing=${embeddingMissing}`)
+  console.error(`[memory-es-panel] 恢复隔离 esId=${esId} embeddingMissing=${embeddingMissing} requeueDistill=${requeueDistill}`)
   json(res, 200, {
     ok: true,
-    value: { esId, status: 'active', embeddingMissing, at: now },
+    value: { esId, status: 'active', embeddingMissing, requeueDistill, at: now },
   })
 }
 
@@ -3628,6 +3635,7 @@ export {
   handleConfigWrite,
   handleMaintenanceGet,
   handleMemories,
+  handleRestoreMemory,
   handleSearchLog,
   handleSearchLogUsedIn,
   handleMemoryFeedback,
