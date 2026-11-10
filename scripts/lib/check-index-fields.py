@@ -50,14 +50,21 @@ def fields_static(init_path: str) -> tuple[set[str], set[str]]:
     return got["personal"], got["team"]
 
 
-def fields_live(url: str, ca: str, pw: str) -> tuple[set[str], set[str]]:
-    """从线上 _mapping 取字段集。"""
+def fields_live(url: str, ca: str, pw: str, es_user: str, personal_index: str) -> tuple[set[str], set[str]]:
+    """从线上 _mapping 取字段集。
+
+    账号与个人索引名**由调用方传**（2026-11-10 审查 M11/#19 去硬编码）：
+    这里曾写死**一个固定账号 + 一个固定索引名**（都只对 xqh 那一套成立），换用户跑就 401
+    或打到别人的索引，而 401 只会在报告里变成一行含糊的失败。
+    （本 docstring 刻意不写出那两个字面量 —— tests/template-sync.test.ts 断言本文件
+    不含它们，重写回硬编码会被那条测试抓红。）
+    """
     ctx = ssl.create_default_context(cafile=ca)
 
     def get(path: str):
         req = urllib.request.Request(
             url + path,
-            headers={"Authorization": "Basic " + base64.b64encode(f"mem-user-xqh:{pw}".encode()).decode()},
+            headers={"Authorization": "Basic " + base64.b64encode(f"{es_user}:{pw}".encode()).decode()},
         )
         return json.load(urllib.request.urlopen(req, context=ctx, timeout=15))
 
@@ -65,7 +72,7 @@ def fields_live(url: str, ca: str, pw: str) -> tuple[set[str], set[str]]:
         m = get(f"/{index}/_mapping")
         return set(list(m.values())[0]["mappings"].get("properties", {}))
 
-    return one("personal_memory_xqh"), one("team_knowledge")
+    return one(personal_index), one("team_knowledge")
 
 
 def doc_keys_in_promoter(path: str) -> set[str]:
@@ -149,22 +156,34 @@ def report(personal: set[str], team: set[str], required: list[str], promoter: st
         print(f"ℹ️  团队独有 {len(team_only)} 个（团队自己的检索/审核字段，正常）：")
         print("   " + ", ".join(team_only))
 
-    return 1 if missing else 0
+    # drift 也要让 CI 变红（2026-11-10 审查 M11/#19）：原来只打警告、退出码只看 missing，
+    # 于是「promote-team.doc 加了新字段而 REQUIRED 没跟上」时 CI 照样绿 ——
+    # #17 那类缺口就是这么一路溜过去的。警告对人有信息量，但**不能是唯一的失败信号**。
+    if drift_promoter or drift_writeback:
+        print()
+        print("❌ 判定失败：REQUIRED 与代码里的写入方不同步（drift 不再只是警告）")
+        print("   同步 scripts/diff-index-fields.sh 的 REQUIRED 后本项才会变绿。")
+
+    return 1 if (missing or drift_promoter or drift_writeback) else 0
 
 
 def main() -> int:
     args = sys.argv[1:]
     if len(args) < 5:
-        print("用法：check-index-fields.py <static|live> <required> <promoter> <search> <init|url> [ca pass]",
-              file=sys.stderr)
+        print("用法：check-index-fields.py <static|live> <required> <promoter> <search> <init|url> "
+              "[ca pass user personal_index]", file=sys.stderr)
         return 2
     mode, required_s, promoter, search_path = args[0], args[1], args[2], args[3]
     required = required_s.split()
 
     if mode == "live":
-        url, ca, pw = args[4], args[5], args[6]
-        personal, team = fields_live(url, ca, pw)
-        label = f"线上 mapping（{url}）"
+        if len(args) < 9:
+            print("live 模式要 9 个参数：… <url> <ca> <pass> <user> <personal_index>"
+                  "（账号与索引名由调用方传，不再硬编码）", file=sys.stderr)
+            return 2
+        url, ca, pw, es_user, personal_index = args[4], args[5], args[6], args[7], args[8]
+        personal, team = fields_live(url, ca, pw, es_user, personal_index)
+        label = f"线上 mapping（{url}，{es_user}@{personal_index}）"
     else:
         init = args[4]
         personal, team = fields_static(init)

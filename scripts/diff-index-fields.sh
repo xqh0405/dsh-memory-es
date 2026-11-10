@@ -47,7 +47,23 @@ if [ "${1:-}" = "--live" ]; then
     PASS=$(awk '/^[[:space:]]*identity:/{f=1} f&&/^[[:space:]]*password:/{sub(/.*password:[[:space:]]*/,""); print; exit}' "$CONF" | tr -d "'\"")
   fi
   [ -z "$PASS" ] && { echo "拿不到 ES 密码（设 MEM_ES_PASS 或检查 $CONF）" >&2; exit 2; }
-  exec python3 "$CHECK" live "$REQUIRED" "$PROMOTER" "$SEARCH" "$ES_URL" "$ES_CA" "$PASS"
+
+  # 账号与个人索引名**从同一份 config 现推**，不再由 python 硬编码 mem-user-xqh /
+  # personal_memory_xqh（2026-11-10 审查 M11/#19）——写死会 401 或打到别人索引。
+  # 仍可用 MEM_ES_USER / MEM_ES_INDEX 覆盖（换用户、换索引前缀时不用改 config）。
+  USER_ID="${MEM_ES_USER_ID:-}"
+  PREFIX="${MEM_ES_PERSONAL_PREFIX:-}"
+  if [ -f "$CONF" ]; then
+    [ -z "$USER_ID" ] && USER_ID=$(awk '/^[[:space:]]*identity:/{f=1} f&&/^[[:space:]]*userId:/{sub(/.*userId:[[:space:]]*/,""); print; exit}' "$CONF" | tr -d "'\"" | tr -d '[:space:]')
+    [ -z "$PREFIX" ] && PREFIX=$(awk '/^[[:space:]]*index:/{f=1} f&&/^[[:space:]]*personalPrefix:/{sub(/.*personalPrefix:[[:space:]]*/,""); print; exit}' "$CONF" | tr -d "'\"" | tr -d '[:space:]')
+  fi
+  [ -z "$USER_ID" ] && { echo "拿不到 identity.userId（设 MEM_ES_USER_ID 或检查 $CONF）" >&2; exit 2; }
+  [ -z "$PREFIX" ] && { echo "拿不到 index.personalPrefix（设 MEM_ES_PERSONAL_PREFIX 或检查 $CONF）" >&2; exit 2; }
+
+  ES_USER="${MEM_ES_USER:-mem-user-$USER_ID}"
+  PERSONAL_INDEX="${MEM_ES_INDEX:-${PREFIX}${USER_ID}}"
+
+  exec python3 "$CHECK" live "$REQUIRED" "$PROMOTER" "$SEARCH" "$ES_URL" "$ES_CA" "$PASS" "$ES_USER" "$PERSONAL_INDEX"
 fi
 
 exec python3 "$CHECK" static "$REQUIRED" "$PROMOTER" "$SEARCH" "$INIT"

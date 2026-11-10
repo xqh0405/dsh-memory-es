@@ -175,3 +175,49 @@ describe('迁移脚本：不许内联手抄模板', () => {
     }
   })
 })
+
+// ── 这道闸必须「接进流水线」且「drift 会红」，两条都是静默失效的形态 ──────────
+describe('映射对拍的可执行性（#19）', () => {
+  const ciYml = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const checkerSrc = readFileSync(new URL('../scripts/lib/check-index-fields.py', import.meta.url), 'utf8')
+
+  test('ci.yml 必须真的调 diff-index-fields.sh（只写在注释里不算）', () => {
+    // #17 溜过去的原因就是这道闸只在本地手动跑。把步骤删了 → 本断言红 → CI 仍红，
+    // 「删掉闸」这件事本身不可能静默。
+    const runsDiff = /^[ \t-]*run:[ \t]*bash scripts\/diff-index-fields\.sh[ \t]*$/m.test(ciYml)
+    assert.ok(
+      runsDiff,
+      'ci.yml 里找不到 `run: bash scripts/diff-index-fields.sh` —— '
+      + '这道闸不进流水线就会像 #17 那样静默溜过（注释里提到它不算数，必须是可执行步骤）',
+    )
+    assert.ok(/name: 索引字段对拍/.test(ciYml), '步骤名「索引字段对拍」丢了，报告里认不出来')
+  })
+
+  test('check-index-fields.py 的退出码必须把 drift 算进去', () => {
+    // 原来是 `return 1 if missing else 0` → REQUIRED 落后于代码时 CI 照样绿。
+    assert.ok(
+      /return 1 if \(missing or drift_promoter or drift_writeback\) else 0/.test(checkerSrc),
+      'drift 必须参与退出码：只打警告不置 1，promote-team / HIT_UPDATE_SCRIPT 加新字段时 CI 会静默变绿',
+    )
+    // 防有人改回旧写法又不留痕迹
+    assert.ok(
+      !/^\s*return 1 if missing else 0\s*$/m.test(checkerSrc),
+      '不许退回 `return 1 if missing else 0`（drift 只警告）',
+    )
+  })
+
+  test('live 模式不许硬编码账号与个人索引名（改由调用方传）', () => {
+    assert.ok(
+      !/mem-user-xqh/.test(checkerSrc),
+      'check-index-fields.py 仍硬编码 mem-user-xqh —— 换用户跑就 401，且只会报成一行含糊失败',
+    )
+    assert.ok(
+      !/"personal_memory_xqh"/.test(checkerSrc),
+      'check-index-fields.py 仍硬编码 personal_memory_xqh —— 会打到别人索引',
+    )
+    assert.ok(
+      /es_user: str, personal_index: str/.test(checkerSrc),
+      'fields_live 的账号与索引名必须由调用方传',
+    )
+  })
+})
