@@ -127,6 +127,15 @@ put_index "$PERSONAL" <<'JSON'
 {}
 JSON
 
+# 2026-11-10 审查 P1/#17 补 activation：它与 hit_count / last_hit_at 是**同一支
+# painless 脚本一起写**的（src/memory/search.ts 的 HIT_UPDATE_SCRIPT 三行），
+# 且 `hit.origin === 'team'` 时打到**团队索引**（search.ts 的回写按 origin 选索引）。
+# 缺它的后果不是「少个字段」：dynamic:strict 下 merge 抛 strict_dynamic_mapping_exception
+# → 该条 bulk 400 → 三行脚本原子回滚 → hit_count 与 last_hit_at **一起丢**，
+# 只在 hit_record_partial 留一条观测日志。
+# 线上团队索引有这个字段（migrate-activation-fields.sh 补过），但 es-setup.sh 只跑
+# init-indices.sh → **新装机必中**，所以模板自己必须带。
+# ⚠️ 下面是喂给 curl 的 raw JSON，**不许出现 // 注释**（JSON 不支持，会整份解析失败）。
 put_index team_knowledge <<'JSON'
 {
   "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
@@ -147,6 +156,7 @@ put_index team_knowledge <<'JSON'
       "importance":        { "type": "keyword" },
       "hit_count":         { "type": "integer" },
       "last_hit_at":       { "type": "date" },
+      "activation":        { "type": "float" },
       "superseded_at":     { "type": "date" },
       "related":           { "type": "object", "enabled": false },
 

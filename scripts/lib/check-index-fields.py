@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """个人索引 vs 团队索引的字段判定（被 scripts/diff-index-fields.sh 调用）。
 
-判定依据只有一个：**scripts/promote-team.ts 的 `doc` 对象写哪些字段**。
-那里的字段团队 mapping 缺一个，晋升就 400；不写团队的字段，团队库不需要。
+判定依据是**团队库的两个写入方写了哪些字段**，写进去而 mapping 没有就 400：
 
-所以「个人有、团队无」本身不是问题——19.3 当初按「个人有什么团队就该有什么」
-的对称思维列了 18 个该补字段，2026-11-08 实测发现其中绝大多数代码根本不写团队库。
+  ① scripts/promote-team.ts 的 `doc` 对象（晋升时整篇写入）
+  ② src/memory/search.ts 的 HIT_UPDATE_SCRIPT（**命中回写**，多行 painless 一起执行，
+     `hit.origin === 'team'` 时打到团队索引）
+
+② 是 2026-11-10 审查 P1/#17 补上的：原判据只有 ①，于是团队模板缺 `activation` 被
+判成「个人有、团队无 → 代码不写团队库 → 属正常」——**判据漏了第二条链路**，
+而新装机一命中就 strict_dynamic_mapping_exception → 该条 bulk 400 →
+三行脚本原子回滚，hit_count / last_hit_at **一起丢**。
+
+所以「个人有、团队无」本身不是问题（19.3 当初按对称思维列的 18 个该补字段，
+2026-11-08 实测绝大多数代码根本不写团队库）；问题只在「代码写、mapping 没有」。
 """
 
 import base64
@@ -75,26 +83,61 @@ def doc_keys_in_promoter(path: str) -> set[str]:
     return keys
 
 
-def report(personal: set[str], team: set[str], required: list[str], promoter: str, mode: str) -> int:
-    missing = [f for f in required if f not in team]
-    personal_only = sorted(personal - team - set(required))
+def hit_writeback_fields(path: str) -> set[str]:
+    """从 search.ts 的 HIT_UPDATE_SCRIPT 里取它写到 `_source` 上的字段。
+
+    只截 HIT_UPDATE_SCRIPT 的定义块（到下一个 `export` 为止），不扫整份文件——
+    否则将来别的 painless 脚本往**个人库**写字段时会被误判成团队必需。
+    2026-11-10 审查 P1/#17 加：原判据只看 promote-team.ts，团队缺 activation
+    因此被判成「代码不写团队库」，实际命中回写一直在往团队索引打。
+    """
+    try:
+        src = open(path, encoding="utf-8").read()
+    except OSError:
+        return set()
+    m = re.search(r"export const HIT_UPDATE_SCRIPT\s*=(.*?)(?=\nexport )", src, re.S)
+    if not m:
+        return set()
+    return set(re.findall(r"ctx\._source\.(\w+)", m.group(1)))
+
+
+def report(personal: set[str], team: set[str], required: list[str], promoter: str, search_path: str, mode: str) -> int:
+    # 两个写入方合起来才是「团队必须有」的字段集：
+    #   required      —— 脚本里手工同步的 promote-team.doc 字段
+    #   writeback     —— 从 HIT_UPDATE_SCRIPT 现解析出来的命中回写字段
+    writeback = hit_writeback_fields(search_path)
+    need = set(required) | writeback
+
+    missing = [f for f in required if f not in team] + sorted(writeback - set(required) - team)
+    personal_only = sorted(personal - team - need)
     team_only = sorted(team - personal)
-    drift = sorted(doc_keys_in_promoter(promoter) - set(required))
+    drift_promoter = sorted(doc_keys_in_promoter(promoter) - set(required))
+    drift_writeback = sorted(writeback - set(required))
 
     print(f"口径：{mode}")
-    print(f"  个人字段 {len(personal)} / 团队字段 {len(team)} / 晋升必需 {len(required)}")
+    # need = required ∪ writeback，故 need-writeback（promote-team 提供）+ writeback（命中回写提供）
+    # 恒等于 len(need)——两个来源没有重叠计数问题。
+    print(f"  个人字段 {len(personal)} / 团队字段 {len(team)} / 团队必需 {len(need)}"
+          f"（promote-team.doc {len(need - writeback)} + HIT_UPDATE_SCRIPT {len(writeback)}）")
     print()
 
     if missing:
-        print(f"❌ 晋升必需但团队缺失 {len(missing)} 个（写这条就 400）：")
+        print(f"❌ 团队必需但 mapping 缺失 {len(missing)} 个（写这条就 400）：")
         print("   " + ", ".join(missing))
     else:
-        print("✅ 晋升必需字段齐全（promote-team.ts 写的字段团队模板都有了）")
+        print("✅ 团队必需字段齐全（promote-team.doc 与 HIT_UPDATE_SCRIPT 写的字段团队模板都有了）")
 
-    if drift:
+    if drift_promoter:
         print()
-        print(f"⚠️  promote-team.ts 的 doc 里出现新键，本脚本的 REQUIRED 没跟上：{', '.join(drift)}")
+        print(f"⚠️  promote-team.ts 的 doc 里出现新键，REQUIRED 没跟上：{', '.join(drift_promoter)}")
         print("   改 scripts/diff-index-fields.sh 的 REQUIRED，并确认团队 mapping 也有这些字段")
+
+    if drift_writeback:
+        print()
+        print(f"⚠️  HIT_UPDATE_SCRIPT 写了新字段，REQUIRED 没跟上：{', '.join(drift_writeback)}")
+        print("   改 scripts/diff-index-fields.sh 的 REQUIRED —— 命中回写会打到团队索引，缺就 400")
+        print(f"   （本次已按现解析结果计入必需集，团队 mapping 缺失会照常判失败；当前缺口："
+              f"{', '.join(sorted(drift_writeback - team)) or '无'}）")
 
     if personal_only:
         print()
@@ -111,22 +154,23 @@ def report(personal: set[str], team: set[str], required: list[str], promoter: st
 
 def main() -> int:
     args = sys.argv[1:]
-    if len(args) < 4:
-        print("用法：check-index-fields.py <static|live> <required> <promoter> [url ca pass init]", file=sys.stderr)
+    if len(args) < 5:
+        print("用法：check-index-fields.py <static|live> <required> <promoter> <search> <init|url> [ca pass]",
+              file=sys.stderr)
         return 2
-    mode, required_s, promoter = args[0], args[1], args[2]
+    mode, required_s, promoter, search_path = args[0], args[1], args[2], args[3]
     required = required_s.split()
 
     if mode == "live":
-        url, ca, pw = args[3], args[4], args[5]
+        url, ca, pw = args[4], args[5], args[6]
         personal, team = fields_live(url, ca, pw)
         label = f"线上 mapping（{url}）"
     else:
-        init = args[3]
+        init = args[4]
         personal, team = fields_static(init)
         label = f"源码模板（{init}）"
 
-    return report(personal, team, required, promoter, label)
+    return report(personal, team, required, promoter, search_path, label)
 
 
 if __name__ == "__main__":
