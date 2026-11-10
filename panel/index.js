@@ -2416,9 +2416,26 @@ const EDITABLE = [
     hint: '打开后「候选区分度不足」时返回空，而不是照给几条；实测 43 条契约 should 失败 10 → 3。同义词表 retrieval.synonyms 需在配置文件中配。',
   },
   { path: ['defaults', 'domain'], label: '默认 domain', type: 'string', default: 'general' },
-  // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用
+  // 自动蒸馏：默认关，打开后每次 memory_save 会在后台多花一次模型调用。
+  // ⚠️ provider/model 是**三条链路共用**的模型路由：自述(traits) 与日记(journal) 默认开启，
+  //    它们不看 enabled 这个开关——所以哪怕蒸馏关着也必须填，否则自述恒 0 条、日记恒不写，
+  //    而且是静默失败（不报错、不写日志），只在启动时打一行红字。留空「自动取第一个模型」
+  //    曾是句空头承诺（0.6.47 及更早）：宿主 listModels 门面恒抛 TypeError，根本取不到。
   { path: ['distill', 'enabled'], label: '入库自动蒸馏', type: 'boolean', default: false, hint: '打开后每次保存会后台调一次模型（花 token，但检索更准）' },
-  { path: ['distill', 'model'], label: '蒸馏模型', type: 'string', default: '', hint: '留空 = 用宿主第一个可用模型' },
+  {
+    path: ['distill', 'provider'],
+    label: '模型提供方',
+    type: 'string',
+    default: '',
+    hint: '必填。自述与日记共用这条路由（与上面的蒸馏开关无关）：留空 = 不提炼，启动时打一行红字提示。例：deepseek-official',
+  },
+  {
+    path: ['distill', 'model'],
+    label: '模型名',
+    type: 'string',
+    default: '',
+    hint: '必填。留空 = 自述恒 0 条候选、日记恒不写（不报错、不写日志）。例：deepseek-flash',
+  },
   { path: ['distill', 'timeoutMs'], label: '蒸馏超时(ms)', type: 'number', default: 30000 },
   // 阶段 9.4：人格内核允许在面板里直接改（改完写回 profile 配置，热重载后下一轮提示词生效）
   { path: ['persona', 'seed'], label: '人格内核', type: 'string', default: '', hint: '这段文字会进系统提示词；留空即不注入人格' },
