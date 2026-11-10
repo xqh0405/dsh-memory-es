@@ -30,13 +30,33 @@ SEARCH_LOG="search_log_$USER_ID"
 
 es() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
+# 把成功响应体丢掉，但**失败时必须回显**（2026-11-10 审查 M1/#22）。
+#
+# 为什么要有它：`es()` 开了 --fail-with-body，错误体走 **stdout** ——
+# 原来的 `es … >/dev/null` 把 `strict_dynamic_mapping_exception` 的整段原文
+# 连同成功输出一起丢了，只剩 curl 那句 `error: 400`，模板/mapping 哪个字段
+# 不对完全看不出来。同仓 `migrate-identifier-field.sh` 修过同类
+# （「第一次跑 403 被 grep 吞掉」），这里补上。
+#
+# 注意是**包装而不是改 es()**：`exists()` 走的是 `es_curl`（另一个函数），
+# 别处还要 `es` 的正常输出（如 GET 后接 grep）。
+es_quiet() {
+  local out rc=0
+  out=$(es "$@" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '✗ 失败（curl 退出码 %s）：%s\n' "$rc" "$out" >&2
+    return "$rc"
+  fi
+  return 0
+}
+
 exists() {
   code=$(es_curl "elastic:$PASS" -o /dev/null -w '%{http_code}' -I "$ES/$1")
   [ "$code" = "200" ]
 }
 
 echo '== 索引模板 personal_memory_* =='
-es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/personal_memory_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_memory_*"],
   "priority": 100,
@@ -118,7 +138,7 @@ put_index() {
     return 0
   fi
   echo "[create] 索引 $name"
-  es -X PUT "$ES/$name" -d @- >/dev/null
+  es_quiet -X PUT "$ES/$name" -d @-
   echo '  ok'
 }
 
@@ -188,7 +208,7 @@ JSON
 #   · status           —— active / archived。归档后默认不进检索（29 用它做冷热分层）。
 #   · last_accessed_at —— 每次检索命中后回写（bulk，失败静默）。它撑起「热度」与
 #                         将来的 LRU 归档；空表示「入库后还没被用过」。
-es -X PUT "$ES/_index_template/personal_doc_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/personal_doc_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_doc_*"],
   "priority": 100,
@@ -263,7 +283,7 @@ JSON
 #   · 个人操作写进共享审计还意味着任何人能写别人的审计记录，无法防伪造。
 # 字段刻意与 memory_audit 对齐：以后要汇总时可以直接并起来看。
 echo '== 索引模板 personal_audit_* =='
-es -X PUT "$ES/_index_template/personal_audit_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/personal_audit_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_audit_*"],
   "priority": 100,
@@ -300,7 +320,7 @@ echo '  personal_audit_* → 每用户一份操作审计（采纳/拒绝/晋升�
 # 检索是高频读操作（一天几十次），混进去会把 audit 撑成日志表，
 # 也会让「谁晋升了什么」这种审计问题被噪声淹没。
 echo '== 索引模板 search_log_* =='
-es -X PUT "$ES/_index_template/search_log_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/search_log_template" -d @- <<'JSON'
 {
   "index_patterns": ["search_log_*"],
   "priority": 100,
