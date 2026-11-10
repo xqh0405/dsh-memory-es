@@ -980,6 +980,9 @@ export function apply(ctx: Context, config: ConfigType): void {
               ranking: config.ranking,
               mood: () => mood.state,
               signal: AbortSignal.timeout(inject.timeoutMs),
+              // 传 log：否则 search.ts 的 log 默认 noop，它在 catch 里算好的
+              // formatEsError（含 ES 错误类型与提示）会被白扔，排查时只剩一个 outcome。
+              log: (event) => logger.info('inject-search %o', event),
             },
             // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径。
             // explain: true 只为拿到 top1 的向量分数——note 分不出闲聊与相关（见 passesInjectGate）
@@ -995,28 +998,38 @@ export function apply(ctx: Context, config: ConfigType): void {
           if (!gate) {
             // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）。
             // 阶段 32：检索段不注入 ≠ 整段不注入——pinned 不经过这道门，仍要出。
+            //
+            // ⚠️ outcome 只写**检索段**的真实结果，不再因 pinned 段非空就覆盖成 'injected'——
+            // 旧写法让 error/low_confidence/no_match 全被折叠（2026-11-10 审查：11-09 之后
+            // 432 条 outcome 全是 injected，面板超时率恒 0、注入率虚高 74% vs 真实 53%）。
+            // 整段是否注入改由 pinnedInjected 表达。
             const outcome = result.note !== 'ok' ? result.note : 'low_score'
             const only = compose([])
             writeRecord({
-              outcome: only.text === '' ? outcome : 'injected',
+              outcome,
               hits: result.hits.length,
               items: only.items,
               pinnedItems: only.pinnedItems,
+              pinnedInjected: only.pinnedItems.length,
               chars: only.chars,
               ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
-              ...(only.text === '' ? {} : { pinnedOnly: true }),
+              ...(only.pinnedItems.length > 0 && only.items.length === 0 ? { pinnedOnly: true } : {}),
               ...(top1Score === undefined ? {} : { top1Score }),
             })
             return only.text
           }
           const composed = compose(result.hits)
           writeRecord({
-            outcome: composed.text === '' ? 'no_match' : 'injected',
+            // 只看**检索段**：composed.text 含 pinned 段，拿它判 no_match 会把
+            // 「检索没命中但常驻注入了」记成 injected（同属 outcome 被折叠的问题）。
+            outcome: composed.items.length === 0 ? 'no_match' : 'injected',
             hits: result.hits.length,
             items: composed.items,
             pinnedItems: composed.pinnedItems,
+            pinnedInjected: composed.pinnedItems.length,
             chars: composed.chars,
             ...(composed.dropped.length === 0 ? {} : { dropped: composed.dropped }),
+            ...(composed.pinnedItems.length > 0 && composed.items.length === 0 ? { pinnedOnly: true } : {}),
             ...(top1Score === undefined ? {} : { top1Score }),
           })
           if (composed.text !== '') {
@@ -1035,13 +1048,19 @@ export function apply(ctx: Context, config: ConfigType): void {
           const only = compose([])
           const failure = classifyInjectError(err)
           writeRecord({
-            outcome: only.text === '' ? failure : 'injected',
+            // outcome 保持失败原值（timeout/error），不再因 pinned 非空覆盖成 'injected'——
+            // 否则超时在数据里永远看不见（旧版面板超时率恒 0%）。
+            outcome: failure,
             hits: 0,
             items: only.items,
             pinnedItems: only.pinnedItems,
+            pinnedInjected: only.pinnedItems.length,
             chars: only.chars,
+            // 失败原因必须落盘，否则 JSONL 里只有一个 outcome=error、没有任何线索
+            // （对照影子侧 recall-shadow.ts 的 note，注入侧旧版没有这个字段）。
+            note: String(err instanceof Error ? err.message : err).slice(0, 120),
             ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
-            ...(only.text === '' ? {} : { pinnedOnly: true }),
+            ...(only.pinnedItems.length > 0 && only.items.length === 0 ? { pinnedOnly: true } : {}),
           })
           logger.info('注入跳过检索段（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
           return only.text

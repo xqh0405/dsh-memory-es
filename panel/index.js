@@ -920,20 +920,65 @@ function summarizeInjectRecords(records) {
   let pinnedItemsSum = 0
   let pinnedCharsSum = 0
   let pinnedDropped = 0
+  // 2026-11-10 口径修正：outcome 从这天起只描述**检索段**（旧版只要 pinned 段非空就覆盖成
+  // 'injected'，于是 error/low_confidence/no_match 全被折叠、超时率恒 0、注入率虚高）。
+  // 新旧记录必须分开算，否则同一张表上两代数据会互相污染。
+  let recallInjected = 0 // 检索段真的进了上下文
+  let wholeInjected = 0 // 整段（检索段或常驻段）进了上下文
+  let newStyle = 0 // 带 pinnedInjected 字段的记录（新版口径）
+  let legacyFolded = 0 // 旧版折叠记录：outcome=injected 且 pinnedOnly=true → 检索段结果不可知
+  let since = ''
+  let through = ''
+
   for (const r of records) {
     const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
     byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
+    const ts = typeof r.ts === 'string' ? r.ts : ''
+    if (ts !== '') {
+      if (since === '' || ts < since) since = ts
+      if (ts > through) through = ts
+    }
     if (typeof r.ms === 'number' && Number.isFinite(r.ms)) {
       msSum += r.ms
       msCount += 1
     }
-    if (outcome === 'injected') {
-      if (Array.isArray(r.items)) itemCounts.push(r.items.length)
-      if (typeof r.chars === 'number') charCounts.push(r.chars)
+    const pinnedCount =
+      typeof r.pinnedInjected === 'number'
+        ? r.pinnedInjected
+        : Array.isArray(r.pinnedItems)
+          ? r.pinnedItems.length
+          : 0
+
+    if (typeof r.pinnedInjected === 'number') {
+      // 新版：outcome 就是检索段的真实结果
+      newStyle += 1
+      if (outcome === 'injected') {
+        recallInjected += 1
+        wholeInjected += 1
+        if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+        if (typeof r.chars === 'number') charCounts.push(r.chars)
+      } else if (pinnedCount > 0) {
+        wholeInjected += 1
+      }
+    } else if (outcome === 'injected') {
+      // 旧版：pinnedOnly=true 说明这条 outcome 是被 pinned 折叠出来的，检索段结果已不可知
+      wholeInjected += 1
+      if (r.pinnedOnly === true) {
+        legacyFolded += 1
+      } else {
+        recallInjected += 1
+        if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+        if (typeof r.chars === 'number') charCounts.push(r.chars)
+      }
     }
+
     if (Array.isArray(r.dropped)) {
       dropped += r.dropped.length
-      pinnedDropped += r.dropped.filter((item) => item && item.reason === 'pinned-budget').length
+      // 老记录的 pinned 段被改写成 reason='pinned-budget'（无 segment），
+      // 新记录是 segment='pinned' + 真实原因，两种都要认。
+      pinnedDropped += r.dropped.filter(
+        (item) => item && (item.segment === 'pinned' || item.reason === 'pinned-budget'),
+      ).length
     }
     if (Array.isArray(r.pinnedItems) && r.pinnedItems.length > 0) {
       pinnedRuns += 1
@@ -949,9 +994,19 @@ function summarizeInjectRecords(records) {
   return {
     total,
     byOutcome,
+    // 统计窗口：读文件按尾部 512KB 截断，超长后窗口会自己缩，必须显式告诉用户，
+    // 否则同一个页面的「注入尝试」会随文件增长悄悄变少（2026-11-10 实测 901 → 739 且无提示）。
+    since,
+    through,
     // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
     timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
-    injectedRate: total === 0 ? 0 : (byOutcome.injected ?? 0) / total,
+    // 注入率 = **检索段**口径，与「注入了/超时/低分·低置信/无匹配」四态一致
+    injectedRate: total === 0 ? 0 : recallInjected / total,
+    // 整段口径：检索段或常驻段任一进了上下文。pinned 关着时两者相等。
+    wholeInjectedRate: total === 0 ? 0 : wholeInjected / total,
+    // 旧版折叠记录数 > 0 时要提示：这部分检索段结果不可知，注入率按已知部分算（偏低）
+    legacyFolded,
+    newStyle,
     avgItems: Number(avg(itemCounts).toFixed(2)),
     avgChars: Math.round(avg(charCounts)),
     avgMs: msCount === 0 ? 0 : Math.round(msSum / msCount),
@@ -1399,20 +1454,12 @@ async function handleDeleteMemory(ctx, res, req) {
 
   const now = new Date().toISOString()
   const actor = `panel:${str(config.identity?.userId) || 'unknown'}`
-  let deleted = true
-  try {
-    await client.del(target, esId, { refresh: 'wait_for' })
-  } catch (error) {
-    if (error?.status === 404) {
-      // 本来就不存在 = 目标状态已达成，按幂等成功算（重复点两次不该报错）
-      deleted = false
-    } else {
-      throw error
-    }
-  }
 
-  let auditWritten = false
-  let auditError = ''
+  // ⚠️ 团队删除必须**先写审计、再删**（2026-11-10 审查修复）：
+  // 旧版先 client.del 再写审计，审计写失败（403/索引缺失）时只 console.error 照样返回 200
+  // → 一条团队记忆被无痕删除，而 memory_audit 是免费版**唯一的人维度证据**。
+  // 现在审计是删除的前置条件：写不进去就不删，返回明确错误。
+  // 个人删除按设计不审计（用户 2026-10-29 确认），不受此约束。
   if (scope === 'team') {
     try {
       await client.index(names.audit, {
@@ -1424,21 +1471,50 @@ async function handleDeleteMemory(ctx, res, req) {
         team_doc_id: esId,
         reason,
       }, { refresh: 'wait_for' })
-      auditWritten = true
     } catch (error) {
-      auditError = String(error?.message ?? error).slice(0, 200)
-      console.error(`[memory-es-panel] 删除审计写入失败 ${esId}: ${auditError}`)
+      const auditError = String(error?.message ?? error).slice(0, 200)
+      console.error(`[memory-es-panel] 删除审计写入失败，已中止删除 ${esId}: ${auditError}`)
+      return json(res, 502, {
+        ok: false,
+        error: `审计写入失败，已中止删除（无审计不删）：${auditError}`,
+      })
     }
-  } else {
-    // 个人删除按设计不审计（用户 2026-10-29 确认）：不是"没权限写"的缺陷，就别在响应里
-    // 编一条错误说明；auditWritten=false 如实返回即可
-    auditError = ''
   }
 
+  let deleted = true
+  try {
+    await client.del(target, esId, { refresh: 'wait_for' })
+  } catch (error) {
+    if (error?.status === 404) {
+      // 本来就不存在 = 目标状态已达成，按幂等成功算（重复点两次不该报错）
+      deleted = false
+    } else {
+      // 审计已写「deleted」但删除没成，补一条更正记录，别让审计说谎
+      try {
+        await client.index(names.audit, {
+          event: 'delete_failed',
+          actor,
+          at: new Date().toISOString(),
+          subject_type: 'team_doc',
+          subject_id: esId,
+          team_doc_id: esId,
+          reason: `删除失败，上一条 deleted 记录作废：${String(error?.message ?? error).slice(0, 160)}`,
+        }, { refresh: 'wait_for' })
+      } catch (auditError) {
+        console.error(`[memory-es-panel] 删除失败的更正审计也没写成 ${esId}: ${String(auditError?.message ?? auditError)}`)
+      }
+      throw error
+    }
+  }
+
+  const auditWritten = scope === 'team'
   console.error(`[memory-es-panel] 删除 ${scope} esId=${esId} deleted=${deleted} audit=${auditWritten} actor=${actor}`)
   json(res, 200, {
     ok: true,
-    value: { esId, scope, deleted, auditWritten, auditError, at: now },
+    // auditError 恒为空串：团队删除的审计失败现在会在**删之前**就中止（返回 502），
+    // 走到这里的团队删除必然已留痕；个人删除按设计不审计（2026-10-29 用户确认）。
+    // 保留该键是为了不破坏已有响应契约。
+    value: { esId, scope, deleted, auditWritten, auditError: '', at: now },
   })
 }
 

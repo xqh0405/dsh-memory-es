@@ -320,7 +320,7 @@ const { createServer } = await import('node:http')
 const SINGLE = { userId: 'xqh', username: 'mem-user-xqh', password: 'pw', teamWrite: true }
 
 /** 假 ES：_has_privileges 按索引名分别回答，DELETE / 审计写入按参数给状态码 */
-async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, indexBuckets = [] } = {}) {
+async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, auditStatus = 201, indexBuckets = [] } = {}) {
   const calls = []
   const server = createServer((req, res) => {
     const chunks = []
@@ -341,7 +341,7 @@ async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, del
       if (req.method === 'DELETE') {
         return send(deleteStatus, { result: deleteStatus === 404 ? 'not_found' : 'deleted' })
       }
-      if (req.url.startsWith('/memory_audit/_doc')) return send(201, { result: 'created' })
+      if (req.url.startsWith('/memory_audit/_doc')) return send(auditStatus, { result: auditStatus >= 400 ? 'error' : 'created' })
       // /users 用的 _index 聚合：任何 personal_memory_* 的 _search 都回同一份 buckets；
       // 其他 _search 回空页（handleMemories 会拿它拼两库结果）
       if (req.url.includes('_search')) {
@@ -442,6 +442,53 @@ test('删除：团队删除成功 → 200 且写 memory_audit', async () => {
     assert.ok(audit, '团队删除必须写审计')
     assert.equal(JSON.parse(audit.body).event, 'deleted')
     assert.equal(JSON.parse(audit.body).reason, '内容过时')
+    // 顺序是这次修复的核心：审计必须**早于**删除（旧版先删后审计，审计失败就无痕删掉了）
+    const auditIdx = es.calls.findIndex((c) => c.url.startsWith('/memory_audit/_doc'))
+    const delIdx = es.calls.findIndex((c) => c.method === 'DELETE')
+    assert.ok(auditIdx < delIdx, `审计必须先于删除，实际 audit@${auditIdx} del@${delIdx}`)
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：团队审计写入失败 → 502 且不执行删除（无审计不删）', async () => {
+  const es = await startFakeEs({ canDeleteTeam: true, auditStatus: 403 })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '内容过时' }))
+    assert.equal(res.statusCode, 502, '审计写不进去必须报错，不能返回 200 假装成功')
+    const body = JSON.parse(res.body)
+    assert.equal(body.ok, false)
+    assert.match(body.error, /审计写入失败/)
+    assert.match(body.error, /已中止删除/)
+    assert.equal(
+      es.calls.filter((c) => c.method === 'DELETE').length,
+      0,
+      '审计没写成时绝不能删 —— 否则团队记忆被无痕删除（memory_audit 是唯一的人维度证据）',
+    )
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：审计已写但删除失败 → 补一条更正审计，不让审计说谎', async () => {
+  const es = await startFakeEs({ canDeletePersonal: true, canDeleteTeam: true, deleteStatus: 500 })
+  try {
+    const res = fakeRes()
+    // handler 直接把删除失败抛出去，由路由层顶层 catch 兜成 500（panel/index.js 的 500 分支）
+    let thrown = null
+    try {
+      await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '内容过时' }))
+    } catch (error) {
+      thrown = error
+    }
+    assert.ok(thrown, '删除失败必须抛出，不能静默返回 200')
+    assert.match(String(thrown?.message ?? thrown), /500|HTTP/)
+    const audits = es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc'))
+    assert.equal(audits.length, 2, `应有 deleted + delete_failed 两条，实际 ${audits.length}`)
+    assert.equal(JSON.parse(audits[0].body).event, 'deleted')
+    assert.equal(JSON.parse(audits[1].body).event, 'delete_failed')
+    assert.match(JSON.parse(audits[1].body).reason, /作废/)
   } finally {
     await es.close()
   }

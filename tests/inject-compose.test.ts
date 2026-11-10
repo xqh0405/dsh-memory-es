@@ -77,18 +77,22 @@ describe('composeInjection：pinned 段', () => {
     assert.ok(composed.text.length <= base.pinnedMaxChars + base.maxChars, '总长度不能超过两段预算之和')
   })
 
-  test('pinned 超预算时挤掉的是 pinned-budget，不是 max-chars', () => {
+  test('pinned 段超字符预算：保留真实原因 max-chars，用 segment 标明是 pinned 段', () => {
     // pinned 每条 250 字 × 4 = 1000 > 600 → 第 3 条开始被挤（前两条 500，第 3 条 750 超）
     const pinned = [0, 1, 2, 3].map((i) => hit(`p${i}`, '甲'.repeat(250)))
     const composed = composeInjection({ ...base, pinned, hits: [] })
 
     assert.ok(composed.pinned.length >= 1 && composed.pinned.length < 4)
-    const pinnedDropped = composed.dropped.filter((item) => item.reason === 'pinned-budget')
-    assert.ok(pinnedDropped.length > 0, '必须能说清是 pinned 段的预算不够')
+    const pinnedDropped = composed.dropped.filter((item) => item.segment === 'pinned')
+    assert.ok(pinnedDropped.length > 0, '必须能说清是 pinned 段挤掉的')
+    assert.ok(
+      pinnedDropped.every((item) => item.reason === 'max-chars'),
+      `pinned 段超字符预算要保留 max-chars，实际 ${JSON.stringify(pinnedDropped)}`,
+    )
     assert.equal(
-      composed.dropped.some((item) => item.reason === 'max-chars'),
+      composed.dropped.some((item) => item.reason === 'max-chars' && item.segment === 'recall'),
       false,
-      '检索段没东西，不该出现 max-chars',
+      '检索段没东西，不该出现检索段的 max-chars',
     )
   })
 
@@ -117,7 +121,14 @@ describe('composeInjection：pinned 段', () => {
     const pinned = Array.from({ length: PINNED_MAX_ITEMS + 4 }, (_, i) => hit(`p${i}`, '短'))
     const composed = composeInjection({ ...base, pinned, hits: [] })
     assert.equal(composed.pinned.length, PINNED_MAX_ITEMS)
-    assert.ok(composed.dropped.some((item) => item.reason === 'pinned-budget'))
+    // 条数超限必须记 max-items（不是字符原因）——2026-11-10 前旧版一律改写成 pinned-budget，
+    // 导致「条数超限」与「字符超限」在数据里分不开（实测 844 条全是 max-items）。
+    const pinnedDropped = composed.dropped.filter((item) => item.segment === 'pinned')
+    assert.ok(pinnedDropped.length > 0, 'pinned 段超条数要记进 dropped')
+    assert.ok(
+      pinnedDropped.every((item) => item.reason === 'max-items'),
+      `条数超限应记 max-items，实际 ${JSON.stringify(pinnedDropped)}`,
+    )
   })
 })
 

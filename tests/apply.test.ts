@@ -17,6 +17,17 @@ import { Config, type ConfigType } from '../src/config.ts'
 import { apply, inject, name } from '../src/index.ts'
 import { sendJson, startFakeEs, sendEsError } from './helpers/fake-es.ts'
 
+/**
+ * 影子观测必须落临时目录——**不配就会写进生产真文件**。
+ *
+ * `recallShadow.path` 默认 `''` → 回退 `dshMemoryDataDir()` → `~/.dsh/memory-es/recall-shadow.jsonl`，
+ * 而那正是线上在用的观测文件。2026-11-10 审查实测：439 条里 **112 条（25.5%）是本文件写的
+ * `agent='a1'`**（最近一条当天还在写），shadow 那 4 条 `POST /_msearch → 超时（1000ms）`
+ * 也全是测试的——1000ms 就来自下面 baseConfig 的 `requestTimeoutMs`；生产影子其实 error=0。
+ * 注入侧早就指了 tmpDir（`mem-inject-`/`mem-gate-`），影子侧漏了，这里补上。
+ */
+const shadowLogPath = join(mkdtempSync(join(tmpdir(), 'mem-shadow-')), 'recall-shadow.jsonl')
+
 /** 最小可用的 Config（默认值走 schema） */
 // identity 允许只覆盖部分字段：schema 有默认值，测试只想改动其中一两项
 function baseConfig(
@@ -28,6 +39,8 @@ function baseConfig(
     // 自签 CA —— 本机有 deploy/es/certs 才侥幸通过，CI 上没有就整片失败（2026-11-06）。
     // 这些用例只跑编排、不发真请求，端点写成什么都不影响语义。
     es: { url: 'http://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 1_000 },
+    // 影子 JSONL 指到临时目录（放在 ...overrides 之前：需要显式覆盖的用例仍可改）
+    recallShadow: { path: shadowLogPath },
     ...overrides,
   } as never) as ConfigType
   return parsed

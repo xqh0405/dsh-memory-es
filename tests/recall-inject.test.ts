@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
+import { EsError } from '../src/es/http.ts'
 import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, resolveInjectPath } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
@@ -103,6 +104,32 @@ describe('classifyInjectError', () => {
     assert.equal(classifyInjectError(new Error('ECONNREFUSED')), 'error')
     assert.equal(classifyInjectError('字符串也能兜住'), 'error')
     assert.equal(classifyInjectError(null), 'error')
+  })
+
+  // ⚠️ 生产真实路径：注入的超时来自 AbortSignal.timeout → ES 层把它包成 EsError
+  // （构造里 this.name='EsError'，kind='aborted'）。旧实现只认 name → 恒返回 'error'，
+  // 'timeout' 分支在生产不可达（2026-11-10 审查：8 条 error 的 ms 全贴 500ms 硬超时、
+  // 面板超时率恒 0%）。这条钉住那次修复，别改回只看 name。
+  test('EsError(kind=aborted/timeout) 必须归成 timeout —— 生产路径，不能只看 name', () => {
+    assert.equal(classifyInjectError(new EsError('POST /_msearch → 调用方取消', { kind: 'aborted' })), 'timeout')
+    assert.equal(classifyInjectError(new EsError('POST /_search → 超时（8000ms）', { kind: 'timeout' })), 'timeout')
+    // 非超时类 EsError 仍是真错误
+    assert.equal(classifyInjectError(new EsError('HTTP 403 forbidden', { kind: 'permission' })), 'error')
+    assert.equal(classifyInjectError(new EsError('连接失败', { kind: 'network' })), 'error')
+  })
+
+  test('cause 链遍历兜底：原生超时被包在普通 Error 里也能认出来', () => {
+    const inner = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+    const outer = new Error('wrapping', { cause: inner })
+    assert.equal(classifyInjectError(outer), 'timeout')
+    // 链上全是普通错误 → 仍是 error
+    assert.equal(classifyInjectError(new Error('a', { cause: new Error('b') })), 'error')
+  })
+
+  test('cause 链自引用不死循环（最多走 8 层）', () => {
+    const cyclic: { name: string; cause?: unknown } = { name: 'Weird' }
+    cyclic.cause = cyclic
+    assert.equal(classifyInjectError(cyclic), 'error')
   })
 })
 
