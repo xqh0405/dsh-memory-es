@@ -348,6 +348,14 @@ def main() -> int:
                 vectors.extend([None] * len(texts[i:i + args.batch]))
 
         for ci, (c, vec) in enumerate(zip(chunks, vectors)):
+            # ⚠️ 这里**不要**照 migrate-mnemon.py 去补 content_exact / importance /
+            # pinned / related / activation（2026-11-10 审查 L12/#29 曾把两者混为一谈）：
+            # 本脚本写的是 **`personal_doc_*`**，那份模板（init-indices.sh 的第二份 heredoc）
+            # 只有 20 个字段，**这 5 个一个都没有**，而索引是 `dynamic: strict` ——
+            # 写进去就是 strict_dynamic_mapping_exception，整批灌不进去。
+            # 标识符精确匹配（content_exact / IDENTIFIER_FIELD）目前只服务于
+            # `memory_search`，`doc_search` 那条路根本不读它；真要给文档加标识符匹配，
+            # 得先改模板 + 迁移 11 个 personal_doc_* 索引（与 16b / 21b 同类，别顺手做）。
             doc = {
                 "doc_id": doc_id,
                 "chunk_index": ci,
