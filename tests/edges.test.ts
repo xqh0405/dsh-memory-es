@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { createEsClient } from '../src/es/http.ts'
-import { mergeEdges, pickNeighbors, readEdges } from '../src/edges.ts'
+import { mergeEdges, mergeEdgesSegmented, pickNeighbors, readEdges } from '../src/edges.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { sendEsError, sendJson, startFakeEs, type FakeEs } from './helpers/fake-es.ts'
 
@@ -126,6 +126,79 @@ describe('mergeEdges', () => {
   })
 })
 
+// 2026-11-10 审查 P5/#20：`related` 里可能已有**文档边**（link-docs.ts 写的，
+// 权重 0.83~0.86），比记忆边（0.55~0.85）重。老写法 mergeEdges 按权重截断 topK
+// 会把记忆边**整组挤掉**（2026-11-09 实测 8 条记忆的记忆边被清空，git show 3209607）。
+// 这份分段逻辑之前重复存在于 backfill-edges.ts 与 link-docs.ts 两处，save.ts 还是老写法。
+describe('mergeEdgesSegmented（分段：文档边不参与 topK 截断）', () => {
+  const DOC = [
+    { id: 'doc-a-0', weight: 0.86 },
+    { id: 'doc-b-0', weight: 0.84 },
+  ]
+  const MEM = [
+    { id: 'm1', weight: 0.6 },
+    { id: 'm2', weight: 0.58 },
+  ]
+  const INCOMING = [
+    { id: 'n1', weight: 0.7 },
+    { id: 'n2', weight: 0.65 },
+    { id: 'n3', weight: 0.6 },
+  ]
+  const DOC_IDS = new Set(['doc-a-0', 'doc-b-0'])
+
+  test('existing 含文档边时不被记忆边挤掉（本条就是 #20 的核心回归）', () => {
+    const existing = [...DOC, ...MEM]
+    const out = mergeEdgesSegmented(existing, INCOMING, 3, DOC_IDS)
+
+    const docSeg = out.filter((e) => e.id.startsWith('doc-'))
+    const memSeg = out.filter((e) => !e.id.startsWith('doc-'))
+
+    // 文档边：原样全留（不占 topK 名额）
+    assert.equal(docSeg.length, 2, `文档边应 2 条全留，实际 ${JSON.stringify(docSeg)}`)
+    // 要钉的性质是**记忆段独占 topK 预算**：
+    // 5 个记忆候选（m1/m2 旧 + n1/n2/n3 新）按权重取前 3 —— 拿满 3 个名额。
+    // （m2 是最低分 0.58，落选是**对的**：topK 对记忆段照样生效，本函数不是在取消上界。）
+    assert.equal(memSeg.length, 3, `记忆段应拿满 topK=3 个名额，实际 ${JSON.stringify(memSeg)}`)
+    assert.ok(memSeg.some((e) => e.id === 'm1'), `至少要有旧记忆边留下来，实际 ${JSON.stringify(memSeg)}`)
+
+    // 对照同一组输入走老写法：文档边占掉 2 个名额 → 记忆段只剩 1 个 → 旧记忆边全没
+    const naive = mergeEdges(existing, INCOMING, 3)
+    const naiveMem = naive.filter((e) => !e.id.startsWith('doc-'))
+    assert.equal(naiveMem.length, 1, `老写法记忆段被压到 1 个名额（bug 现象），实际 ${JSON.stringify(naive)}`)
+    assert.equal(
+      naive.filter((e) => e.id === 'm1' || e.id === 'm2').length,
+      0,
+      '老写法下旧记忆边一条不剩 —— 这正是「8 条归零」的成因，作为对照钉死',
+    )
+  })
+
+  test('对照：老写法 mergeEdges 会把记忆边全挤没（这正是当时的 bug）', () => {
+    const existing = [...DOC, ...MEM]
+    const naive = mergeEdges(existing, INCOMING, 3)
+    const naiveIds = naive.map((e) => e.id)
+    // 文档边更重 → 占掉 topK 的头两名，旧记忆边 m1/m2 一条不剩
+    assert.equal(naiveIds.includes('m1'), false, '老写法下 m1 应当被挤掉（bug 现象）')
+    assert.equal(naiveIds.includes('m2'), false, '老写法下 m2 应当被挤掉（bug 现象）')
+    // 有了分段版之后，这条对照同时钉住「别改回老写法」
+    const fixed = mergeEdgesSegmented(existing, INCOMING, 3, DOC_IDS)
+    assert.ok(fixed.some((e) => e.id === 'm1'), '分段版必须保住 m1')
+  })
+
+  test('文档边集合为空时，结果与 mergeEdges 完全一致（退化不改变行为）', () => {
+    const existing = [...MEM, { id: 'other', weight: 0.5 }]
+    assert.deepEqual(
+      mergeEdgesSegmented(existing, INCOMING, 3, new Set()),
+      mergeEdges(existing, INCOMING, 3),
+      '没有文档边时两条路必须等价，否则分段逻辑会给常态路径带来行为变化',
+    )
+  })
+
+  test('topK=0：文档边仍保留、记忆段清空（关掉的只是记忆段上界）', () => {
+    const out = mergeEdgesSegmented([...DOC, ...MEM], INCOMING, 0, DOC_IDS)
+    assert.deepEqual(out.map((e) => e.id), ['doc-a-0', 'doc-b-0'])
+  })
+})
+
 describe('readEdges', () => {
   test('缺失/非数组一律当空', () => {
     assert.deepEqual(readEdges(undefined), [])
@@ -152,6 +225,12 @@ interface FakeEdgesState {
   existing: unknown
   /** true = 写回 related 时返回 500 */
   failUpdate: boolean
+  /**
+   * `existing` 里**属于文档切片**的 id（2026-11-10 审查 P5/#20）：
+   * save 在 existing 非空时会拿它做 ids 查询，分出文档边才能分段合并。
+   * 缺省 [] = 文档索引存在但这些 id 不是文档（判定结果是**空集**，不等于「判不出」）。
+   */
+  docIds?: string[]
 }
 
 async function startEdgesFake(overrides: Partial<FakeEdgesState> = {}): Promise<{
@@ -165,8 +244,23 @@ async function startEdgesFake(overrides: Partial<FakeEdgesState> = {}): Promise<
     const body = req.body === '' ? {} : (JSON.parse(req.body) as Record<string, unknown>)
 
     if (req.path.includes('/_search')) {
+      // 文档边判定（#20）：save 在 existing 非空时对 `personal_doc_<uid>` 做一次 ids 查询，
+      // 问「这些 id 哪些是文档切片」—— 必须排在 knn/去重两路**之前**（它两者都不是）。
+      if (req.path.includes('personal_doc_')) {
+        const ids = (body.query as { ids?: { values?: unknown } } | undefined)?.ids
+        const wanted = (Array.isArray(ids?.values) ? ids?.values : []) as string[]
+        const hits = wanted.filter((id) => (state.docIds ?? []).includes(String(id)))
+        sendJson(res, 200, {
+          took: 1,
+          hits: {
+            total: { value: hits.length, relation: 'eq' },
+            hits: hits.map((id) => ({ _id: id, _score: 1, _source: {} })),
+          },
+        })
+        return
+      }
+      // 向量路：返回预设候选
       if (body.knn !== undefined) {
-        // 向量路：返回预设候选
         sendJson(res, 200, {
           took: 1,
           hits: {
@@ -227,6 +321,9 @@ function makeDeps(fake: FakeEs, overrides: Partial<SaveDeps> = {}): SaveDeps {
     now: () => NOW,
     newId: () => FIXED_ID,
     edges: EDGES,
+    // 与生产接线一致（index.ts 给 defineSaveTool 传的）：#20 的文档边判定要用它。
+    // 缺省有它 → existing 非空时会去查文档索引，判定结果由 state.docIds 决定。
+    docPrefix: 'personal_doc_',
     ...overrides,
   }
 }
@@ -276,6 +373,54 @@ describe('saveMemory 建边', () => {
           { id: 'old', weight: 0.66 },
         ],
       })
+    } finally {
+      await fake.close()
+    }
+  })
+
+  // 2026-11-10 审查 P5/#20 的两条 save 侧行为：
+  test('existing 含文档边 → 分段合并，文档边原样保住、记忆边不被挤掉', async () => {
+    const { fake, updates } = await startEdgesFake({
+      // 文档边更重（0.86 > 记忆边 0.6）——老写法按权重截断会把它整组挤掉
+      neighbors: [{ memoryId: 'n1', score: 0.7 }],
+      existing: [
+        { id: 'doc-a-0', weight: 0.86 },
+        { id: 'm1', weight: 0.6 },
+      ],
+      docIds: ['doc-a-0'],
+    })
+    try {
+      await saveMemory(makeDeps(fake), { content: '一条带文档边的补充事实' })
+      const doc = (updates[0] as { doc?: { related?: Array<{ id: string }> } }).doc
+      const ids = (doc?.related ?? []).map((e) => e.id)
+      assert.ok(ids.includes('doc-a-0'), `文档边必须原样保住，实际 ${JSON.stringify(ids)}`)
+      assert.ok(ids.includes('m1'), `记忆边 m1 不能被挤掉，实际 ${JSON.stringify(ids)}`)
+      assert.ok(ids.includes('n1'), `新邻居 n1 应并进来，实际 ${JSON.stringify(ids)}`)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('判不出文档边（没给 docPrefix）→ 本轮不写 related，绝不猜', async () => {
+    const { fake, updates } = await startEdgesFake({
+      neighbors: [{ memoryId: 'n1', score: 0.7 }],
+      existing: [
+        { id: 'doc-a-0', weight: 0.86 },
+        { id: 'm1', weight: 0.6 },
+      ],
+    })
+    const events: Array<Record<string, unknown>> = []
+    try {
+      const result = await saveMemory(
+        makeDeps(fake, { docPrefix: undefined, log: (e) => events.push(e) }),
+        { content: '一条判定不出文档边的事实' },
+      )
+      assert.equal(result.deduped, false, '保存本身必须成功')
+      assert.equal(updates.length, 0, `判不出时绝不能写 related（写下去就可能把文档边挤掉），实际写了 ${JSON.stringify(updates)}`)
+      assert.ok(
+        events.some((e) => e.event === 'edges_skipped_unclassifiable'),
+        `要记一条 edges_skipped_unclassifiable 让这事可查，实际事件：${events.map((e) => e.event).join(',')}`,
+      )
     } finally {
       await fake.close()
     }

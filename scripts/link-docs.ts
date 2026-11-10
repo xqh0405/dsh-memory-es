@@ -177,6 +177,14 @@ async function main(): Promise<void> {
 
     // 上限 = 已有全部 + 本次实际新增：**不允许挤掉记忆↔记忆的边**。
     // 2026-11-09 第一版写死 12，结果 8 条记忆的原有边被文档边整组顶掉（已回滚重修）。
+    //
+    // ⚠️ 这里**不改用** `src/edges.ts` 的 `mergeEdgesSegmented`（2026-11-10 抽出的唯一实现），
+    // 不是漏改，是契约不同：那个函数要求「记忆段按 topK 截断」，而本脚本要的是
+    // **记忆边一条都不裁**（topK 这里传的是 `existing + keptIncoming`，等于不裁）+
+    // **文档边按条数单独设上限**（maxDocEdges）+ 整体重排。
+    // 别为了「统一」把它换掉 —— 换掉就会重新裁掉记忆边。
+    // 想复用的话正确做法是给 `mergeEdgesSegmented` 增加一个「记忆段不设界」的入口参数，
+    // 而不是在这里套一个 topK。
     const merged = mergeEdges(existing, keptIncoming, existing.length + keptIncoming.length)
     // 硬上限最后再裁一道：文档边按权重留前 maxDocEdges 条，记忆边全留。
     // 只挡新增不修剪的话，首版跑出来的超量会一直留在库里（实测有 36 条的）。

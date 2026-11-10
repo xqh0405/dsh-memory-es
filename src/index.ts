@@ -161,6 +161,9 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineSaveTool({
           userId,
           personalPrefix,
+          // 只用于建边时区分文档边（2026-11-10 审查 P5/#20）：
+          // related 里已有文档边时不能按权重截断，否则记忆边被整组挤掉
+          docPrefix: config.index.docPrefix,
           defaultDomain: config.defaults.domain,
           // 阶段 24：写开关（全局 + 按域覆盖）；闸在 saveMemory 里，内部调用也过
           writeMode: config.governance.write,

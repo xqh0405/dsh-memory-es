@@ -30,7 +30,7 @@ import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { assertDocOwner, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor, type WriteMode } from './common.ts'
-import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
+import { mergeEdges, mergeEdgesSegmented, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 import {
   checkAdmission,
   DEFAULT_ORIGIN,
@@ -180,6 +180,16 @@ export interface SaveDeps {
   userId: string
   /** 个人索引前缀；索引名在这里拼（`personalIndex` 由前缀 + userId 派生，不给调用点拼错的机会） */
   personalPrefix: string
+  /**
+   * 文档索引前缀（`personal_doc_`），只用于**建边时区分文档边**（2026-11-10 审查 P5/#20）。
+   *
+   * `related` 里可能已有 `scripts/link-docs.ts` 写的**文档边**（权重 0.83~0.86，
+   * 比记忆边 0.55~0.85 更重），直接 `mergeEdges` 按权重截断 topK 会把记忆边
+   * **整组挤掉**（2026-11-09 实测 8 条归零，`git show 3209607`）。
+   * 缺省 undefined = 判不出文档边 → 此时**本轮不动 related**（宁可不建边也不破坏），
+   * 老调用点与测试不受影响。
+   */
+  docPrefix?: string
   defaultDomain: string
   /** 去重检索用只读身份；`get` 缺失时不建边（老调用点与测试不受影响） */
   reader: Pick<EsClient, 'search'> & Partial<Pick<EsClient, 'get'>>
@@ -357,6 +367,41 @@ interface NeighborProbe {
   linked: number
 }
 
+/**
+ * 判定 `related` 里哪些 id 是**文档边**（2026-11-10 审查 P5/#20）。
+ *
+ * 文档边是 `scripts/link-docs.ts` 写进记忆侧的 `{id, weight}`，id 指向
+ * `personal_doc_<uid>` 里的切片；判定只能靠查那个索引 —— id 形态上
+ * 「`{doc_id}-{chunk}`」与 UUID 记忆 id 分不开（UUID 也以数字结尾）。
+ *
+ * 返回 `null` = **判不出**（没给 docPrefix / 文档索引不存在 / 查询失败），
+ * 调用方应当跳过本轮写入而不是猜：判错的代价是**丢掉已有文档边**，
+ * 不写的代价只是晚一轮建边。
+ *
+ * 与 `scripts/backfill-edges.ts` 的处理不同：那边判不出时按「没有文档边」继续，
+ * 因为它是**主动回填**、覆盖面就是全部条目；save 是热路径且**当前 existing 恒为空**
+ * （只对刚创建的文档跑），判不出属于异常形态，保守跳过更合适。
+ */
+async function probeDocEdgeIds(deps: SaveDeps, existing: readonly Edge[]): Promise<Set<string> | null> {
+  const prefix = deps.docPrefix
+  if (prefix === undefined || existing.length === 0) return null
+  if (typeof deps.reader.search !== 'function') return null
+  try {
+    const res = await deps.reader.search(
+      `${prefix}${deps.userId}`,
+      {
+        size: existing.length,
+        query: { ids: { values: existing.map((edge) => edge.id) } },
+        _source: false,
+      },
+      { signal: deps.signal },
+    )
+    return new Set(res.hits.map((hit) => hit.id))
+  } catch {
+    return null
+  }
+}
+
 async function probeNeighbors(
   deps: SaveDeps,
   index: string,
@@ -407,10 +452,38 @@ async function probeNeighbors(
       if (picked.length > 0) {
         // 读回再合并：幂等，将来重跑建边不会把已有边冲掉
         const current = await get(index, memoryId, { signal: deps.signal })
-        const next = mergeEdges(readEdges(current.source.related), picked, edgeCfg.topK)
-        await update(index, memoryId, { related: next }, { refresh: 'wait_for', signal: deps.signal })
-        linked = next.length
-        log({ tool: 'save', user: deps.userId, event: 'edges_linked', count: next.length, added: picked.length })
+        const existing = readEdges(current.source.related)
+
+        let next: Edge[] | null = null
+        if (existing.length === 0) {
+          // 常态：本路径只对**刚创建**的文档跑（saveMemory 用新 id 建，去重命中会提前 return），
+          // 所以 related 恒为 [] —— 一次文档边判定查询都不会发，行为与旧版完全一致。
+          next = mergeEdges(existing, picked, edgeCfg.topK)
+        } else {
+          // 只有 existing 非空才需要判定（2026-11-10 审查 P5/#20）。
+          // 旧写法直接 mergeEdges：文档边（0.83~0.86）比记忆边重，按权重截断 topK
+          // 会把记忆边整组挤掉 —— 2026-11-09 实测 8 条记忆的记忆边被清空。
+          const docIds = await probeDocEdgeIds(deps, existing)
+          if (docIds === null) {
+            // 判不出（没给 docPrefix / 文档索引不存在 / 查询失败）→ 本轮不写 related。
+            // 宁可不建边也不许破坏已有边：判错的代价是**丢数据**，不写的代价是晚一轮建边。
+            log({
+              tool: 'save',
+              user: deps.userId,
+              memory_id: memoryId,
+              event: 'edges_skipped_unclassifiable',
+              existing: existing.length,
+            })
+          } else {
+            next = mergeEdgesSegmented(existing, picked, edgeCfg.topK, docIds)
+          }
+        }
+
+        if (next !== null) {
+          await update(index, memoryId, { related: next }, { refresh: 'wait_for', signal: deps.signal })
+          linked = next.length
+          log({ tool: 'save', user: deps.userId, event: 'edges_linked', count: next.length, added: picked.length })
+        }
       }
     }
 

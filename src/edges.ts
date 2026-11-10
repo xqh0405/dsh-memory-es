@@ -110,6 +110,36 @@ export function mergeEdges(
 }
 
 /**
+ * **分段合并**：文档边原样保留，只对「记忆 ↔ 记忆」这一段做合并 + topK 截断。
+ *
+ * 为什么不能直接用 `mergeEdges`：`related` 里可能已经有**文档边**
+ * （`scripts/link-docs.ts` 写的，权重 0.83~0.86），比记忆边（0.55~0.85）更重，
+ * 而 `mergeEdges` 按权重截断到 topK → **文档边把记忆边整组挤掉**
+ * （2026-11-09 实测：8 条记忆的记忆边被清空，`git show 3209607`）。
+ *
+ * 这段逻辑在 2026-11-10 之前**重复存在两份**（`scripts/backfill-edges.ts` 与
+ * `scripts/link-docs.ts` 各写各的），`src/memory/save.ts` 则还是老写法 ——
+ * 修一次漏两处正是它反复出问题的原因。抽到这里做**唯一实现**，三条链路共用。
+ *
+ * 返回值**不加全局上界**：文档边自己有上限（link-docs 的 `maxDocEdges`），
+ * 记忆段有 `topK`，两者相加就是总上界。调用方若无法判定哪些是文档边，
+ * 就不要调本函数 —— 应当跳过本轮写入（宁可不建边，也不许破坏已有边）。
+ *
+ * @param docIds 已确认属于文档的边 id（调用方查 `personal_doc_*` 得到）
+ */
+export function mergeEdgesSegmented(
+  existing: readonly Edge[],
+  incoming: readonly Edge[],
+  topK: number,
+  docIds: ReadonlySet<string>,
+): Edge[] {
+  const docIdOf = (edge: Edge): string => (typeof edge.id === 'string' ? edge.id.trim() : '')
+  const docEdges = existing.filter((edge) => docIds.has(docIdOf(edge)))
+  const memEdges = existing.filter((edge) => !docIds.has(docIdOf(edge)))
+  return [...docEdges, ...mergeEdges(memEdges, incoming, topK)]
+}
+
+/**
  * 把 `related` 字段读成边数组（旧文档没有该字段、或被手工写坏时一律当空）。
  * `related` 是 `enabled:false` 的 object，读回来就是原始 JSON。
  */
