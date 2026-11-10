@@ -18,14 +18,21 @@ HOST="${PANEL_HOST:?请用 PANEL_HOST=user@host 指定目标主机}"
 KEY="${PANEL_SSH_KEY:-$HOME/.ssh/dsh_ai}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 显式列出而不是 docker ps 通配：dsh-es 是 ES 本体，dsh-* 里还有 dsh-market 之类非实例容器
-ALL=(dsh-xqh dsh-chencan dsh-hongzhihui dsh-laoliu dsh-liuxinling
-     dsh-molijin dsh-tanxu dsh-test dsh-zhongjinqi dsh-zhongyuhang)
+# 目标清单交给唯一的发现函数（2026-11-10 审查 M2/#23）：
+# 这里原来是**写死的 10 个**，2026-11-09 就因为这个漏铺了新加的 dsh-zhaoguichun。
+# 现在改成现取 + denylist + 白名单差集校验，细节与理由见 scripts/lib/dsh-targets.sh。
+source "$REPO_ROOT/scripts/lib/dsh-targets.sh"
 
 if [ $# -gt 0 ]; then
   TARGETS=("$@")
 else
-  TARGETS=("${ALL[@]}")
+  mapfile -t TARGETS < <(dsh_targets "$HOST" "$KEY")
+  # dsh_targets 失败时**不会**往 stdout 写任何行（它先 return 再打印），
+  # 所以这里数不到目标 = 它已经把原因写到 stderr 了；中止而不是静默跳过。
+  if [ "${#TARGETS[@]}" -eq 0 ]; then
+    echo "取不到部署目标，中止（不静默跳过）" >&2
+    exit 1
+  fi
 fi
 
 ok=0; fail=0

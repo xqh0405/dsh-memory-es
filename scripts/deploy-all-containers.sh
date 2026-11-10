@@ -27,12 +27,16 @@ if [ -n "$SSH_KEY" ]; then SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}"); fi
 if [ -n "${PANEL_CONTAINERS:-}" ]; then
   read -r -a CONTAINERS <<<"$PANEL_CONTAINERS"
 else
-  mapfile -t CONTAINERS < <(ssh "${SSH_OPTS[@]}" "$HOST" \
-    "docker ps --format '{{.Names}}' | grep '^dsh-' | grep -v '^dsh-es$' | sort")
-fi
-if [ "${#CONTAINERS[@]}" -eq 0 ]; then
-  echo "没有找到要部署的容器" >&2
-  exit 1
+  # 与 deploy-all-panel.sh 共用同一个目标发现函数（2026-11-10 审查 M2/#23）：
+  # 这里原来是内联的 `docker ps | grep '^dsh-' | grep -v '^dsh-es$'`，
+  # 只排掉 dsh-es —— dsh-market 之类非实例容器会被当成部署目标捞进来。
+  # 现在走现取 + denylist + 白名单差集校验（见 scripts/lib/dsh-targets.sh）。
+  source "$REPO_ROOT/scripts/lib/dsh-targets.sh"
+  mapfile -t CONTAINERS < <(dsh_targets "$HOST" "${SSH_KEY:-}")
+  if [ "${#CONTAINERS[@]}" -eq 0 ]; then
+    echo "没有找到要部署的容器" >&2
+    exit 1
+  fi
 fi
 
 VERSION="$(bash "$REPO_ROOT/scripts/version.sh" check | sed 's/^版本：//')"
