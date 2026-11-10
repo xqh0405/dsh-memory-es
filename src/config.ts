@@ -379,9 +379,12 @@ export const Config: z<ConfigType> = z.object({
   governance: z.object({
     write: z.union([z.const('on'), z.const('readonly'), z.const('off')]).default('on')
       .description(
-        '写入开关。on=正常；readonly=拒绝 memory_save 并返回明确原因（检索照常）；'
-        + 'off=彻底关闭写入（语义同 readonly，保留给「停机维护」这种更强表态）。'
-        + '挡在 saveMemory 里，所以导入/蒸馏回写/将来的 pinned 写入都走同一道闸。',
+        '写入开关。on=正常；readonly / off 都拒绝**插件侧的一切写入**并返回明确原因（检索与面板查看照常），'
+        + 'off 是给「停机维护」的更强表态。'
+        + '闸在 writer 层的 assertWriteAllowed，覆盖 memory_save（含导入）、蒸馏正文回写、清扫的状态收口、'
+        + '自述/人格/日记直写、pin、promote、review 与锚点、history 回滚、mood 写回；'
+        + '面板的人工管理动作（删除/恢复/反馈/归档）不走这道闸，维护期仍能清理数据。'
+        + '（2026-11-10 起真拦这些链路：此前只挡 saveMemory，文案却承诺都走同一道闸。）',
       ),
     perDomain: z.dict(z.union([z.const('on'), z.const('readonly'), z.const('off')]))
       .default({})
@@ -664,15 +667,26 @@ export function validateConfig(config: ConfigType): string[] {
 export function missingRouteWarning(config: ConfigType): string | null {
   const routeMissing = config.distill.provider.trim() === '' || config.distill.model.trim() === ''
   if (!routeMissing) return null
+  // 只有这几条是**完全依赖配置路由**的：留空就选不到模型。
   const affected = [
     config.traits.enabled ? '自述(traits)' : '',
     config.journal.enabled ? '日记(journal)' : '',
-    config.distill.enabled ? '后台蒸馏(distill)' : '',
   ].filter(Boolean)
-  if (affected.length === 0) return null
+  // ⚠️ 蒸馏要单独说（2026-11-10 审查 #15 修误报）：它有两条链路 ——
+  //  · 即时蒸馏（memory_save 之后）带**会话路由**（save.ts → runDistillJob → pickRoute 的 job.route），
+  //    配置留空照样能蒸；
+  //  · 15 分钟清扫只传配置路由，配置空才整轮跳过。
+  // 旧版把 distill.enabled 直接列进受影响面，于是「即时蒸馏其实在正常工作」也被说成坏了。
+  const sweepAffected = config.distill.enabled
+  if (affected.length === 0 && !sweepAffected) return null
+  const head = affected.length === 0 ? '' : `${affected.join('、')} 已启用，但 `
+  const sweepNote = sweepAffected
+    ? '另外后台蒸馏的 15 分钟清扫会整轮跳过（即时蒸馏仍走会话路由，通常可用）；'
+    : ''
   return (
-    `[dsh-memory-es] 配置缺失：${affected.join('、')} 已启用，但 distill.provider / distill.model 没填 —— ` +
-    '模型路由会选不到，提炼每次静默返回 0 条、日记永不写（不报错、不写日志）。' +
-    '请在 cordis.patch.yml 的 dsh-memory-es.config.distill 下补 provider/model 后重启 dsh web。'
+    `[dsh-memory-es] 配置缺失：${head}distill.provider / distill.model 没填 —— ` +
+    '模型路由会选不到，提炼每次静默返回 0 条、日记永不写（不报错、不写日志）。'
+    + sweepNote
+    + '请在 cordis.patch.yml 的 dsh-memory-es.config.distill 下补 provider/model 后重启 dsh web。'
   )
 }

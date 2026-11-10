@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { EsClient } from './es/http.ts'
-import { personalIndexFor } from './memory/common.ts'
+import { assertWriteAllowed, personalIndexFor, type WriteMode } from './memory/common.ts'
 import { dshSessionsRoot } from './sessions.ts'
 import { DEFAULT_TIMEZONE, addDays, minutesOfDay, zonedDayStart, zonedParts } from './timezone.ts'
 
@@ -41,6 +41,8 @@ export interface JournalDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'search'>
   writer: Pick<EsClient, 'index'>
+  /** 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为 */
+  writeMode?: WriteMode
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
@@ -267,6 +269,8 @@ export async function writeJournal(
   content: string,
   timeZone: string = DEFAULT_TIMEZONE,
 ): Promise<{ written: boolean; memory_id: string }> {
+  // 写闸（2026-11-10 下沉）：日记是 LLM 产出的写入，维护期不落库
+  assertWriteAllowed(deps, '日记写入')
   const now = deps.now?.() ?? new Date()
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const memoryId = journalMemoryId(date)

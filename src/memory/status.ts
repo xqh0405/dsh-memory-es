@@ -26,7 +26,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { MemoryStoreDeps } from './common.ts'
-import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
+import { assertWriteAllowed, loadOwnedDoc, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor } from './common.ts'
+import { PINNED_ITEM_MAX_CHARS, PINNED_MAX_ITEMS } from '../recall-inject.ts'
 
 export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private', 'pin', 'unpin'] as const
 export type StatusAction = (typeof STATUS_ACTIONS)[number]
@@ -88,6 +89,36 @@ function describe(action: StatusAction, status: string, replacement: string): st
 }
 
 /**
+ * 数一下当前有多少条「可注入的常驻」，供 pin 回执报上限用。
+ *
+ * 口径与 `pinnedSearchBody` 完全一致（pinned + active，且排除非事实三类）——
+ * 报出来的数字必须等于「真正会进注入段的条数」，否则回执又变成另一种过度承诺。
+ * `reader.search` 是可选能力（有的测试只给 get），数不出来返回 null 走降级文案；
+ * 查询失败同理：**数不清不该让 pin 这个动作失败**。
+ */
+async function countPinned(deps: UpdateStatusDeps, index: string): Promise<number | null> {
+  if (typeof deps.reader.search !== 'function') return null
+  try {
+    const res = await deps.reader.search(
+      index,
+      {
+        size: 0,
+        query: {
+          bool: {
+            filter: [{ term: { pinned: true } }, { term: { status: 'active' } }],
+            must_not: [{ terms: { memory_type: [...NON_FACT_MEMORY_TYPES] } }],
+          },
+        },
+      },
+      { signal: deps.signal },
+    )
+    return res.total
+  } catch {
+    return null
+  }
+}
+
+/**
  * 编排。所有写都走 writer 凭证；读走 reader。
  * 失败一律抛（不吞）：改状态失败却回报成功，会让模型以为旧记忆已经下架。
  */
@@ -95,6 +126,10 @@ export async function updateStatus(
   deps: UpdateStatusDeps,
   input: UpdateStatusInput,
 ): Promise<UpdateStatusResult> {
+  // 写闸（2026-11-10 下沉，用户拍板「全拦」）：pin/unpin、归档、supersede、过期、恢复隔离
+  // 全走这一个入口，一道闸就够。旧版这里零检查 —— 24.3 只堵了 memory_save，
+  // governance.write=off 时仍能置顶并每轮注入（审查 A2 里最像后门的一条）。
+  assertWriteAllowed(deps, `memory_update_status action=${String(input.action)}`)
   const startedAt = Date.now()
   const log = deps.log ?? (() => {})
   const action = input.action
@@ -215,6 +250,17 @@ export async function updateStatus(
       ms: Date.now() - startedAt,
       changed: written.result !== 'noop',
     })
+    let text = describe(action, status, '')
+    // 回执必须把上限说清楚（2026-11-10 审查 #14）：旧版只承诺「每轮注入都会带上它」，
+    // 但常驻段实际有 8 条上限、单条截断到 200 字 —— 第 9 条被挤掉时用户毫无察觉，
+    // 于是「记住了」变成「以为记住了」。数不出来也不该让 pin 失败，退化成只报静态上限。
+    if (action === 'pin' && status === 'active') {
+      const total = await countPinned(deps, index)
+      const cap = `常驻段每轮只注入前 ${PINNED_MAX_ITEMS} 条、单条截断到 ${PINNED_ITEM_MAX_CHARS} 字`
+      text = total === null
+        ? `${text}（${cap}）`
+        : `${text}（当前常驻共 ${total} 条；${cap}——超出的按重要度与更新时间取舍）`
+    }
     return {
       memory_id: current.id,
       action,
@@ -222,7 +268,7 @@ export async function updateStatus(
       privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
       superseded_by: typeof current.source.superseded_by === 'string' ? current.source.superseded_by : '',
       changed: written.result !== 'noop',
-      text: describe(action, status, ''),
+      text,
     }
   }
 

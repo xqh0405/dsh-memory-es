@@ -13,7 +13,7 @@
 
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
-import { personalIndexFor } from './common.ts'
+import { assertWriteAllowed, personalIndexFor, type WriteMode } from './common.ts'
 import { NEUTRAL_MOOD, readMoodState, type MoodState } from '../mood.ts'
 
 /** 状态文档的固定 id：一个用户至多一份 */
@@ -27,6 +27,8 @@ export interface MoodStoreDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'get'>
   writer: Pick<EsClient, 'index'>
+  /** 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为 */
+  writeMode?: WriteMode
   log?: (event: Record<string, unknown>) => void
 }
 
@@ -50,6 +52,8 @@ export async function readMood(deps: MoodStoreDeps, signal?: AbortSignal): Promi
 
 /** 写回状态（upsert，`refresh: wait_for` 保证下一次读立刻可见） */
 export async function writeMood(deps: MoodStoreDeps, state: MoodState, signal?: AbortSignal): Promise<void> {
+  // 写闸（2026-11-10 下沉）：情绪状态也是写入，维护期保持原样
+  assertWriteAllowed(deps, 'mood 写回')
   const now = state.updatedAt ?? new Date().toISOString()
   const doc: Record<string, unknown> = {
     memory_id: MOOD_DOC_ID,

@@ -14,7 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
-import { personalIndexFor } from './common.ts'
+import { assertWriteAllowed, personalIndexFor, type WriteMode } from './common.ts'
 
 /** 一条链最多走这么多跳（防脏数据成环） */
 export const CHAIN_MAX_HOPS = 10
@@ -34,6 +34,8 @@ export interface HistoryDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'search' | 'get'>
   writer: Pick<EsClient, 'update'>
+  /** 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为 */
+  writeMode?: WriteMode
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
@@ -113,6 +115,8 @@ export async function collectChain(deps: HistoryDeps, memoryId: string): Promise
  * 是撤回过的，回滚它们没有意义）。
  */
 export async function rollbackTo(deps: HistoryDeps, targetId: string): Promise<RollbackOutcome> {
+  // 写闸（2026-11-10 下沉）：回滚会改两条文档的状态，维护期不动
+  assertWriteAllowed(deps, 'memory_history rollback')
   const log = deps.log ?? (() => {})
   const now = deps.now?.() ?? new Date()
   const index = personalIndexFor(deps.personalPrefix, deps.userId)

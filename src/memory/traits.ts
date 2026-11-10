@@ -17,8 +17,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
+import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { checkAdmission } from './admission.ts'
-import { NON_FACT_MEMORY_TYPES, personalIndexFor } from './common.ts'
+import { NON_FACT_MEMORY_TYPES, assertWriteAllowed, personalIndexFor, type WriteMode } from './common.ts'
 import { IDENTITY_MEMORY_TYPE } from './save.ts'
 
 /** 候选 trait 的状态：检索只认 active，所以 pending 天然不进结果 */
@@ -155,6 +156,11 @@ export interface TraitsDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'search'>
   writer: Pick<EsClient, 'index'>
+  /**
+   * 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为。
+   * LLM 直写候选与 memory_save 走同一道闸（配置文案一直这么承诺）。
+   */
+  writeMode?: WriteMode
   /**
    * 向量服务：候选自述也要带 embedding，否则下一批提炼没法跟它做语义判重
    * （kNN 只查得到有向量的文档）。不可用时跳过判重，**不能因此阻断写入**。
@@ -420,6 +426,9 @@ export async function writeTraitCandidate(
   trait: TraitCandidate,
   days: number,
 ): Promise<{ written: boolean; memory_id: string; quarantined?: boolean; reason?: string }> {
+  // 写闸（2026-11-10 下沉）：LLM 直写候选与 memory_save 同一道闸——
+  // 旧版只有准入（下面那段），governance.write=off 时照样能写候选。
+  assertWriteAllowed(deps, '自述候选写入')
   // 2026-11-02 评审：准入此前只挂在 memory_save 一条路上，LLM 产物（traits/persona）
   // 直接写库且审核采纳后即 active —— 「明文口令被蒸馏进库」正是这条路径。补同一道闸。
   const verdict = checkAdmission(trait.content)
@@ -447,7 +456,15 @@ export async function writeTraitCandidate(
     distill_state: 'traits',
     evidence_ids: trait.evidence_ids,
     traits_window_days: days,
-    content_sha256: hashContent(trait.content),
+    // ⚠️ 这两个派生字段必须与 buildMemoryDoc 同口径（2026-11-10 审查 #11/#12）：
+    //  · content_sha256 旧版写的是 `hashContent()`（FNV-1a **8 位**），而 dedupeBody
+    //    （dsl.ts）校验的是 **64 位 hex** → 永远命不中，同一正文既被提炼又被 save 时不去重；
+    //    跨库按 sha 去重（fragment.ts）时两者也永不相等。
+    //  · content_exact 旧版不写 → 标识符精确匹配对候选永远不命中，
+    //    而且存量回填（scripts/backfill-distill-keys.ts）刚修好的一致性会被新写入重新打破。
+    // `hashContent` 保留给 memoryId 派生（上面那行）—— 8 位做 id 够用，做去重键不够。
+    content_sha256: sha256Hex(normalizeContent(trait.content)),
+    content_exact: trait.content,
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   }
@@ -653,6 +670,14 @@ export async function runTraitsJob(
     pendingCount: pendingCount + written,
     maxPending,
     skipped: null,
+    // 诊断字段**非 dry_run 也要带**（2026-11-10 审查 #15）：
+    // 旧版只有干跑分支带，而线上跑的恰恰是 dry_run=false —— 于是「模型给了 0 条候选」时
+    // 用户只看到 0，分不清是「真没得提炼」还是「路由没配好、模型返回了 [诊断]…」。
+    // `[诊断]` 原文只在 dry_run 吐出，静默失败就是这么来的（v0.6.48 加的启动预警
+    // 只看配置字符串非空，兜不住「填了但填错」这类运行期故障）。
+    rawPreview: raw.slice(0, 200),
+    rawLength: raw.length,
+    rawTail: raw.slice(-80),
   }
 }
 
@@ -783,5 +808,13 @@ function renderTraitsText(result: TraitsResult, days: number, dryRun: boolean): 
   const pendingNote = result.pendingCount !== undefined && result.maxPending !== undefined
     ? `；当前待审 ${result.pendingCount}/${result.maxPending} 条`
     : ''
-  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${concreteNote}${quotaNote}${pendingNote}。`
+  // 0 候选时把模型原话带出来（2026-11-10 审查 #15）：这条以前只在 dry_run 分支里有，
+  // 而线上跑的是 dry_run=false —— 「写了 0 条」与「模型/路由出了问题」在返回上一模一样。
+  // `[诊断] 选不到模型路由…` 这类原文必须能被看到，否则只能靠猜。
+  const diag = result.candidates === 0 && result.rawPreview !== undefined
+    ? `\n\n模型原始输出（共 ${result.rawLength ?? 0} 字符，前 200；用来区分「真没得提炼」与「模型/路由出了问题」）：`
+      + `\n${result.rawPreview === '' ? '(空)' : result.rawPreview}`
+      + (result.rawTail === undefined ? '' : `\n结尾（判断是否被截断）：\n${result.rawTail}`)
+    : ''
+  return `最近 ${days} 天共 ${result.sources} 条记忆，模型给出 ${result.candidates} 条候选，新写入 ${result.written} 条（status=pending，未生效）${dupNote}${concreteNote}${quotaNote}${pendingNote}。${diag}`
 }

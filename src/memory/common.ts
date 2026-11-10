@@ -12,6 +12,15 @@
 import type { EsClient } from '../es/http.ts'
 import { EsError } from '../es/http.ts'
 
+/**
+ * 写入开关的取值（配置见 `config.governance.write`）。
+ *
+ * 2026-11-10 从 `save.ts` 搬来这里：写闸下沉到 writer 层之后，**所有写入模块**
+ * 都要认这个类型，放 save.ts 会让 common → save 形成反向依赖。
+ * `save.ts` 仍 re-export，老 import 路径不断。
+ */
+export type WriteMode = 'on' | 'readonly' | 'off'
+
 export interface MemoryStoreDeps {
   /** 取消信号：工具把 `exec.signal` 塞进来，一路传到 ES 请求（声明 timeoutMs 的前提） */
   signal?: AbortSignal
@@ -25,6 +34,39 @@ export interface MemoryStoreDeps {
   writer: Pick<EsClient, 'update'>
   /** 结构化日志：不记录 content / 凭证 */
   log?: (event: Record<string, unknown>) => void
+  /**
+   * 写入开关（阶段 24 → 2026-11-10 下沉到 writer 层）。
+   *
+   * **缺省 = `'on'`**：不传就完全不改变历史行为，所以新增的写入点即使忘了传也不会误拦。
+   * 只有 `src/index.ts` 装配时显式传 `config.governance.write` 才真正生效。
+   */
+  writeMode?: WriteMode
+}
+
+/**
+ * 写闸：`governance.write !== 'on'` 时抛出，拦下**插件侧的任何写入**。
+ *
+ * 为什么放在 writer 层而不是只在 `saveMemory` 里：2026-11-10 审查发现配置文案
+ * （config.governance.write）承诺「导入 / 蒸馏回写 / pinned 都走同一道闸」，实际只有
+ * `memory_save` 检查——`governance.write=off`（停机维护）时新增记忆被拒，但后台仍在
+ * 改写已有正文、仍能 pin 置顶。**用户 2026-11-10 拍板：全拦，代码向文档靠。**
+ *
+ * 覆盖：memory_save（含导入）、蒸馏正文回写、sweep 状态收口（done/skipped/failed）、
+ * traits/persona/journal 直写、pin/unpin、promote、review、history 回滚、mood。
+ *
+ * **不覆盖**：面板的人工管理动作（删除 / 恢复 / 反馈 / 归档）——那是管理员显式操作、
+ * 且面板自成一套（不 import 本模块），维护期仍要能清理数据。
+ *
+ * @param deps 带 writeMode 的依赖（缺省视为 'on'）
+ * @param where 出现在错误信息里，方便定位是哪条链路被拦
+ */
+export function assertWriteAllowed(deps: { writeMode?: WriteMode }, where: string): void {
+  const mode = deps.writeMode ?? 'on'
+  if (mode === 'on') return
+  throw new Error(
+    `写入已关闭（governance.write=${mode}），${where} 被拒绝。`
+    + '维护结束后把 governance.write 改回 on 再重试；期间的检索、面板查看不受影响。',
+  )
 }
 
 export interface OwnedDoc {

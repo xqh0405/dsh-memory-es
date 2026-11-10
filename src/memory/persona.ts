@@ -25,8 +25,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
+import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { checkAdmission } from './admission.ts'
-import { personalIndexFor } from './common.ts'
+import { assertWriteAllowed, personalIndexFor, type WriteMode } from './common.ts'
 import { hashContent } from './traits.ts'
 import { dshSessionsRoot } from '../sessions.ts'
 
@@ -321,6 +322,8 @@ export interface PersonaDeps {
   personalPrefix: string
   reader: Pick<EsClient, 'search'>
   writer: Pick<EsClient, 'index'>
+  /** 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为 */
+  writeMode?: WriteMode
   embed?: { embed(text: string, call?: { signal?: AbortSignal }): Promise<number[]> }
   dims?: number
   now?: () => Date
@@ -375,6 +378,8 @@ export async function writePersonaCandidate(
   sources: readonly PersonaSource[],
   days: number,
 ): Promise<{ written: boolean; memory_id: string; quarantined?: boolean; reason?: string }> {
+  // 写闸（2026-11-10 下沉）：与 traits 同一道，维护期 LLM 不写库
+  assertWriteAllowed(deps, '人格候选写入')
   // 与 traits 同一个理由：LLM 产物也必须过写入准入（2026-11-02 评审）
   const verdict = checkAdmission(cand.content)
   if (!verdict.allow) {
@@ -410,7 +415,11 @@ export async function writePersonaCandidate(
     distill_state: 'persona',
     evidence_ids: evidence,
     traits_window_days: days,
-    content_sha256: hashContent(cand.content),
+    // 同 traits.ts：派生字段必须与 buildMemoryDoc 同口径（2026-11-10 审查 #11/#12）。
+    // 旧版写 `hashContent()`（FNV-1a 8 位），dedupeBody 校验 64 位 hex → 永远命不中；
+    // content_exact 不写 → 标识符精确匹配对人格候选永远不命中。
+    content_sha256: sha256Hex(normalizeContent(cand.content)),
+    content_exact: cand.content,
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   }

@@ -20,9 +20,10 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { checkAdmission } from './admission.ts'
 import type { MemoryStoreDeps } from './common.ts'
-import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
+import { assertWriteAllowed, loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
 
 export const DISTILL_STATES = ['pending', 'done', 'skipped', 'failed'] as const
 export type DistillState = (typeof DISTILL_STATES)[number]
@@ -53,6 +54,10 @@ export interface DistillDeps extends MemoryStoreDeps {
 }
 
 export async function distillMemory(deps: DistillDeps, input: DistillInput): Promise<DistillResult> {
+  // 写闸（2026-11-10 下沉）：governance.write=off 时蒸馏不碰数据——
+  // 旧版这里零检查，配置文案却承诺「蒸馏回写走同一道闸」（审查 H4）。
+  // 放在最前面：连读都不必做，维护期后台任务一次 ES 往返都不发。
+  assertWriteAllowed(deps, '蒸馏回写')
   const startedAt = Date.now()
   const log = deps.log ?? (() => {})
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
@@ -86,6 +91,15 @@ export async function distillMemory(deps: DistillDeps, input: DistillInput): Pro
 
   const patch: Record<string, unknown> = {
     content,
+    // 正文被改写了，这两个**必须跟着改**（2026-11-10 审查 #11）：
+    //  · content_exact 是标识符精确匹配字段（dsl.ts 的 IDENTIFIER_FIELD），
+    //    不更新 = 精确匹配永远打在**旧正文**的 token 上，新正文里的标识符不加分；
+    //  · content_sha256 是去重键（dsl.ts 的 dedupeBody），不更新 = 与内容脱钩：
+    //    对「蒸馏后正文」再 memory_save 不去重（产生同内容副本），
+    //    对「原始正文」保存却命中旧 sha 回「已存在」——回执不实。
+    // 口径与 buildMemoryDoc 完全一致：exact 存原文、sha 存归一化后的正文。
+    content_exact: content,
+    content_sha256: sha256Hex(normalizeContent(content)),
     distill_state: 'done',
     distilled_at: nowIso(deps.now?.() ?? new Date()),
     distill_source_chars: original.length,

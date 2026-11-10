@@ -34,7 +34,7 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_MAX_ITEMS, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import type { Projected } from './fragment.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
@@ -192,6 +192,7 @@ export function apply(ctx: Context, config: ConfigType): void {
               {
                 userId,
                 personalPrefix,
+                writeMode: config.governance.write,
                 reader,
                 writer,
                 embed,
@@ -232,6 +233,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         void runDistillSweep({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           embed,
@@ -341,6 +343,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineStatusTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           log: (event) => logger.info('status %o', event),
@@ -355,6 +358,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         definePromoteTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           log: (event) => logger.info('promote %o', event),
@@ -369,6 +373,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineDistillTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           embed,
@@ -443,6 +448,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineHistoryTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           now: () => new Date(),
@@ -459,6 +465,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineReviewTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           auditIndex: config.index.audit,
           auditPrefix: config.index.auditPrefix,
           reader,
@@ -474,6 +481,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const traitsDeps = {
     userId,
     personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     // 判重与候选向量都靠它；embedding 挂了只跳过判重，不影响提炼与写入
@@ -572,6 +580,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const personaDeps: PersonaDeps = {
     userId,
     personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     embed,
@@ -630,6 +639,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     const journalDeps = {
       userId,
       personalPrefix,
+      writeMode: config.governance.write,
       reader,
       writer,
       now: () => new Date(),
@@ -719,6 +729,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const moodStore = {
     userId: config.identity.userId,
     personalPrefix: config.index.personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     log: (event: Record<string, unknown>) => logger.info('mood %o', event),
@@ -909,7 +920,10 @@ export function apply(ctx: Context, config: ConfigType): void {
         try {
           const res = await reader.search(
             pinnedIndex,
-            pinnedSearchBody(PINNED_MAX_ITEMS * 2),
+            // 取数池必须明显大于 PINNED_MAX_ITEMS（8）：进程内还要按 importance 挑前 8，
+            // 只取 16 条等于「先让 ES 随便挑 16 条、再在这 16 条里排序」。
+            // 旧版 `PINNED_MAX_ITEMS * 2` 且无 sort → 超 16 条时选中哪批不确定（审查 #13）。
+            pinnedSearchBody(PINNED_FETCH_SIZE),
             { signal: AbortSignal.timeout(inject.timeoutMs) },
           )
           return normalizePinnedHits(res.hits)

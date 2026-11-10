@@ -14,10 +14,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { MemoryStoreDeps } from './common.ts'
-import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
+import { assertWriteAllowed, loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
+import { PROMOTE_STATE_LABELS, SETTLED_PROMOTE_STATES } from './promoteState.ts'
 
-export const PROMOTE_STATES = ['none', 'candidate', 'promoted', 'rejected', 'blocked'] as const
-export type PromoteState = (typeof PROMOTE_STATES)[number]
+// ⚠️ 这里曾经有一份 `PROMOTE_STATES = ['none','candidate','promoted','rejected','blocked']`，
+// 与 promoteState.ts 的权威字典**不一致**（多 rejected、少 personal_only/dismissed），
+// 且全仓零引用——2026-11-10 审查（G4）删掉。要改状态集合只动 promoteState.ts。
 
 export interface PromoteInput {
   memory_id: string
@@ -38,20 +40,37 @@ export interface PromoteDeps extends MemoryStoreDeps {
 
 /** 编排：读（reader）→ 校验归属 → 置 candidate（writer）。失败一律抛。 */
 export async function promoteMemory(deps: PromoteDeps, input: PromoteInput): Promise<PromoteResult> {
+  // 写闸（2026-11-10 下沉）：标 candidate 是写入，维护期不该动 promote_state。
+  assertWriteAllowed(deps, 'memory_promote')
   const startedAt = Date.now()
   const log = deps.log ?? (() => {})
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const current = await loadOwnedDoc(deps, input.memory_id)
 
   const already = current.source.promote_state
-  if (already === 'promoted') {
-    // 已经在团队库里了，再标 candidate 会让整理任务重复处理
-    log({ tool: 'promote', user: deps.userId, memory_id: current.id, skipped: 'already_promoted' })
+  // 终态一律不重开（2026-11-10 审查 G4）：旧版只挡 `promoted`，会把
+  // blocked（敏感拦下）/ dismissed（人工判定不合并）/ personal_only 改回 candidate，
+  // 让它们重新进整理扫描 —— 人工结论被工具一键推翻，与 promoteState.ts 的约定冲突。
+  if (typeof already === 'string' && (SETTLED_PROMOTE_STATES as readonly string[]).includes(already)) {
+    log({ tool: 'promote', user: deps.userId, memory_id: current.id, skipped: `settled:${already}` })
+    if (already === 'promoted') {
+      // 已经在团队库里了，再标 candidate 会让整理任务重复处理（文案保持原样，测试钉着）
+      return {
+        memory_id: current.id,
+        promote_state: 'promoted',
+        changed: false,
+        text: '这条已经晋升过（promote_state=promoted），无需再标',
+      }
+    }
     return {
       memory_id: current.id,
-      promote_state: 'promoted',
+      promote_state: already,
       changed: false,
-      text: '这条已经晋升过（promote_state=promoted），无需再标',
+      // labels 的键是联合类型，而 already 此处还是 string（刚由 SETTLED 判过）→ 显式收窄
+      text:
+        `这条已有终态 promote_state=${already}`
+        + `（${(PROMOTE_STATE_LABELS as Record<string, string>)[already] ?? already}），`
+        + '不能改回 candidate —— 终态是人工判定或敏感扫描给的结论，重开会让整理任务推翻它。',
     }
   }
 

@@ -130,6 +130,42 @@ describe('buildMemoryDoc（纯函数）', () => {
     assert.deepEqual(built.doc.embedding, VECTOR)
   })
 
+  // 2026-11-10 审查 G5：旧版 status 恒为 'active'，于是模型一句
+  // `memory_save(memory_type='identity')` 就能拿到**生效自述**，绕过采纳闸与锚点；
+  // 而提炼侧 traits.ts:8 写死「只写候选 pending」、review.ts:9 只动 pending —— 两条路不一致。
+  test('非事实类（identity）只能落 pending，需审核台采纳才生效', () => {
+    const built = buildMemoryDoc(
+      { content: '用户偏好先给结论再解释', memory_type: 'identity' },
+      { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'lottery-cloud' },
+      { now: NOW, memoryId: FIXED_ID, embedding: null },
+    )
+    assert.equal(built.doc.status, 'pending', 'identity 必须是 pending（不能直写生效）')
+
+    // persona / journal 根本不在 MEMORY_TYPES 里 —— save 这条路连写都写不进去
+    // （它们的产出方是提炼侧，那边本来就只写 pending）。两层都要钉：
+    // 万一哪天有人把它们加进 MEMORY_TYPES，下面的 pending 判定也得继续兜住。
+    for (const type of ['persona', 'journal'] as const) {
+      assert.throws(
+        () => buildMemoryDoc(
+          // 故意传**非法** memory_type（MemoryType 联合里没有它们），断言必须被拒
+          { content: 'x', memory_type: type as never },
+          { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'lottery-cloud' },
+          { now: NOW, memoryId: FIXED_ID, embedding: null },
+        ),
+        /未知 memory_type/,
+        `${type} 不该能经 memory_save 写入`,
+      )
+    }
+
+    // 事实类不受影响：正常入库即生效
+    const fact = buildMemoryDoc(
+      { content: '一条事实' },
+      { userId: 'xqh', personalPrefix: 'personal_memory_', defaultDomain: 'lottery-cloud' },
+      { now: NOW, memoryId: FIXED_ID, embedding: null },
+    )
+    assert.equal(fact.doc.status, 'active', '事实类仍是 active')
+  })
+
   test('阶段 7.1：identity 类型可保存，且落在 memory_type 上', () => {
     const built = buildMemoryDoc(
       { content: '我倾向于先给出结论再解释理由', memory_type: 'identity', importance: 'critical' },

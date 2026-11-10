@@ -16,7 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
-import { personalIndexFor } from './common.ts'
+import { assertWriteAllowed, personalIndexFor, type WriteMode } from './common.ts'
 import { PERSONA_MEMORY_TYPE } from './persona.ts'
 import { IDENTITY_MEMORY_TYPE } from './save.ts'
 import { TRAIT_STATUS } from './traits.ts'
@@ -46,6 +46,8 @@ export interface ReviewDeps {
   auditPrefix: string
   reader: Pick<EsClient, 'search' | 'get'>
   writer: Pick<EsClient, 'index' | 'update'>
+  /** 写入开关（2026-11-10 下沉）：缺省 `'on'`，不传不改变历史行为 */
+  writeMode?: WriteMode
   now?: () => Date
   log?: (event: Record<string, unknown>) => void
 }
@@ -126,6 +128,10 @@ async function transition(
   note: string | undefined,
   successText: string,
 ): Promise<ReviewOutcome> {
+  // 写闸（2026-11-10 下沉）：采纳/驳回都是状态写入，维护期不动审核态。
+  // 拦住 transition 就同时覆盖 approveCandidate 与 rejectCandidate 两个入口，
+  // 下面的 writeAudit 也跟着不可达（审计是它们的副作用，不是独立入口）。
+  assertWriteAllowed(deps, `memory_review ${event}`)
   const log = deps.log ?? (() => {})
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const now = deps.now?.() ?? new Date()
@@ -202,6 +208,8 @@ export async function setAnchor(
   memoryId: string,
   anchor: boolean,
 ): Promise<ReviewOutcome> {
+  // 写闸（2026-11-10 下沉）：设/取消锚点同样是写入
+  assertWriteAllowed(deps, 'memory_review anchor')
   const index = personalIndexFor(deps.personalPrefix, deps.userId)
   const now = deps.now?.() ?? new Date()
 

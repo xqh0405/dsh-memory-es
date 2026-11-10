@@ -29,7 +29,7 @@ import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
-import { assertDocOwner, nowIso, personalIndexFor } from './common.ts'
+import { assertDocOwner, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor, type WriteMode } from './common.ts'
 import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 import {
   checkAdmission,
@@ -117,8 +117,13 @@ export interface SaveResult {
   text: string
 }
 
-/** 阶段 24：写入模式。`on` 正常；`readonly` / `off` 拒绝一切写入。 */
-export type WriteMode = 'on' | 'readonly' | 'off'
+/**
+ * 阶段 24：写入模式。`on` 正常；`readonly` / `off` 拒绝一切写入。
+ *
+ * 类型本体已搬到 `common.ts`（写闸下沉后所有写入模块都要用），这里 re-export
+ * 保住老 import 路径（`config.ts` 与历史代码仍从 save.ts 取）。
+ */
+export type { WriteMode } from './common.ts'
 
 /** 建边配置（阶段 5.2）。缺省 = 不建边。 */
 export interface EdgeWriteConfig {
@@ -307,7 +312,12 @@ export function buildMemoryDoc(
     // 蒸馏状态：入库立刻可见（pending），后台子代理处理后改成 done。
     // 由插件自己写，不依赖 LLM —— 入库不能被模型可用性卡住。
     distill_state: 'pending',
-    status: 'active',
+    // 非事实类（identity / persona / journal）**只能落 pending**，由 memory_review 采纳后才生效。
+    // 旧版这里固定 'active' —— 模型一句 `memory_save(memory_type='identity')` 就能拿到
+    // 生效自述，直接绕过采纳闸与锚点（2026-11-10 审查 G5）；而提炼侧 traits.ts:8 的纪律
+    // 明写「只写候选 pending、不写生效条目」，review.ts:9 也只动 pending —— 两条路必须一致。
+    // 与 search.ts:348 的排除口径同源（都用 NON_FACT_MEMORY_TYPES），加类型只改一处。
+    status: (NON_FACT_MEMORY_TYPES as readonly string[]).includes(memoryType) ? 'pending' : 'active',
     // 阶段 5：联结与激活。写入时给初值，让字段语义明确（老文档缺失按同值处理）：
     // related 由建边步骤补；activation 由检索命中回写累加（search.ts 的 HIT_UPDATE_SCRIPT），
     // 扩散激活消费时按 last_hit_at 做时间衰减（fragment.ts 的 spreadActivation，默认 alpha=0 关着）。
@@ -630,7 +640,8 @@ export function defineSaveTool(deps: SaveDeps) {
         type: 'string',
         enum: [...MEMORY_TYPES],
         description:
-          '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景，identity=稳定自述（由提炼任务产出、审核后写入，不要随手用）。',
+          '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景，'
+          + 'identity=稳定自述（**只落 pending，要审核台采纳后才生效** —— 正常由提炼任务产出，别随手用）。',
       },
       importance: {
         type: 'string',

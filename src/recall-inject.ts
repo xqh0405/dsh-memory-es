@@ -22,6 +22,7 @@ import { join } from 'node:path'
 
 import { EsError } from './es/http.ts'
 import type { Projected } from './fragment.ts'
+import { NON_FACT_MEMORY_TYPES } from './memory/common.ts'
 import { dshMemoryDataDir } from './sessions.ts'
 
 /** 注入块在 system prompt 里的段落名（与工具说明、情绪、引用约定并列） */
@@ -172,12 +173,44 @@ export const PINNED_MAX_ITEMS = 8
  */
 export const PINNED_ITEM_MAX_CHARS = 200
 
-/** pinned 段的取数条件：只认 `pinned=true AND status=active`，与 query 无关 */
+/**
+ * 从 ES 取多少条 pinned 候选。
+ *
+ * 必须**明显大于** `PINNED_MAX_ITEMS`（8）：进程内还要按 importance→更新时间挑前 8，
+ * 只取 8 条就等于「先让 ES 随便挑 8 条、再在这 8 条里排序」——挑错池子，排序再对也白搭。
+ *
+ * 旧版是 `PINNED_MAX_ITEMS * 2`（16）且**没有 sort**：filter 查询 `_score` 恒定，
+ * 16 条以上时「哪 16 条进候选」由分片内部顺序决定 → 每轮注入集合可能抖动、
+ * 部分常驻规则静默消失（2026-11-10 审查 #13）。线上当前单用户最多 4 条 pinned，
+ * 属**潜伏**风险；64 给足余量，成本是一次 filter 查询多回几十条 `_source`。
+ */
+export const PINNED_FETCH_SIZE = 64
+
+/**
+ * pinned 段的取数条件：只认 `pinned=true AND status=active`，与 query 无关。
+ *
+ * `sort` 是这次修复的关键之一：没有它，`size` 截断时选中哪几条是**不确定**的
+ * （同一份数据两次查询可能给出不同顺序）。`updated_at desc` 只为确定性——
+ * 真正的优先级仍由进程内 `normalizePinnedHits` 按 importance 排（ES 里 importance 是
+ * keyword，按它排只会得到字典序，见 IMPORTANCE_ORDER 的说明）。
+ */
 export function pinnedSearchBody(size: number): Record<string, unknown> {
   return {
     size,
     _source: ['memory_id', 'content', 'summary', 'memory_type', 'domain', 'importance', 'updated_at'],
-    query: { bool: { filter: [{ term: { pinned: true } }, { term: { status: 'active' } }] } },
+    query: {
+      bool: {
+        filter: [{ term: { pinned: true } }, { term: { status: 'active' } }],
+        // 排除「非事实」三类（2026-11-10 审查 #14）：检索段一直按 NON_FACT_MEMORY_TYPES
+        // 排除 identity/persona/journal（自述/人格/日记会挤占事实召回），pinned 段却绕过了它 ——
+        // 于是被 pin 的未审核自述能每轮注入。两段口径必须一致。
+        // ⚠️ 第二道闸在 save：#10 已让 memory_save(identity) 只落 pending，
+        // 而这里过滤 status=active —— 两道一起才堵死「未审核自述被 pin 后注入」。
+        // 线上实测 16 条 pinned 全是 preference，故本改动当前是无操作、不改变任何现有注入。
+        must_not: [{ terms: { memory_type: [...NON_FACT_MEMORY_TYPES] } }],
+      },
+    },
+    sort: [{ updated_at: 'desc' }],
   }
 }
 
