@@ -30,71 +30,20 @@ fi
 
 es() { es_curl "$AUTH" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
-# 1) 模板：整体替换成与 init-indices.sh 同一份定义（含 day / review_state）
-echo "== 1/3 模板 personal_memory_template =="
-es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSON'
-{
-  "index_patterns": ["personal_memory_*"],
-  "priority": 100,
-  "template": {
-    "settings": {
-      "number_of_shards": 1,
-      "number_of_replicas": 0,
-      "refresh_interval": "5s"
-    },
-    "mappings": {
-      "dynamic": "strict",
-      "properties": {
-        "memory_id":         { "type": "keyword" },
-        "user_id":           { "type": "keyword" },
-        "content":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "content_exact":     { "type": "text", "analyzer": "standard" },
-        "summary":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "semantic_keywords": { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "embedding":         { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
-        "memory_type":       { "type": "keyword" },
-        "domain":            { "type": "keyword" },
-        "topic_key":         { "type": "keyword" },
-        "privacy":           { "type": "keyword" },
-        "importance":        { "type": "keyword" },
-        "hit_count":         { "type": "integer" },
-        "last_hit_at":       { "type": "date" },
-        "related":           { "type": "object", "enabled": false },
-        "activation":        { "type": "float" },
-        "mood_valence":      { "type": "float" },
-        "mood_arousal":      { "type": "float" },
-        "mood_updated_at":   { "type": "date" },
-        "mood_events":       { "type": "object", "enabled": false },
-        "valence":           { "type": "float" },
-        "evidence_ids":      { "type": "object", "enabled": false },
-        "traits_window_days": { "type": "integer" },
-        "arousal":           { "type": "float" },
-        "superseded_at":     { "type": "date" },
-        "reviewed_at":       { "type": "date" },
-        "reviewed_by":       { "type": "keyword" },
-        "review_note":       { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "anchor":            { "type": "boolean" },
-        "day":               { "type": "keyword" },
-        "review_state":      { "type": "keyword" },
-        "blocked_reason":    { "type": "keyword" },
-        "personal_only_reason": { "type": "text" },
-        "distill_state":        { "type": "keyword" },
-        "distilled_at":         { "type": "date" },
-        "distill_source_chars": { "type": "integer" },
-        "promote_state":     { "type": "keyword" },
-        "status":            { "type": "keyword" },
-        "supersedes":        { "type": "keyword" },
-        "superseded_by":     { "type": "keyword" },
-        "content_sha256":    { "type": "keyword" },
-        "created_at":        { "type": "date" },
-        "updated_at":        { "type": "date" },
-        "expires_at":        { "type": "date" }
-      }
-    }
-  }
-}
-JSON
-echo '  ok'
+# 1) 模板：**现场提取** init-indices.sh 的那份（含 day / review_state）
+#
+# ⚠️ 这里原来内联手抄了一份 44 字段的模板，注释还写着「内容与 init-indices.sh 一致」——
+#    实际 init-indices 是 51 字段，重跑一次会删掉 origin / pinned / quarantine_reason /
+#    forget_reason / confirmed_use / corrections / feedback_at 共 7 个（2026-11-10 审查 P2/#18）。
+#    `PUT _index_template` 是整体替换，手抄子集的代价是**延迟到新建索引才发作**。
+#    改成与其余 5 个迁移脚本同款的现场提取，由 tests/template-sync.test.ts 钉住不复发。
+TEMPLATE_JSON=$(awk '/<<'"'"'JSON'"'"'/{if(!started){started=1; next}} started && /^JSON$/{exit} started{print}' "$ROOT/scripts/init-indices.sh")
+if ! printf '%s' "$TEMPLATE_JSON" | grep -q '"day"'; then
+  echo 'init-indices.sh 的模板里没有 day —— 先把模板改好再迁移' >&2
+  exit 1
+fi
+es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<<"$TEMPLATE_JSON"
+echo '  ok（模板与 init-indices.sh 同源）'
 
 # 2) 已存在的个人索引：逐个补字段（新增字段的 PUT _mapping 幂等）
 echo "== 2/3 已存在的个人索引 =="
