@@ -63,7 +63,11 @@ if [ "${1:-}" = "--live" ]; then
   ES_USER="${MEM_ES_USER:-mem-user-$USER_ID}"
   PERSONAL_INDEX="${MEM_ES_INDEX:-${PREFIX}${USER_ID}}"
 
-  exec python3 "$CHECK" live "$REQUIRED" "$PROMOTER" "$SEARCH" "$ES_URL" "$ES_CA" "$PASS" "$ES_USER" "$PERSONAL_INDEX"
+  # 密码走**环境变量**而不是 argv（2026-11-10 审查 M7/#27）：
+  # argv 会出现在 /proc/<pid>/cmdline（**全员可读**），而 environ 只有属主可读。
+  # 同仓库 scripts/lib/curl-es.sh 早就为 `curl -u` 立过这条规矩，这里补齐另一半。
+  export MEM_ES_PASS="$PASS"
+  exec python3 "$CHECK" live "$REQUIRED" "$PROMOTER" "$SEARCH" "$ES_URL" "$ES_CA" "$ES_USER" "$PERSONAL_INDEX"
 fi
 
 exec python3 "$CHECK" static "$REQUIRED" "$PROMOTER" "$SEARCH" "$INIT"

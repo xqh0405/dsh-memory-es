@@ -18,6 +18,7 @@
 
 import base64
 import json
+import os
 import re
 import ssl
 import sys
@@ -50,7 +51,7 @@ def fields_static(init_path: str) -> tuple[set[str], set[str]]:
     return got["personal"], got["team"]
 
 
-def fields_live(url: str, ca: str, pw: str, es_user: str, personal_index: str) -> tuple[set[str], set[str]]:
+def fields_live(url: str, ca: str, es_user: str, personal_index: str) -> tuple[set[str], set[str]]:
     """从线上 _mapping 取字段集。
 
     账号与个人索引名**由调用方传**（2026-11-10 审查 M11/#19 去硬编码）：
@@ -58,7 +59,15 @@ def fields_live(url: str, ca: str, pw: str, es_user: str, personal_index: str) -
     或打到别人的索引，而 401 只会在报告里变成一行含糊的失败。
     （本 docstring 刻意不写出那两个字面量 —— tests/template-sync.test.ts 断言本文件
     不含它们，重写回硬编码会被那条测试抓红。）
+
+    密码走**环境变量 `MEM_ES_PASS`，不进 argv**（2026-11-10 审查 M7/#27）：
+    argv 会出现在 `/proc/<pid>/cmdline`（**全员可读**），而 `/proc/<pid>/environ`
+    只有属主可读 —— 同仓库 `scripts/lib/curl-es.sh` 早就为 `curl -u` 立过这条规矩。
     """
+    pw = os.environ.get('MEM_ES_PASS', '')
+    if pw == '':
+        print('live 模式需要环境变量 MEM_ES_PASS（密码不走 argv）', file=sys.stderr)
+        raise SystemExit(2)
     ctx = ssl.create_default_context(cafile=ca)
 
     def get(path: str):
@@ -171,18 +180,20 @@ def main() -> int:
     args = sys.argv[1:]
     if len(args) < 5:
         print("用法：check-index-fields.py <static|live> <required> <promoter> <search> <init|url> "
-              "[ca pass user personal_index]", file=sys.stderr)
+              "[ca user personal_index]\n"
+              "      live 模式的密码走环境变量 MEM_ES_PASS（不进 argv）", file=sys.stderr)
         return 2
     mode, required_s, promoter, search_path = args[0], args[1], args[2], args[3]
     required = required_s.split()
 
     if mode == "live":
-        if len(args) < 9:
-            print("live 模式要 9 个参数：… <url> <ca> <pass> <user> <personal_index>"
-                  "（账号与索引名由调用方传，不再硬编码）", file=sys.stderr)
+        # 注意**没有密码这个位置参数**：密码走 MEM_ES_PASS 环境变量（#27）。
+        if len(args) < 8:
+            print("live 模式要 8 个参数：… <url> <ca> <user> <personal_index>"
+                  "（密码走 MEM_ES_PASS 环境变量，不进 argv）", file=sys.stderr)
             return 2
-        url, ca, pw, es_user, personal_index = args[4], args[5], args[6], args[7], args[8]
-        personal, team = fields_live(url, ca, pw, es_user, personal_index)
+        url, ca, es_user, personal_index = args[4], args[5], args[6], args[7]
+        personal, team = fields_live(url, ca, es_user, personal_index)
         label = f"线上 mapping（{url}，{es_user}@{personal_index}）"
     else:
         init = args[4]

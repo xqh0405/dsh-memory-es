@@ -80,7 +80,15 @@ if [ -z "$MEM_PASS" ]; then
   OWNER="${MEM_USER#mem-user-}"
   PC="personal_memory_${OWNER}"
 else
-  es() { curl -s --max-time 8 --cacert "$ES_CA" -u "$MEM_USER:$MEM_PASS" -H 'Content-Type: application/json' "$@"; }
+  # 凭据不进 argv（2026-11-10 审查 M7/#27）：`curl -u "$USER:$PASS"` 会把密码放进
+  # /proc/<pid>/cmdline（**全员可读**）。本脚本头部第 3 条口径写着「不落盘、不 echo」，
+  # 却把密码放进了 argv —— 自己的规矩自己没守住。
+  # 复用同仓库已有的 curl-es.sh（它顶部就写着这条规矩）：凭据写进 600 的临时配置文件
+  # 用 --config 传，函数返回前删除；CA 与超时也由它统一处理。
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/curl-es.sh"
+  CA="$ES_CA"        # es_curl 要求 $CA 已设置；本脚本里这个变量叫 ES_CA
+  ES_CURL_TIMEOUT=8  # curl-es.sh 用 `: "${ES_CURL_TIMEOUT:=15}"` 兜底（只在未设时生效），这里显式盖成原来的 8
+  es() { es_curl "$MEM_USER:$MEM_PASS" -H 'Content-Type: application/json' "$@"; }
   OWNER="${MEM_USER#mem-user-}"
   PC="personal_memory_${OWNER}"
 
