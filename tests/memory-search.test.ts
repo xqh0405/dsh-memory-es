@@ -64,7 +64,7 @@ interface Harness {
 
 async function harness(
   data: Record<string, RouteData>,
-  options: { failIndex?: string } = {},
+  options: { failIndex?: string; permissionIndex?: string } = {},
 ): Promise<Harness> {
   const fake = await startFakeEs((req, res) => {
     // 阶段 20：命中回写走 `_bulk`。假 ES 不关心脚本内容，按条数回全成功。
@@ -78,6 +78,13 @@ async function harness(
     const index = /^\/([^/]+)\/_search/.exec(req.path)?.[1] ?? ''
     const body = JSON.parse(req.body) as Record<string, unknown>
     const route = 'knn' in body ? 'knn' : 'bm25'
+    // 403 权限不足（2026-11-10 审查 M12/#28）：模拟 `--personal-only` 档位
+    // （只有 mem_personal_rw_<uid>、没有 mem_team_read）去查团队库。
+    // 必须走 sendEsError → msearch 的单条 error → http.ts 抛 kind='permission'。
+    if (options.permissionIndex === index) {
+      sendEsError(res, 403, 'security_exception', 'action [indices:data/read/search] is unauthorized for [team]')
+      return
+    }
     if (options.failIndex === index) {
       sendEsError(res, 404, 'index_not_found_exception', `no such index [${index}]`)
       return
@@ -500,6 +507,64 @@ describe('searchMemories 编排', () => {
     const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } }, { failIndex: TEAM_INDEX })
     try {
       await assert.rejects(searchMemories(h.deps(), { query: 'q' }), /index_not_found_exception/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  // 2026-11-10 审查 M12/#28：`--personal-only` 档位只有 mem_personal_rw_<uid>、
+  // 没有 mem_team_read → 默认 scope=both 会带上团队子查询 → msearch 整体抛 403。
+  // 修复前：**连自己的记忆都搜不到**；修复后：只查个人库 + degraded=true。
+  // 与上一条对照着看：**只有 permission 降级，别的错误仍然整体抛**。
+  test('团队库 403 → 只查个人库并标 degraded（不整体失败）', async () => {
+    const h = await harness(
+      {
+        [PERSONAL_INDEX]: { bm25: [hit('p1', 3)], knn: [hit('p1', 0.85)] },
+        [TEAM_INDEX]: { bm25: [hit('t1', 5)], knn: [hit('t1', 0.8)] },
+      },
+      { permissionIndex: TEAM_INDEX },
+    )
+    const events: Record<string, unknown>[] = []
+    try {
+      // 不传 scope → 走默认 'both'，这正是 personal-only 用户的日常路径
+      const result = await searchMemories(h.deps({ log: (event) => events.push(event) }), { query: '北单' })
+
+      assert.equal(result.degraded, true, '团队库被跳过必须标 degraded —— 模型要知道自己看的不是全量')
+      assert.ok(
+        result.hits.some((item) => item.memory_id.includes('p1')),
+        `个人库的命中必须还在，实际 ${JSON.stringify(result.hits.map((i) => i.memory_id))}`,
+      )
+      assert.equal(
+        result.hits.some((item) => item.memory_id.includes('t1')),
+        false,
+        '团队库读不到时不该凭空出现团队命中',
+      )
+      // 而且不能只是「建了个空 team 分组」—— 空分组会让回执说「查了团队库」
+      assert.ok(
+        result.hits.every((item) => item.source === 'personal'),
+        `命中必须全部来自 personal，实际来源：${JSON.stringify(result.hits.map((i) => i.source))}`,
+      )
+      assert.ok(
+        events.some((event) => event.event === 'team_scope_degraded'),
+        `要留一条 team_scope_degraded 日志，实际事件：${events.map((e) => String(e.event)).join(',')}`,
+      )
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('显式 scope=team 且团队库 403 → 仍然抛错（没有个人库可退）', async () => {
+    const h = await harness({ [TEAM_INDEX]: { bm25: [hit('t1', 5)] } }, { permissionIndex: TEAM_INDEX })
+    try {
+      await assert.rejects(
+        searchMemories(h.deps(), { query: 'q', scope: 'team' }),
+        (err: unknown) => {
+          // 顺带钉住判据本身：403 必须被判成 kind='permission'，
+          // 否则上面那条降级分支根本不会进（靠文案猜是不行的）。
+          assert.equal((err as { kind?: string }).kind, 'permission', `实际错误：${String(err).slice(0, 160)}`)
+          return true
+        },
+      )
     } finally {
       await h.fake.close()
     }
