@@ -36,6 +36,7 @@ import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
 import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
+import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
 import type { Projected } from './fragment.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -683,6 +684,98 @@ export function apply(ctx: Context, config: ConfigType): void {
       () => ctx.tools.register(defineJournalTool({ journal: () => journalDeps })),
       'dsh-memory-es.journal-tool',
     )
+  }
+
+  /**
+   * 自更新（2026-11-11）：每天 `update.at`（默认 06:00）查一次 Release，
+   * 有新版本就体检索引 → 安装 → 延迟 60 秒退出，由服务管理器拉起新代码。
+   *
+   * 为什么用「自己退出」而不是 `systemctl restart` / `docker restart`：
+   *  · 容器内没有 docker socket，也没有 systemctl；
+   *  · 本机 systemctl 要 polkit 交互认证，插件进程拿不到；
+   *  · 而两边本来就有人管：本机 `Restart=always`、容器 `unless-stopped`。
+   *
+   * 每 5 分钟醒一次判断「到点了吗、今天查过没有」，没到点零网络请求。
+   */
+  if (config.update.enabled) {
+    const dshHome = (process.env.DSH_HOME ?? '').trim() !== ''
+      ? (process.env.DSH_HOME as string).trim()
+      : join(homedir(), '.dsh')
+    const profile = (process.env.DSH_PROFILE ?? '').trim() !== ''
+      ? (process.env.DSH_PROFILE as string).trim()
+      : 'web'
+    const updateStateDir = config.update.dir.trim() !== ''
+      ? expandHome(config.update.dir.trim())
+      : join(dshHome, 'memory-es/update')
+    const updateDeps: UpdateDeps = {
+      // 管理员实例负责补字段；成员只换代码（ES 是共享的，索引迁移做一次就够）
+      mode: config.update.migrate ? 'migrate' : 'member',
+      stateDir: updateStateDir,
+      pluginDir: join(dshHome, 'local-plugins/dsh-memory-es'),
+      dshHome,
+      profile,
+      localVersion: PLUGIN_VERSION,
+      repo: config.update.repo,
+      timeZone: config.update.timeZone,
+      at: config.update.at,
+      restartDelayMs: config.update.restartDelayMs,
+      indexes: {
+        memory: personalIndexName(config),
+        doc: `${config.index.docPrefix}${userId}`,
+        searchLog: `${config.index.searchLogPrefix}${userId}`,
+        audit: `${config.index.auditPrefix}${userId}`,
+      },
+      es: {
+        getMapping: (name: string) => writer.getMapping(name),
+        putMapping: (name: string, properties: Record<string, unknown>) => writer.putMapping(name, properties),
+      },
+      log: (message: string) => logger.info('update %s', message),
+      now: () => new Date(),
+      exit: (code: number) => process.exit(code),
+      // 迁移失败才叫一次模型：只让它解释差异与给人工建议，**不执行任何命令**
+      diagnose: async ({ error, additions }) => {
+        try {
+          return await summarizeTraits(
+            '自更新在给 Elasticsearch 索引补字段时失败。\n'
+              + `错误：${error.slice(0, 800)}\n`
+              + `待补字段：${additions.slice(0, 40).join(', ')}\n`
+              + '请用中文给出 3 条以内的诊断与人工修复建议；不要输出可直接执行的危险命令。',
+            '你是 Elasticsearch 运维助手，只做诊断。回答 200 字以内，用中文，不要执行任何操作。',
+          )
+        } catch {
+          return null
+        }
+      },
+    }
+    // 同一进程内不并发跑两轮（5 分钟 tick 可能撞上上一轮还没结束）
+    let updateRunning = false
+    const updateTick = async (): Promise<void> => {
+      if (updateRunning) return
+      const state = readUpdateState(updateStateDir)
+      if (!isDue(config.update.at, config.update.timeZone, state.lastCheckDate, new Date())) return
+      updateRunning = true
+      try {
+        const outcome = await runUpdate(updateDeps)
+        if (outcome.action !== 'skipped') {
+          logger.info('update: %s（%s）', outcome.action, outcome.reason)
+        }
+      } catch (err) {
+        logger.warn('update: 失败 %s', String(err).slice(0, 160))
+      } finally {
+        updateRunning = false
+      }
+    }
+    ctx.effect(() => {
+      const timer = setInterval(() => { void updateTick() }, 5 * 60_000)
+      timer.unref?.()
+      // 启动 1 分钟先探一次：跨天重启时别等到下一个检查点才补
+      const kick = setTimeout(() => { void updateTick() }, 60_000)
+      kick.unref?.()
+      return () => {
+        clearInterval(timer)
+        clearTimeout(kick)
+      }
+    }, 'dsh-memory-es.update-daily')
   }
 
   /**

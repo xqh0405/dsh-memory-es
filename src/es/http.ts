@@ -240,6 +240,20 @@ export interface EsClient {
   readonly endpoint: string
   info(call?: CallOptions): Promise<EsInfo>
   health(call?: CallOptions): Promise<EsHealth>
+  /**
+   * 读索引的字段映射。
+   *
+   * 自更新用它做**只读体检**：新版本的模板要求哪些字段、当前索引有没有。
+   * 返回 `{ 索引名: properties }`；索引不存在时 ES 报 404，由调用方决定怎么处理。
+   */
+  getMapping(indexName: string, call?: CallOptions): Promise<Record<string, Record<string, unknown>>>
+  /**
+   * 只补字段的 `PUT _mapping`。
+   *
+   * 只能加字段：ES 不允许改已有字段类型，所以调用方必须先比对、遇到类型变化就拒绝。
+   * 幂等——字段已存在时是空操作。
+   */
+  putMapping(indexName: string, properties: Record<string, unknown>, call?: CallOptions): Promise<void>
   /** 写入/覆盖一条文档（writer 凭证） */
   index(indexName: string, doc: Record<string, unknown>, options?: WriteOptions): Promise<EsWriteResult>
   get(indexName: string, id: string, call?: CallOptions): Promise<EsGetResult>
@@ -521,6 +535,29 @@ export function createEsClient(config: EsClientConfig): EsClient {
 
     async health(call: CallOptions = {}) {
       return await request<EsHealth>('GET', '/_cluster/health', undefined, call.signal)
+    },
+
+    async getMapping(indexName, call: CallOptions = {}) {
+      const raw = await request<Record<string, { mappings?: { properties?: unknown } }>>(
+        'GET',
+        `/${enc(indexName)}/_mapping`,
+        undefined,
+        call.signal,
+      )
+      const out: Record<string, Record<string, unknown>> = {}
+      for (const [name, body] of Object.entries(raw)) {
+        const props = body?.mappings?.properties
+        // 新索引还没写文档时 properties 可能是空对象，也可能是 undefined——都当「没有字段」
+        out[name] = props !== null && typeof props === 'object'
+          ? (props as Record<string, unknown>)
+          : {}
+      }
+      return out
+    },
+
+    async putMapping(indexName, properties, call: CallOptions = {}) {
+      // 不做 2xx 之外的容错：只在「确认是纯新增字段」时才调用，失败就该整轮中止
+      await request<unknown>('PUT', `/${enc(indexName)}/_mapping`, { properties }, call.signal)
     },
 
     async index(indexName, doc, options = {}) {

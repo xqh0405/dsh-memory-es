@@ -170,8 +170,8 @@ describe('apply', () => {
     assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      23,
-      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
+      24,
+      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 自更新 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)

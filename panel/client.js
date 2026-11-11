@@ -374,6 +374,17 @@ window.__ModuleLoader__.load({
       maintExportNow: '立即导出',
       maintSnapshot: '快照',
       maintCron: '定时任务',
+      // 自更新（2026-11-11）
+      maintUpdate: '自动更新',
+      maintUpdateAt: '检查时间',
+      maintUpdateOn: '已开启',
+      maintUpdateOff: '已关闭',
+      maintUpdateMigrate: '管理员实例：升级前先给索引补字段',
+      maintUpdateMember: '成员实例：只换代码；索引缺字段就等下一轮',
+      labelCurrentVersion: '当前版本',
+      labelLatestVersion: '最新版本',
+      labelLastCheck: '上次检查',
+      labelLastResult: '上次结果',
       maintResult: '结果',
       labelPersonal: '个人库',
       labelTeam: '团队库',
@@ -696,6 +707,16 @@ window.__ModuleLoader__.load({
       maintExportNow: 'Export now',
       maintSnapshot: 'Snapshots',
       maintCron: 'Scheduled job',
+      maintUpdate: 'Auto update',
+      maintUpdateAt: 'Check time',
+      maintUpdateOn: 'Enabled',
+      maintUpdateOff: 'Disabled',
+      maintUpdateMigrate: 'Admin instance: adds missing index fields before upgrading',
+      maintUpdateMember: 'Member instance: code only; waits for the next round if fields are missing',
+      labelCurrentVersion: 'Current version',
+      labelLatestVersion: 'Latest release',
+      labelLastCheck: 'Last check',
+      labelLastResult: 'Last result',
       maintResult: 'Result',
       labelPersonal: 'Personal',
       labelTeam: 'Team',
@@ -3089,6 +3110,33 @@ window.__ModuleLoader__.load({
             onClick: () => run('export'),
           }, busy === 'export' ? t('reviewBusy') : t('maintExportNow'))],
         ),
+
+        data.update
+          ? card(t('maintUpdate'),
+              h('div', null,
+                line(t('labelCurrentVersion'), `v${data.update.localVersion || '?'}`),
+                line(t('labelLatestVersion'), data.update.releaseVersion ? `v${data.update.releaseVersion}` : '—'),
+                line(t('labelLastCheck'), data.update.lastCheckAt ? new Date(data.update.lastCheckAt).toLocaleString() : '—'),
+                line(t('maintUpdateAt'), `${data.update.at}（${data.update.enabled ? t('maintUpdateOn') : t('maintUpdateOff')}）`),
+                line(t('labelManagedBy'), data.update.migrate ? t('maintUpdateMigrate') : t('maintUpdateMember')),
+                data.update.lastResult
+                  ? h('p', { style: { ...S.muted, fontSize: 12, margin: '6px 0 0', lineHeight: 1.6 } },
+                      `${t('labelLastResult')}：${data.update.lastResult}`)
+                  : null,
+                data.update.diagnostics
+                  ? h('pre', {
+                      style: {
+                        margin: '6px 0 0',
+                        fontSize: 11.5,
+                        whiteSpace: 'pre-wrap',
+                        lineHeight: 1.6,
+                        color: 'var(--dsw-alias-label-secondary)',
+                      },
+                    }, data.update.diagnostics)
+                  : null,
+              ),
+            )
+          : null,
 
         card(t('maintSnapshot'),
           h('div', null,

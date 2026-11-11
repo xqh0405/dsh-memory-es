@@ -2618,6 +2618,29 @@ const EDITABLE = [
     default: false,
     hint: '打开后模型引用记忆时会标 id 前 8 位；会改变回答风格，默认关',
   },
+  // 自更新（2026-11-11）：用户要求「默认开、可关」。
+  // 注意这里只暴露三个键，repo / restartDelayMs 之类要改走 cordis.patch.yml。
+  {
+    path: ['update', 'enabled'],
+    label: '自动更新',
+    type: 'boolean',
+    default: true,
+    hint: '每天到点检查 GitHub Release，有新版就自动安装并重启（约中断 5~10 秒）；关掉后连检查也不做',
+  },
+  {
+    path: ['update', 'at'],
+    label: '检查时间',
+    type: 'string',
+    default: '06:00',
+    hint: 'HH:MM（按 update.timeZone，默认北京时间）。管理员实例建议 05:30：先迁移索引，再让成员升级',
+  },
+  {
+    path: ['update', 'migrate'],
+    label: '负责索引迁移',
+    type: 'boolean',
+    default: false,
+    hint: '只有管理员实例开：升级前会给索引补字段。成员实例保持关闭，只做只读体检（缺字段就等下一轮）',
+  },
 ]
 
 function pick(config, path) {
@@ -3002,6 +3025,36 @@ async function handleMaintenanceGet(ctx, res, url) {
     /* 忽略 */
   }
 
+  // 自更新状态（2026-11-11）：这里只读展示结果，开关与时间在「配置」页。
+  // 状态目录必须与主插件一致：留空 = $DSH_HOME/memory-es/update（不是 STATE_DIR）。
+  const updateDir = typeof config.update?.dir === 'string' && config.update.dir.trim() !== ''
+    ? config.update.dir.trim()
+    : join(DSH_HOME, 'memory-es', 'update')
+  let updateInfo = {
+    enabled: config.update?.enabled !== false,
+    at: typeof config.update?.at === 'string' ? config.update.at : '06:00',
+    migrate: config.update?.migrate === true,
+    localVersion: '',
+    releaseVersion: '',
+    lastCheckAt: '',
+    lastResult: '',
+    lastAction: '',
+    additions: [],
+    diagnostics: '',
+  }
+  try {
+    const state = JSON.parse(readFileSync(join(updateDir, 'state.json'), 'utf8'))
+    updateInfo = { ...updateInfo, ...state }
+  } catch {
+    /* 还没检查过 */
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(DSH_HOME, 'local-plugins', 'dsh-memory-es', 'package.json'), 'utf8'))
+    updateInfo.localVersion = typeof pkg.version === 'string' ? pkg.version : ''
+  } catch {
+    /* 读不到就留空 */
+  }
+
   json(res, 200, {
     ok: true,
     value: {
@@ -3011,6 +3064,7 @@ async function handleMaintenanceGet(ctx, res, url) {
       viewingOther: targetUser !== config.identity.userId,
       lastRunAt,
       pendingCount,
+      update: updateInfo,
       mirror,
       cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },
       // 静态事实：这两件事不由面板管，写清楚免得误以为是面板漏了功能
