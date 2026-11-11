@@ -9,6 +9,7 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { extractWrites, strictErrorBody, strictViolations } from './mapping-gate.ts'
 
 export interface CapturedRequest {
   method: string
@@ -48,7 +49,18 @@ export function sendEsError(res: ServerResponse, status: number, type: string, r
  */
 export async function startFakeEs(
   handler: FakeHandler,
-  options: { /** 不拆 `_msearch`，原样交给 handler（用于测协议层的畸形响应） */ rawMsearch?: boolean } = {},
+  options: {
+    /** 不拆 `_msearch`，原样交给 handler（用于测协议层的畸形响应） */
+    rawMsearch?: boolean
+    /**
+     * `dynamic:strict` 写入闸（2026-11-11 审查 #31）默认**开**：
+     * 写入请求里出现映射外的字段就回 400 `strict_dynamic_mapping_exception`，
+     * 与真 ES 同形 —— 这样「代码加了映射没有的字段」在所有写路径测试里天然变红
+     * （历史上 19 个字段缺口就是这么漏的）。
+     * 只有**故意**造脏字段的用例才该传 false 关掉它。
+     */
+    strictMapping?: boolean
+  } = {},
 ): Promise<FakeEs> {
   const requests: CapturedRequest[] = []
   let msearchCalls = 0
@@ -75,6 +87,18 @@ export async function startFakeEs(
         return
       }
       requests.push(captured)
+      // dynamic:strict 写入闸（#31）：映射外字段一律 400，与真 ES 同形。
+      // 放在 handler **之前**——真 ES 根本不会把这种请求交给写路径，测试也该如此。
+      if (options.strictMapping !== false) {
+        for (const write of extractWrites(captured.method, captured.path, captured.body)) {
+          const missing = strictViolations(write.index, write.doc)
+          if (missing.length > 0) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+            res.end(JSON.stringify(strictErrorBody(missing, write.index)))
+            return
+          }
+        }
+      }
       void Promise.resolve(handler(captured, res, requests.length)).catch((err: unknown) => {
         res.writeHead(500, { 'content-type': 'text/plain' })
         res.end(String(err))
