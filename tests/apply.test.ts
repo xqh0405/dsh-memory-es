@@ -193,9 +193,67 @@ describe('apply', () => {
       }),
     )
     assert.equal(on.disposers.length, off.disposers.length + 1, '开着蒸馏就该多注册一个清扫 effect')
-    // 卸载要能收干净（定时器必须在 disposer 里清掉，否则 fiber 卸载后还在跑）
-    for (const dispose of on.disposers) dispose()
-    assert.ok(true)
+  })
+
+  // 2026-11-11 审查 #33：原来这条用例的尾部是
+  //   for (const dispose of on.disposers) dispose()
+  //   assert.ok(true)          ← 恒真，等于没断言
+  // 而注释写的正是「定时器必须在 disposer 里清掉，否则 fiber 卸载后还在跑」。
+  // 现在把 setInterval/clearInterval 真的包起来：装钩子 → apply → 逐个 dispose →
+  // 断言**apply 期间起的每一个定时器都被 clearInterval 掉了**。
+  test('卸载后**真的**没有定时器还在跑（原断言恒真，等于没测）', () => {
+    const realSetInterval = globalThis.setInterval
+    const realClearInterval = globalThis.clearInterval
+    type Timer = { id: ReturnType<typeof setInterval>; cleared: boolean }
+    const timers: Timer[] = []
+    const restore = () => {
+      globalThis.setInterval = realSetInterval
+      globalThis.clearInterval = realClearInterval
+      // 兜底：off 那份没被 dispose，别把真定时器留到测试进程里
+      for (const t of timers) if (!t.cleared) realClearInterval(t.id)
+    }
+
+    globalThis.setInterval = ((fn: () => void, ms?: number) => {
+      const id = realSetInterval(fn, ms)
+      timers.push({ id, cleared: false })
+      return id
+    }) as typeof globalThis.setInterval
+    globalThis.clearInterval = ((id: ReturnType<typeof setInterval>) => {
+      const hit = timers.find((t) => t.id === id)
+      if (hit !== undefined) hit.cleared = true
+      return realClearInterval(id)
+    }) as typeof globalThis.clearInterval
+
+    try {
+      const off = fakeCtx()
+      apply(off.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
+      const baseline = timers.length
+
+      const on = fakeCtx()
+      apply(
+        on.ctx as never,
+        baseConfig({
+          es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 },
+          distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000 },
+        }),
+      )
+      const started = timers.slice(baseline)
+      assert.ok(
+        started.length > 0,
+        'distill.enabled=true 至少该起一个定时器（清扫），否则这条测试什么也没守住',
+      )
+
+      for (const dispose of on.disposers) dispose()
+
+      const leaked = started.filter((t) => !t.cleared)
+      assert.deepEqual(
+        leaked.map((t) => String(t.id)),
+        [],
+        `${leaked.length}/${started.length} 个定时器在 dispose 之后仍然活着 —— fiber 卸载后会继续跑`,
+      )
+    } finally {
+      restore()
+    }
   })
 
   test('配置非法：一次列出全部问题（不只报第一个）', () => {

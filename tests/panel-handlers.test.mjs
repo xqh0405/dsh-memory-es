@@ -1363,7 +1363,13 @@ test('配置页字段都带 default，且与 schema 的默认值一致', () => {
   // 只对「容易被误当成 0」的数值字段做 schema 对照（其余字段由上一行的存在性断言兜住）
   for (const key of ['maxPerDay', 'maxOutput', 'dedupMinScore', 'dedupMinScoreAnchored', 'days']) {
     const field = EDITABLE.find((item) => item.path.join('.').endsWith(`.${key}`))
-    if (!field) continue
+    // 2026-11-11 审查 #33：原来是 `if (!field) continue` —— 把这个字段从 EDITABLE
+    // 删掉（或改名）时对照会**静默消失**，测试照样绿。改成硬断言：要动这份名单，
+    // 就得同时改这里，否则这条测试立刻红。
+    assert.ok(
+      field !== undefined,
+      `EDITABLE 里找不到 ${key}：字段被删/改名了？那这条「default 与 schema 一致」的对照就静默失效了`,
+    )
     const expected = schemaDefault(key)
     assert.ok(expected !== null, `config.ts 里找不到 ${key} 的 default`)
     assert.equal(String(field.default), expected, `${field.path.join('.')} 的 default 与 schema 不一致`)

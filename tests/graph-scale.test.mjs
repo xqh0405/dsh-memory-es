@@ -115,9 +115,19 @@ test('分盘构图不是可选优化：合并抢名额会让另一张盘整片�
 test('fetchSize = 单盘上限 × 2 必须停在 10000（ES max_result_window 贴线）', async () => {
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('../panel/index.js', import.meta.url), 'utf8')
+  // 2026-11-11 审查 #33：原来直接对**带注释的源码**跑正则 —— 注释里写出同样的字
+  // （比如示例 `// const GRAPH_MAX_NODES = 123`）就会命中，测试变成假绿。
+  // 先剥掉注释再匹配。行尾 `//` 要求前面有空白，避开 `https://` 这种字符串。
+  const stripComments = (src) =>
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|\n)[ \t]*\/\/[^\n]*/g, '$1')
+      .replace(/[ \t]\/\/[^\n]*/g, '')
+  const code = stripComments(source)
+
   // 这条约束是「两个数的关系」而不是某个数字，所以直接从源码里读常量，不写死 5000
-  const maxNodes = Number(/const GRAPH_MAX_NODES = (\d+)/.exec(source)?.[1])
+  const maxNodes = Number(/const GRAPH_MAX_NODES = (\d+)/.exec(code)?.[1])
   assert.equal(maxNodes, 5000, '单盘上限是阶段 15 的定案值')
   assert.equal(maxNodes * 2, 10000, 'fetchSize 贴 ES 默认 max_result_window，越界要改 search_after')
-  assert.match(source, /Math\.min\(GRAPH_MAX_NODES \* 2/, '取数必须显式封顶，不能直接用 limit*2')
+  assert.match(code, /Math\.min\(GRAPH_MAX_NODES \* 2/, '取数必须显式封顶，不能直接用 limit*2')
 })
