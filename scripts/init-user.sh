@@ -31,12 +31,16 @@ shift
 TIER="team-read"
 RESET=0
 DROP_LEGACY=0
+# 自更新需要：管理员实例负责给个人索引补字段（PUT _mapping），那需要 manage。
+# 只给管理员账号开，普通成员不开——成员实例只做只读体检。
+MIGRATE=0
 for arg in "$@"; do
   case "$arg" in
     --drop-legacy-writer) DROP_LEGACY=1 ;;
     --team-write) TIER="team-write" ;;
     --team-read) TIER="team-read" ;;
     --personal-only) TIER="personal-only" ;;
+    --with-migrate) MIGRATE=1 ;;
     --reset-password) RESET=1 ;;
     *) echo "未知参数：$arg" >&2; exit 2 ;;
   esac
@@ -105,15 +109,26 @@ JSON
 echo '  mem_admin → 团队库读写删 + 审计读写 + 所有人的个人库通配读（含 index，整理回写用；不含 delete）'
 
 echo "== 2/3 本用户角色（个人读写，只限自己的索引）=="
+# manage 只给管理员实例（--with-migrate）：自更新要给存量索引补字段，必须能 PUT _mapping。
+# 普通成员不开——成员实例的升级只做只读体检，不需要也不应该能改映射。
+if [ "$MIGRATE" = "1" ]; then
+  PRIVS='["read", "index", "delete", "manage", "view_index_metadata"]'
+else
+  PRIVS='["read", "index", "delete", "view_index_metadata"]'
+fi
 admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<JSON
 {
   "indices": [
     { "names": ["$PERSONAL", "personal_doc_${UID_ARG}", "search_log_${UID_ARG}", "personal_audit_${UID_ARG}"],
-      "privileges": ["read", "index", "delete", "view_index_metadata"] }
+      "privileges": $PRIVS }
   ]
 }
 JSON
-echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删（不是通配）"
+if [ "$MIGRATE" = "1" ]; then
+  echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删 + manage（自更新要补索引字段，仅管理员实例开）"
+else
+  echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删（不是通配）"
+fi
 
 echo "== 2.5/3 个人索引（幂等，空 body 继承索引模板）=="
 # 只建账号不建索引的话，新账号第一次打开面板会是 "ES 不可达 / index_not_found"，

@@ -223,6 +223,30 @@ export interface ConfigType {
     pinnedEnabled: boolean
     pinnedMaxChars: number
   }
+  /**
+   * 自更新（2026-11-11）。
+   *
+   * 默认开：每天 `at` 点查一次 GitHub Release，有新版本就体检索引后安装，
+   * 装完延迟 `restartDelayMs` 让进程退出、由 systemd / 容器策略拉起。
+   * 关掉开关就连检查也不做（不产生任何网络请求）。
+   */
+  update: {
+    enabled: boolean
+    /** 每天几点检查（HH:MM，按 timeZone 解释） */
+    at: string
+    timeZone: string
+    /** Release 来源（owner/repo） */
+    repo: string
+    /** 安装成功到退出的等待；给状态落盘与当次回复留时间 */
+    restartDelayMs: number
+    /**
+     * 本实例是否负责**索引迁移**：只有管理员实例开 true。
+     * 成员实例永远只换代码，升级前做只读体检（缺字段就等下一轮）。
+     */
+    migrate: boolean
+    /** 状态与日志目录；留空 = $DSH_HOME/memory-es/update */
+    dir: string
+  }
 }
 
 /**
@@ -379,9 +403,12 @@ export const Config: z<ConfigType> = z.object({
   governance: z.object({
     write: z.union([z.const('on'), z.const('readonly'), z.const('off')]).default('on')
       .description(
-        '写入开关。on=正常；readonly=拒绝 memory_save 并返回明确原因（检索照常）；'
-        + 'off=彻底关闭写入（语义同 readonly，保留给「停机维护」这种更强表态）。'
-        + '挡在 saveMemory 里，所以导入/蒸馏回写/将来的 pinned 写入都走同一道闸。',
+        '写入开关。on=正常；readonly / off 都拒绝**插件侧的一切写入**并返回明确原因（检索与面板查看照常），'
+        + 'off 是给「停机维护」的更强表态。'
+        + '闸在 writer 层的 assertWriteAllowed，覆盖 memory_save（含导入）、蒸馏正文回写、清扫的状态收口、'
+        + '自述/人格/日记直写、pin、promote、review 与锚点、history 回滚、mood 写回；'
+        + '面板的人工管理动作（删除/恢复/反馈/归档）不走这道闸，维护期仍能清理数据。'
+        + '（2026-11-10 起真拦这些链路：此前只挡 saveMemory，文案却承诺都走同一道闸。）',
       ),
     perDomain: z.dict(z.union([z.const('on'), z.const('readonly'), z.const('off')]))
       .default({})
@@ -601,6 +628,34 @@ export const Config: z<ConfigType> = z.object({
         + '默认 800 ≈ 400 token（2026-11-09 从 600 上调：成员下沉的规则条数比预估多，600 会把第 3 条挤掉）；'
         + '0 = 不注入 pinned（等价于关掉这一段，但保留开关语义）。'),
   }),
+  /*
+   * 自更新（2026-11-11）。
+   *
+   * **默认开**（用户明确要求）：每天早上起来已是新版，不用人工盯着发版。
+   * 代价是每天检查一次，有新版就重启一次——重启会中断当次会话约 5~10 秒，
+   * 所以默认放在 06:00（低峰）。关掉后连检查也不做，不产生任何网络请求。
+   *
+   * `migrate` 的分工是**共享 ES** 的必然结果：11 个容器连的是同一套 ES，
+   * 索引字段补一次全体受益；所以只有管理员实例开 true，成员实例只换代码。
+   */
+  update: z.object({
+    enabled: z.boolean().default(true)
+      .description('是否自动检查并安装新版本（默认开）。关掉后连检查也不做。'),
+    at: z.string().default('06:00')
+      .description('每天几点检查（HH:MM，按 timeZone 解释）。成员保持 06:00；'
+        + '管理员实例建议 05:30，保证「先迁移索引、再让成员升级」。'),
+    timeZone: z.string().default('Asia/Shanghai')
+      .description('解释 at 的时区；容器通常跑 UTC，默认按北京时间算。'),
+    repo: z.string().default('xqh0405/dsh-memory-es')
+      .description('Release 来源（owner/repo）。只认这个仓库的 release 附件（tar.gz + sha256）。'),
+    restartDelayMs: z.number().step(1).min(1_000).default(60_000)
+      .description('安装成功到退出的等待（毫秒）。退出后由 systemd / 容器 restart policy 拉起。'),
+    migrate: z.boolean().default(false)
+      .description('本实例是否负责索引迁移。**只有管理员实例开 true**：'
+        + '成员实例只做只读体检（缺字段就等下一轮），永远不写 _mapping。'),
+    dir: z.string().default('')
+      .description('状态与日志目录；留空 = $DSH_HOME/memory-es/update。'),
+  }),
 })
 
 /** 个人索引名的唯一派生点（一人一索引，D5） */
@@ -664,15 +719,26 @@ export function validateConfig(config: ConfigType): string[] {
 export function missingRouteWarning(config: ConfigType): string | null {
   const routeMissing = config.distill.provider.trim() === '' || config.distill.model.trim() === ''
   if (!routeMissing) return null
+  // 只有这几条是**完全依赖配置路由**的：留空就选不到模型。
   const affected = [
     config.traits.enabled ? '自述(traits)' : '',
     config.journal.enabled ? '日记(journal)' : '',
-    config.distill.enabled ? '后台蒸馏(distill)' : '',
   ].filter(Boolean)
-  if (affected.length === 0) return null
+  // ⚠️ 蒸馏要单独说（2026-11-10 审查 #15 修误报）：它有两条链路 ——
+  //  · 即时蒸馏（memory_save 之后）带**会话路由**（save.ts → runDistillJob → pickRoute 的 job.route），
+  //    配置留空照样能蒸；
+  //  · 15 分钟清扫只传配置路由，配置空才整轮跳过。
+  // 旧版把 distill.enabled 直接列进受影响面，于是「即时蒸馏其实在正常工作」也被说成坏了。
+  const sweepAffected = config.distill.enabled
+  if (affected.length === 0 && !sweepAffected) return null
+  const head = affected.length === 0 ? '' : `${affected.join('、')} 已启用，但 `
+  const sweepNote = sweepAffected
+    ? '另外后台蒸馏的 15 分钟清扫会整轮跳过（即时蒸馏仍走会话路由，通常可用）；'
+    : ''
   return (
-    `[dsh-memory-es] 配置缺失：${affected.join('、')} 已启用，但 distill.provider / distill.model 没填 —— ` +
-    '模型路由会选不到，提炼每次静默返回 0 条、日记永不写（不报错、不写日志）。' +
-    '请在 cordis.patch.yml 的 dsh-memory-es.config.distill 下补 provider/model 后重启 dsh web。'
+    `[dsh-memory-es] 配置缺失：${head}distill.provider / distill.model 没填 —— ` +
+    '模型路由会选不到，提炼每次静默返回 0 条、日记永不写（不报错、不写日志）。'
+    + sweepNote
+    + '请在 cordis.patch.yml 的 dsh-memory-es.config.distill 下补 provider/model 后重启 dsh web。'
   )
 }

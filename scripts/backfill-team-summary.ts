@@ -36,8 +36,43 @@ const CONCURRENCY = 4
 const argv = process.argv.slice(2)
 const apply = argv.includes('--apply')
 const show = argv.includes('--show')
-const limitArg = argv.find((a) => a.startsWith('--limit='))
-const limit = limitArg === undefined ? 0 : Number(limitArg.slice('--limit='.length)) || 0
+
+/**
+ * 限量参数（2026-11-10 审查 M7/#26 重写）。
+ *
+ * 原来只认 `--limit=N`，而文档第 16 行给的用法是**空格形式** `--limit 10` ——
+ * 照着文档跑，`limitArg` 是 undefined → `limit=0` → **限量静默失效，全量调 LLM 花钱**。
+ * 更糟的是 `--limit abc` 也走 `Number(...) || 0` → 同样变成不限量、**连报错都没有**。
+ *
+ * 现在两种写法都认；给了 `--limit` 却解析不出正整数 → **显式报错退出**，
+ * 绝不静默降级成「不限量」。
+ */
+function parseLimit(args: string[]): number {
+  const eq = args.find((a) => a.startsWith('--limit='))
+  const idx = args.indexOf('--limit')
+  // 一个都没给 = 不限量（正常用法）
+  if (eq === undefined && idx === -1) return 0
+
+  let raw: string
+  if (eq !== undefined) {
+    raw = eq.slice('--limit='.length)
+  } else {
+    // `--limit` 后面必须紧跟一个值；跟的是 `--apply` 这类开关、或干脆没有，
+    // 都是**忘了写值** —— 绝不能当成「不限量」（那正是本函数要防的昂贵失败模式）。
+    const next = args[idx + 1]
+    raw = next === undefined || next.startsWith('--') ? '' : next
+  }
+
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`✗ --limit 需要一个正整数（收到 ${JSON.stringify(raw)}）`)
+    console.error('  正确用法：--limit 10   或   --limit=10')
+    console.error('  （不限量请直接去掉这个参数 —— 静默变成不限量会全量调 LLM）')
+    process.exit(2)
+  }
+  return n
+}
+const limit = parseLimit(argv)
 
 const cfg = parsePluginConfig(DEFAULT_CONFIG_PATH)
 const es = createEsClient({
@@ -69,11 +104,25 @@ interface Target {
   domain: string
 }
 
+/**
+ * 取要补的条目。
+ *
+ * **必须分页**（2026-11-10 审查 M7/#26）：原来单发一次 `size: 500`，
+ * 超过 500 条时后面的**永远取不到**（配合 done 文件续跑也只是碰运气，
+ * 取决于 ES 返回哪 500 条）。`sort` 也是必需的：不排时 ES 按内部文档序返回，
+ * 段合并/并发写会让页边界在两次请求之间漂移 → 整段被跳过（同 #25 的教训）。
+ *
+ * 有 `--limit` 时**取够即停** —— 限量的意义就是别多花钱，不该把剩下的页也拉下来。
+ */
 async function fetchTargets(): Promise<Target[]> {
-  // 两个字段任一缺失都算「要补」；已完成的按 id 跳过，保证续跑不重复花钱
+  const PAGE = 500
+  const MAX = 10_000 // ES 默认 max_result_window，贴着上限取
   const body = {
-    size: 500,
+    size: PAGE,
     _source: ['content', 'memory_id', 'summary', 'semantic_keywords', 'domain'],
+    // 团队库的文档身份是 doc_id（memory_id 不一定有）；排它让页边界跨请求稳定，
+    // 缺失值按 ES 默认 _first，顺序同样确定。
+    sort: [{ doc_id: 'asc' as const }],
     query: {
       bool: {
         should: [
@@ -85,14 +134,23 @@ async function fetchTargets(): Promise<Target[]> {
       },
     },
   }
-  const res = await es.search(TEAM_INDEX, body)
+
   const out: Target[] = []
-  for (const hit of res.hits) {
-    const id = String(hit.id ?? hit.source.memory_id ?? '')
-    if (id === '' || done.has(id)) continue
-    const content = String(hit.source.content ?? '').trim()
-    if (content === '') continue
-    out.push({ id, content, domain: String(hit.source.domain ?? 'general') })
+  for (let from = 0; ; from += PAGE) {
+    const res = await es.search(TEAM_INDEX, { ...body, from, size: PAGE })
+    for (const hit of res.hits) {
+      const id = String(hit.id ?? hit.source.memory_id ?? '')
+      if (id === '' || done.has(id)) continue
+      const content = String(hit.source.content ?? '').trim()
+      if (content === '') continue
+      out.push({ id, content, domain: String(hit.source.domain ?? 'general') })
+    }
+    if (limit > 0 && out.length >= limit) break // 取够即停
+    if (res.hits.length < PAGE) break // 最后一页
+    if (from + PAGE >= MAX) {
+      console.error(`⚠️ 待补超过 ${MAX} 条（ES max_result_window 上限），本批只处理前 ${out.length} 条 —— 分批跑`)
+      break
+    }
   }
   return limit > 0 ? out.slice(0, limit) : out
 }

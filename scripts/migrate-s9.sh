@@ -30,45 +30,27 @@ exists() { admin -o /dev/null -w '%{http_code}' -I "$ES/$1" 2>/dev/null | grep -
 
 echo "== 1/4 个人索引：加 blocked_reason =="
 # 模板（给以后新建的 per-user 索引）
+#
+# ⚠️ 必须**现场提取** init-indices.sh 的模板，不能手抄一份贴在这儿（2026-11-10 审查 P2/#18）：
+#    `PUT _index_template` 是**整体替换**，手抄的子集会把模板字段从 51 掉到 22，
+#    一次性删掉 origin / pinned / quarantine_reason / related / activation / hit_count /
+#    forget_reason / confirmed_use / corrections / feedback_at… 共 29 个。
+#    危害是**延迟**的：之后新建的用户索引才会缺字段 → 新用户第一次 memory_save 就 400
+#    （strict_dynamic_mapping_exception），极难回溯到「某次重跑迁移」。
+#    当时线上 51 字段完好，属「还没发作」，趁没发作修。
+# 同款写法：migrate-pinned-field.sh / migrate-origin-fields.sh / migrate-doc-fields.sh /
+# migrate-feedback-fields.sh / migrate-forget-reason-fields.sh（全仓 7 个里另外 5 个一直是对的）。
+# 由 tests/template-sync.test.ts 钉住：迁移脚本不许再出现内联模板。
+#
 # 必须用组合式 `_index_template`：`_template`（旧式）不接受 `template:` 包裹，
-# 会回 400 unknown key [template]——上一版没开 --fail-with-body，于是静默“成功”了两周（S9 巡检发现）。
-admin -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSON'
-{
-  "index_patterns": ["personal_memory_*"],
-  "priority": 100,
-  "template": {
-    "settings": { "number_of_shards": 1, "number_of_replicas": 0, "refresh_interval": "5s" },
-    "mappings": {
-      "dynamic": "strict",
-      "properties": {
-        "memory_id":         { "type": "keyword" },
-        "user_id":           { "type": "keyword" },
-        "content":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "summary":           { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "semantic_keywords": { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
-        "embedding":         { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
-        "memory_type":       { "type": "keyword" },
-        "domain":            { "type": "keyword" },
-        "topic_key":         { "type": "keyword" },
-        "privacy":           { "type": "keyword" },
-        "distill_state":        { "type": "keyword" },
-        "distilled_at":         { "type": "date" },
-        "distill_source_chars": { "type": "integer" },
-        "promote_state":     { "type": "keyword" },
-        "status":            { "type": "keyword" },
-        "supersedes":        { "type": "keyword" },
-        "superseded_by":     { "type": "keyword" },
-        "content_sha256":    { "type": "keyword" },
-        "blocked_reason":    { "type": "keyword" },
-        "created_at":        { "type": "date" },
-        "updated_at":        { "type": "date" },
-        "expires_at":        { "type": "date" }
-      }
-    }
-  }
-}
-JSON
-echo '  模板 personal_memory_template 已更新（含 blocked_reason）'
+# 会回 400 unknown key [template]——上一版没开 --fail-with-body，于是静默"成功"了两周（S9 巡检发现）。
+TEMPLATE_JSON=$(awk '/<<'"'"'JSON'"'"'/{if(!started){started=1; next}} started && /^JSON$/{exit} started{print}' "$ROOT/scripts/init-indices.sh")
+if ! printf '%s' "$TEMPLATE_JSON" | grep -q '"blocked_reason"'; then
+  echo 'init-indices.sh 的模板里没有 blocked_reason —— 先把模板改好再迁移' >&2
+  exit 1
+fi
+admin -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<<"$TEMPLATE_JSON"
+echo '  模板 personal_memory_template 已更新（与 init-indices.sh 同源，含 blocked_reason）'
 
 # 已存在的个人索引（PUT _mapping 对新增字段是幂等的）
 for idx in $(admin "$ES/_cat/indices/personal_memory_*?h=index" 2>/dev/null); do

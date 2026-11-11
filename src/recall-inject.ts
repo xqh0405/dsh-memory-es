@@ -20,7 +20,9 @@
 
 import { join } from 'node:path'
 
+import { EsError } from './es/http.ts'
 import type { Projected } from './fragment.ts'
+import { NON_FACT_MEMORY_TYPES } from './memory/common.ts'
 import { dshMemoryDataDir } from './sessions.ts'
 
 /** 注入块在 system prompt 里的段落名（与工具说明、情绪、引用约定并列） */
@@ -42,10 +44,20 @@ export interface RecallInjectConfig {
 export interface DroppedItem {
   memory_id: string
   /**
-   * 阶段 32 增 `pinned-budget`：pinned 段有自己的预算，
-   * 挤掉它的时候必须能说清「是哪一段的预算不够」，否则调预算就是盲调。
+   * 挤掉的**真实原因**。
+   *
+   * ⚠️ 历史值 `pinned-budget` 仅存在于 2026-11-10 之前的记录里：旧版把 pinned 段的
+   * `max-items`/`max-chars` 一律改写成它，导致「条数超限」与「字符超限」在数据里分不开、
+   * 面板的「常驻被挤掉」卡也永远亮不起来（实测 844 条全是 max-items、pinned-budget 0 次）。
+   * 现在写入侧保留真实原因 + 用 `segment` 标明是哪一段，读取侧两种都认。
    */
   reason: 'max-items' | 'max-chars' | 'empty' | 'pinned-budget'
+  /**
+   * 哪一段挤掉的。`pinned` = 常驻段（用 `pinnedMaxChars`/`PINNED_MAX_ITEMS`），
+   * `recall` = 检索段。老记录缺省 = 检索段（旧版只有 pinned 段会被改写成 pinned-budget，
+   * 读取侧靠 `reason === 'pinned-budget'` 兜住老数据）。
+   */
+  segment?: 'pinned' | 'recall'
 }
 
 export interface InjectedItem {
@@ -161,12 +173,44 @@ export const PINNED_MAX_ITEMS = 8
  */
 export const PINNED_ITEM_MAX_CHARS = 200
 
-/** pinned 段的取数条件：只认 `pinned=true AND status=active`，与 query 无关 */
+/**
+ * 从 ES 取多少条 pinned 候选。
+ *
+ * 必须**明显大于** `PINNED_MAX_ITEMS`（8）：进程内还要按 importance→更新时间挑前 8，
+ * 只取 8 条就等于「先让 ES 随便挑 8 条、再在这 8 条里排序」——挑错池子，排序再对也白搭。
+ *
+ * 旧版是 `PINNED_MAX_ITEMS * 2`（16）且**没有 sort**：filter 查询 `_score` 恒定，
+ * 16 条以上时「哪 16 条进候选」由分片内部顺序决定 → 每轮注入集合可能抖动、
+ * 部分常驻规则静默消失（2026-11-10 审查 #13）。线上当前单用户最多 4 条 pinned，
+ * 属**潜伏**风险；64 给足余量，成本是一次 filter 查询多回几十条 `_source`。
+ */
+export const PINNED_FETCH_SIZE = 64
+
+/**
+ * pinned 段的取数条件：只认 `pinned=true AND status=active`，与 query 无关。
+ *
+ * `sort` 是这次修复的关键之一：没有它，`size` 截断时选中哪几条是**不确定**的
+ * （同一份数据两次查询可能给出不同顺序）。`updated_at desc` 只为确定性——
+ * 真正的优先级仍由进程内 `normalizePinnedHits` 按 importance 排（ES 里 importance 是
+ * keyword，按它排只会得到字典序，见 IMPORTANCE_ORDER 的说明）。
+ */
 export function pinnedSearchBody(size: number): Record<string, unknown> {
   return {
     size,
     _source: ['memory_id', 'content', 'summary', 'memory_type', 'domain', 'importance', 'updated_at'],
-    query: { bool: { filter: [{ term: { pinned: true } }, { term: { status: 'active' } }] } },
+    query: {
+      bool: {
+        filter: [{ term: { pinned: true } }, { term: { status: 'active' } }],
+        // 排除「非事实」三类（2026-11-10 审查 #14）：检索段一直按 NON_FACT_MEMORY_TYPES
+        // 排除 identity/persona/journal（自述/人格/日记会挤占事实召回），pinned 段却绕过了它 ——
+        // 于是被 pin 的未审核自述能每轮注入。两段口径必须一致。
+        // ⚠️ 第二道闸在 save：#10 已让 memory_save(identity) 只落 pending，
+        // 而这里过滤 status=active —— 两道一起才堵死「未审核自述被 pin 后注入」。
+        // 线上实测 16 条 pinned 全是 preference，故本改动当前是无操作、不改变任何现有注入。
+        must_not: [{ terms: { memory_type: [...NON_FACT_MEMORY_TYPES] } }],
+      },
+    },
+    sort: [{ updated_at: 'desc' }],
   }
 }
 
@@ -244,10 +288,11 @@ export function composeInjection(input: ComposeInput): ComposeResult {
     const picked = pickForInjectionDetailed(input.pinned, PINNED_MAX_ITEMS, input.pinnedMaxChars)
     pinnedItems = picked.picked
     for (const item of pinnedItems) pinnedIds.add(item.memory_id)
-    // 预算原因改写成 pinned-budget：面板要能区分「哪一段的预算不够」
-    dropped = picked.dropped.map((item) =>
-      item.reason === 'empty' ? item : { ...item, reason: 'pinned-budget' as const },
-    )
+    // 保留真实原因（max-items / max-chars / empty），只用 segment 标明是 pinned 段——
+    // 旧版统一改写成 pinned-budget 会让「条数超限」与「字符超限」在数据里分不开
+    // （2026-11-10 实测 844 条 dropped 全是 max-items，pinned-budget 出现 0 次，
+    // 面板「常驻被挤掉」卡因此永不渲染）。
+    dropped = picked.dropped.map((item) => ({ ...item, segment: 'pinned' as const }))
   }
 
   const rest = pinnedIds.size === 0 ? input.hits : input.hits.filter((hit) => !pinnedIds.has(hit.memory_id))
@@ -257,7 +302,7 @@ export function composeInjection(input: ComposeInput): ComposeResult {
     text: formatInjection(recall.picked, pinnedItems),
     pinned: pinnedItems,
     items: recall.picked,
-    dropped: [...dropped, ...recall.dropped],
+    dropped: [...dropped, ...recall.dropped.map((item) => ({ ...item, segment: 'recall' as const }))],
   }
 }
 
@@ -291,8 +336,26 @@ export interface InjectRecord {
   items: Array<{ memory_id: string; chars: number }>
   /** 注入正文总字符数（含 pinned 段） */
   chars: number
+  /**
+   * 失败原因（只在 `outcome=error` 时写）。
+   *
+   * 为什么必须有：影子侧的 error 带 `note`，注入侧旧版不带 → 排查「这一轮为什么没记忆」时
+   * JSONL 里只有 `outcome=error` 一个词，什么线索都没有（2026-11-10 审查确认）。
+   * 与 `recall-shadow.ts` 的 `note` 同口径：截 120 字符、不放凭证。
+   */
+  note?: string
   /** 阶段 32：本次注入的常驻条目（与 `items` 分开记，面板才能算出两段各占多少） */
   pinnedItems?: Array<{ memory_id: string; chars: number }>
+  /**
+   * 阶段 32+：常驻段实际注入了几条（`0` = 这轮没有常驻段）。
+   *
+   * 为什么必须有：2026-11-10 审查发现 `outcome` 只要 pinned 段非空就被覆盖成 `'injected'`，
+   * 于是 error / low_confidence / no_match 全被折叠——11-09 之后 432 条记录 outcome **全是 injected**，
+   * 面板的「超时率」恒 0、注入率虚高（74.1% vs 检索段真实 53.1%）。
+   * 现在 `outcome` 只描述**检索段**的真实结果，整段是否注入由 `pinnedInjected > 0 || outcome === 'injected'` 表达。
+   * 老记录没有本字段 → 面板按旧口径（`outcome === 'injected'`）显示。
+   */
+  pinnedInjected?: number
   /** 阶段 32：true = 本轮只有常驻段（检索段被分数门/超时挡掉或没命中） */
   pinnedOnly?: boolean
   /** 阶段 22：被预算挤掉的条目（空数组/缺省 = 没挤掉任何东西） */
@@ -309,11 +372,30 @@ export interface InjectRecord {
 /**
  * 把检索异常归类：超时与真错误要分开统计——
  * 超时是「队列忙，这轮算了」，错误是「通道有问题」，两者的处置完全不同。
+ *
+ * ⚠️ **必须认 `EsError.kind`，不能只认 `err.name`**：ES 层把一切异常统一包成
+ * `EsError`（`src/es/http.ts` 构造里 `this.name = 'EsError'`），而注入的超时来自
+ * `AbortSignal.timeout()` → 被 `classifyTransportError` 包成 `kind:'aborted'`。
+ * 旧实现只认 `name === 'TimeoutError' | 'AbortError'` → 对 EsError **恒返回 'error'**，
+ * `'timeout'` 分支在生产不可达（2026-11-10 实测：8 条 error 的 ms 全贴 500ms 硬超时，
+ * 而面板「超时率」恒 0%）。cause 链遍历是兜底，覆盖未包装的原生超时。
  */
 export function classifyInjectError(err: unknown): 'timeout' | 'error' {
-  if (typeof err === 'object' && err !== null) {
-    const name = (err as { name?: string }).name ?? ''
-    if (name === 'TimeoutError' || name === 'AbortError') return 'timeout'
+  // 沿 cause 链最多走 8 层，防止异常对象自引用导致死循环
+  let cur: unknown = err
+  for (let depth = 0; depth < 8 && cur !== undefined && cur !== null; depth += 1) {
+    if (cur instanceof EsError) {
+      // kind 由 ES 层给出：timeout=socket 空闲超时，aborted=注入自己的 500ms 到点
+      return cur.kind === 'timeout' || cur.kind === 'aborted' ? 'timeout' : 'error'
+    }
+    if (typeof cur === 'object') {
+      const name = (cur as { name?: string }).name ?? ''
+      if (name === 'TimeoutError' || name === 'AbortError') return 'timeout'
+      cur = (cur as { cause?: unknown }).cause
+      continue
+    }
+    // 非对象（字符串等）没有更多信息可看
+    break
   }
   return 'error'
 }

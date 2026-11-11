@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.6.49**
+**当前版本：0.6.55**
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -108,9 +108,19 @@ profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到�
 
 包里还带 `manifest.json`（版本、commit、构建时间）与 `SHA256SUMS`（`sha256sum -c SHA256SUMS`）。
 
+### 自动更新（默认开）
+
+装好后插件自己每天 **06:00** 检查 GitHub Release，有新版就安装，装完延迟 60 秒退出、
+由 systemd / 容器策略拉起。关闭：面板「记忆库 → 配置 → 自动更新」取消勾选。
+
+- **管理员实例**：`update.migrate: true`（建议 `at: '05:30'`），升级时**先给索引补字段**再换代码；
+  需要该账号有 `manage` 权限：`scripts/init-user.sh <uid> --team-write --with-migrate`。
+- **成员实例**：只换代码；升级前做只读体检，缺字段就跳过、等下一轮（ES 是共享的，不需要各自迁移）。
+- 排障：`~/.dsh/memory-es/update/update.log`；只读核对版本：`node scripts/update-check.mjs`。
+
 ## 版本
 
-当前 **0.6.49**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.6.55**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本

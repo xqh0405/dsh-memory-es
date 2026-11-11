@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-es",
-  "version": "0.6.49",
+  "version": "0.6.55",
   "description": "DSH 记忆插件：Elasticsearch 双层记忆库（团队知识 + 个人记忆）",
   "keywords": [
     "dsh",
@@ -68,7 +68,7 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "test": "bash scripts/test.sh",
-    "test:integration": "node --test tests/es-integration.test.ts",
+    "test:integration": "bash scripts/test.sh integration",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
     "eval": "node scripts/eval-search.ts",
     "eval:prod": "node scripts/eval-search.ts --gate",

@@ -173,6 +173,21 @@ def chunk_text(text: str, target=TARGET, overlap=OVERLAP, max_len=MAX_CHUNK):
             cur = (cur + "\n\n" + u).strip()
     if cur.strip():
         chunks.append(cur.strip())
+
+    # 硬上限兜底（2026-11-11 审查 #35）：句子切分对「无标点的长串」无解
+    # —— 代码块、长 URL、base64、没有句号的表格行，`sents` 只有一项，
+    # pieces 里就是一整段超长文本，于是 MAX_CHUNK 这个「单块硬上限」形同虚设。
+    # 这里按字符强制断开。硬切出来的相邻块**不带 overlap**：无标点串本来
+    # 没有语义边界，重叠只会让同一段文字重复进索引、拉低向量质量。
+    if any(len(c) > max_len for c in chunks):
+        forced: list[str] = []
+        for c in chunks:
+            if len(c) <= max_len:
+                forced.append(c)
+                continue
+            for i in range(0, len(c), max_len):
+                forced.append(c[i : i + max_len])
+        chunks = forced
     return chunks
 
 
@@ -348,6 +363,14 @@ def main() -> int:
                 vectors.extend([None] * len(texts[i:i + args.batch]))
 
         for ci, (c, vec) in enumerate(zip(chunks, vectors)):
+            # ⚠️ 这里**不要**照 migrate-mnemon.py 去补 content_exact / importance /
+            # pinned / related / activation（2026-11-10 审查 L12/#29 曾把两者混为一谈）：
+            # 本脚本写的是 **`personal_doc_*`**，那份模板（init-indices.sh 的第二份 heredoc）
+            # 只有 20 个字段，**这 5 个一个都没有**，而索引是 `dynamic: strict` ——
+            # 写进去就是 strict_dynamic_mapping_exception，整批灌不进去。
+            # 标识符精确匹配（content_exact / IDENTIFIER_FIELD）目前只服务于
+            # `memory_search`，`doc_search` 那条路根本不读它；真要给文档加标识符匹配，
+            # 得先改模板 + 迁移 11 个 personal_doc_* 索引（与 16b / 21b 同类，别顺手做）。
             doc = {
                 "doc_id": doc_id,
                 "chunk_index": ci,

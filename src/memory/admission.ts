@@ -59,81 +59,60 @@ export interface AdmissionContext {
 }
 
 /**
- * 凭据关键词。`pass` 故意不在词表里（英文单词误伤），只认完整拼写与中文说法。
+ * 凭据规则统一到 `src/security/secret-rules.ts`（2026-11-10 审查 #8）。
+ *
+ * 此处曾自带一份词表 / 令牌前缀 / 熵门限，与 `consolidate/sensitive.ts` 各写各的，
+ * 阈值逐渐漂移：`API key 为 …`、`access key 为 LTAI…`、`sk-proj-…`、`sk-ant-api03-…`、
+ * 40 位 AWS secret —— 五条在本模块全部放行、而晋升侧早就能拦（同一条凭据两套结论）。
+ * 现在两边 import 同一份规则；`id_card` / `phone` 刻意不上提（个人库里是正常内容）。
  */
-const CREDENTIAL_WORDS =
-  'password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|密码|口令|密钥|私钥|令牌'
+import {
+  ASSIGN_SEPARATORS,
+  CREDENTIAL_WORDS,
+  DSN_WITH_PASSWORD,
+  KNOWN_TOKEN_PATTERNS,
+  PLACEHOLDER_PATTERN,
+  PRIVATE_KEY_PATTERN,
+  PROSE_SEPARATORS,
+  looksLikeOpaqueSecret,
+  maskSecret,
+  normalizeForScan,
+} from '../security/secret-rules.ts'
+
+// 老 API 保留：tests/admission.test.ts 等一直从本模块取它
+export { looksLikeOpaqueSecret }
 
 /**
- * 赋值式：`password: abcdef` / `密码是 abcdef` / `token=...`。
+ * 赋值式（显式）：`password: abcdef` / `密码是 abcdef` / `token=...` / `API key 为 …`。
  *
- * 分隔符带上中文的「是 / 为」，因为中文会话里的口令几乎从不写成冒号。
- *
- * 2026-11-02 评审修：原来值只取「分隔符后第一个 token 且 ≥6 字符」，于是
- * `password：ab cd12345678`、`这台机器密码是 a very secret thing` 全部放行；
- * 关键词插零宽字符（`pass​word:`）也能绕过。现在改成：
- *  · 先把零宽字符剔掉、全角折成半角再扫（见 `scanText`）；
- *  · 值取到行尾/句末标点（最多 60 字），再判断「像不像一个值」。
+ * 分隔符带中文的「是 / 为」——中文会话里的口令几乎从不写成冒号。
+ * 2026-11-02 评审起：值取到行尾/句末标点（最多 60 字），再判断「像不像一个值」，
+ * 而不是只取第一个 token（那样 `password：ab cd12345678` 会整条放行）。
  */
 const ASSIGN_PATTERN = new RegExp(
-  `(?:${CREDENTIAL_WORDS})\\s*(?:是|为|[:=])\\s*["']?([^\\n。；;]{2,60})`,
+  `(?:${CREDENTIAL_WORDS})\\s*(?:${ASSIGN_SEPARATORS})\\s*["']?([^\\n。；;]{2,60})`,
   'giu',
 )
 
-/** 剥掉零宽字符再扫描：`pass\u200Bword:` 与 `password:` 在语义上是同一个词 */
-const ZERO_WIDTH = /[\u200b-\u200d\u2060\ufeff]/gu
-
-/** 扫描副本：去零宽 + NFKC（全角冒号/等号折成半角），原文不动，返回值只用脱敏片段 */
-function scanText(content: string): string {
-  // 顺序有讲究：先归一化（剥零宽 + 全角折叠），**再**剔除公钥块。
-  // 反过来的话，`-----BEGIN\u200BPUBLIC KEY-----`（插了零宽的公钥）匹配不上 PEM 规则，
-  // 会被熵规则当成凭据隔离 —— 误杀方向的反向 bug（2026-11-02 审计实测）。
-  return content.replace(ZERO_WIDTH, '').normalize('NFKC').replace(PEM_PUBLIC_BLOCK, ' ')
-}
-
-/** 占位符 / 说明性取值：看到这些就不算「真的写了凭据」 */
-const PLACEHOLDER_PATTERN =
-  /^(?:x{3,}|\*{3,}|\.{3,}|<[^>]*>|\$\{[^}]*\}|\{[^}]*\}|%[A-Z_]+%|your[_-].*|changeme|placeholder|redacted|example|dummy|none|null|true|false|略|见.*|同上|不变|已脱敏|按需.*|环境变量.*)$/iu
-
-/** 私钥块（PEM）。公钥与证书在扫描前会被整块剔除，不参与判定。 */
-const PRIVATE_KEY_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/
-
-/** URL 里带密码的连接串：`mysql://user:pass@host` */
-const DSN_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]{4,}@/iu
-
-/** 已知令牌前缀：云厂商与常见服务的固定形态，认出来就不用看熵了 */
-const KNOWN_TOKEN_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
-  { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { name: 'GitHub Token', re: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
-  { name: 'OpenAI/国内平台 Key', re: /\bsk-[A-Za-z0-9]{20,}\b/ },
-  { name: 'Slack Token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
-  { name: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/ },
-]
-
-/** 公钥 / 证书块：它们不是秘密，却长得极像凭据，扫描前整块剔除 */
-const PEM_PUBLIC_BLOCK = /-----BEGIN (?:[A-Z0-9 ]*PUBLIC KEY|CERTIFICATE)-----[\s\S]*?-----END (?:[A-Z0-9 ]*PUBLIC KEY|CERTIFICATE)-----/g
-
 /**
- * 命中凭据后的脱敏片段：只保留前 3 位与长度。
- * 目的不是让人猜出值，而是让"审的人"认得出这是哪一处（比如 `pass***（12 字符）`）。
+ * 散文式（英文 `is` / `are`）：`password is abc123456`。
+ *
+ * 单独一条正则，因为**值的判据必须更严**：`password: X` 是明确赋值，
+ * `password is X` 更多在陈述要求（`password is required` / `token is invalid`），
+ * 同一套宽松判据会把技术文档整片误伤 —— 所以散文式要求值里**含数字**（见 detectSecret）。
  */
-function mask(value: string): string {
-  const head = value.slice(0, 3)
-  return `${head}***（${value.length} 字符）`
+const PROSE_ASSIGN_PATTERN = new RegExp(
+  `(?:${CREDENTIAL_WORDS})\\s*(?:${PROSE_SEPARATORS})\\s*["']?([^\\n。；;]{2,60})`,
+  'giu',
+)
+
+/** 扫描副本：去零宽 + NFKC，再剔除公钥块（规则与顺序的说明见 secret-rules） */
+function scanText(content: string): string {
+  return normalizeForScan(content)
 }
 
-/** 高熵不透明串：base64/url-safe 形态的长串，且不是可公开识别的哈希 */
-export function looksLikeOpaqueSecret(token: string): boolean {
-  if (token.length < 44 || token.length > 512) return false
-  if (!/^[A-Za-z0-9+/_=-]+$/.test(token)) return false
-  // 纯 hex = commit id / sha256 / 文件哈希，公开可共享，绝不该被当凭据
-  if (/^[0-9a-f]+$/i.test(token)) return false
-  // 必须大小写与数字混排：随机密钥几乎必然如此，而普通标识符很难同时满足
-  if (!/[A-Z]/.test(token) || !/[a-z]/.test(token) || !/[0-9]/.test(token)) return false
-  // 含 base64 标点（+ / =）的长度 44 就够可疑；纯字母数字的长串要更长才判，
-  // 否则 `lottery-cloud-java-change` 这类连字符串会被误伤。
-  return /[+/=]/.test(token) ? true : token.length >= 64
-}
+/** 脱敏片段：只留前 3 位与长度，让「审的人」认得出是哪一处、又猜不出值 */
+const mask = maskSecret
 
 /** 扫正文里的凭据形态；命中返回脱敏片段，否则 null */
 export function detectSecret(content: string): { matched: string; reason: string } | null {
@@ -159,8 +138,40 @@ export function detectSecret(content: string): { matched: string; reason: string
     return { matched: mask(dsn[0]), reason: '命中带密码的连接串，已隔离待审' }
   }
 
-  ASSIGN_PATTERN.lastIndex = 0
-  for (let m = ASSIGN_PATTERN.exec(text); m !== null; m = ASSIGN_PATTERN.exec(text)) {
+  // 显式赋值（`:` `=` 是 为）与散文式（is are）共用同一套「像不像值」的判断，
+  // 只在「值要不要含数字」上分档 —— 理由见 PROSE_ASSIGN_PATTERN。
+  const explicit = matchAssignment(ASSIGN_PATTERN, text, false)
+  if (explicit !== null) return explicit
+
+  const prose = matchAssignment(PROSE_ASSIGN_PATTERN, text, true)
+  if (prose !== null) return prose
+
+  for (const token of text.split(/[\s"'\u0060,\uff0c\uff1b\uff08\uff09[\]{}<>]+/u)) {
+    if (looksLikeOpaqueSecret(token)) {
+      return { matched: mask(token), reason: '命中高熵不透明串（疑似密钥），已隔离待审' }
+    }
+  }
+
+  return null
+}
+
+/**
+ * 跑一条赋值式正则，做「像不像一个值」的二次判断；没命中或全被过滤返回 null。
+ *
+ * 这些过滤是**误杀防线**，别删：占位符（`<your-password>`）、纯说明文字
+ * （`密码是见文档`）、没有字母数字的分隔符残留，都必须放过。
+ *
+ * @param requireDigit 散文式专用：值必须含数字。`password: X` 是明确赋值所以宽松；
+ *   `password is X` 更多在陈述要求 —— 没有这道要求的话
+ *   `password is required` / `token is invalid` 会被整片误伤（2026-11-10 加）。
+ */
+function matchAssignment(
+  pattern: RegExp,
+  text: string,
+  requireDigit: boolean,
+): { matched: string; reason: string } | null {
+  pattern.lastIndex = 0
+  for (let m = pattern.exec(text); m !== null; m = pattern.exec(text)) {
     const raw = (m[1] ?? '').trim().replace(/^["'`]|["'`]$/gu, '').trim()
     if (raw === '') continue
     // 值后面常跟中文说明（"password: Passw0rd123! 记一下"）：在第一个中文字符处截断，
@@ -170,22 +181,18 @@ export function detectSecret(content: string): { matched: string; reason: string
     if (PLACEHOLDER_PATTERN.test(value)) continue
     // 值必须像"东西"：含字母或数字
     if (!/[A-Za-z0-9]/.test(value)) continue
+    if (requireDigit && !/[0-9]/.test(value)) continue
     // 单 token 沿用原判据（≥6 字符）；多词组合只要不是占位符就判——
     // `password: a very secret thing` 这种带空格的写法以前是完整的绕过路径。
     const words = value.split(/\s+/u)
     if (words.length === 1 && value.length < 6) continue
     return {
       matched: mask(value),
-      reason: '命中赋值式凭证（形如 password: ...），已隔离待审',
+      reason: requireDigit
+        ? '命中赋值式凭证（形如 password is ...），已隔离待审'
+        : '命中赋值式凭证（形如 password: ...），已隔离待审',
     }
   }
-
-  for (const token of text.split(/[\s"'`,;，；()（）[\]{}<>]+/u)) {
-    if (looksLikeOpaqueSecret(token)) {
-      return { matched: mask(token), reason: '命中高熵不透明串（疑似密钥），已隔离待审' }
-    }
-  }
-
   return null
 }
 

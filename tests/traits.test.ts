@@ -169,6 +169,46 @@ describe('writeTraitCandidate：幂等', () => {
     assert.equal(second.memory_id, first.memory_id, '同一个内容 → 同一个 id')
   })
 
+  // 2026-11-10 审查 #12：content_sha256 必须与 buildMemoryDoc 同口径（sha256 64 位）。
+  // 旧版写 `hashContent()`（FNV-1a **8 位**），而 dedupeBody（dsl.ts:283）校验 64 位 hex、
+  // 校验不过会直接抛 → 候选与 memory_save 永远互相认不出，同一正文两边各存一份。
+  test('content_sha256 与 memory_save 同口径（dedupeBody 能互相命中）', async () => {
+    const { writeTraitCandidate } = await import('../src/memory/traits.ts')
+    const { buildMemoryDoc } = await import('../src/memory/save.ts')
+    const { dedupeBody } = await import('../src/es/dsl.ts')
+
+    let doc: Record<string, unknown> | undefined
+    const deps = {
+      userId: 'u1',
+      personalPrefix: 'personal_memory_',
+      reader: { search: async () => ({ hits: [] }) },
+      writer: {
+        index: async (_i: string, d: unknown) => {
+          doc = d as Record<string, unknown>
+          return { id: 'x', result: 'created', status: 200 }
+        },
+      },
+    }
+    const content = '你倾向于先给结论，再解释理由'
+    await writeTraitCandidate(deps as never, { content, evidence_ids: ['a1'] }, 14)
+    assert.ok(doc, '候选应当写出去了')
+
+    // 同一条正文走 memory_save 的口径，两边必须算出同一个 sha
+    const viaSave = buildMemoryDoc(
+      { content },
+      { userId: 'u1', personalPrefix: 'personal_memory_', defaultDomain: 'general' },
+      { now: new Date(), memoryId: 'probe', embedding: null },
+    )
+    assert.equal(
+      doc!.content_sha256,
+      viaSave.contentSha256,
+      '候选的去重键必须与 memory_save 一致，否则同正文两边各存一份',
+    )
+    // 这一句是判据本体：旧版（8 位 FNV）会抛「需要 64 位小写十六进制」
+    assert.doesNotThrow(() => dedupeBody(String(doc!.content_sha256)), 'dedupeBody 必须认得这个 sha')
+    assert.equal(doc!.content_exact, content, '标识符字段也要与正文同源')
+  })
+
   // 2026-11-02 评审：LLM 产物也必须过写入准入（此前只挂在 memory_save 上）
   test('候选里含凭据 → 不落库、标 quarantined', async () => {
     const { writeTraitCandidate } = await import('../src/memory/traits.ts')
@@ -257,6 +297,34 @@ describe('runTraitsJob：编排与降级', () => {
     )
     assert.equal(result.candidates, 0)
     assert.equal(result.written, 0)
+  })
+
+  // 2026-11-10 审查 #15：`[诊断]` 原文必须在 **dry_run=false** 时也能看到。
+  // 旧版 rawPreview 只在干跑分支填，而线上跑的恰恰是 dry_run=false ——
+  // 于是「模型给了 0 条候选」与「路由没配好、模型返回了 [诊断]…」在返回上一模一样，
+  // 用户只看到 0，静默失败无从发现（v0.6.48 的启动预警只看配置字符串非空，兜不住「填错」）。
+  test('0 候选且非干跑 → 返回里带模型原始输出（能区分「真没得提炼」与「路由坏了」）', async () => {
+    const { defineTraitsTool } = await import('../src/memory/traits.ts')
+    const DIAG = '[诊断] 选不到模型路由（provider/model 为空或无效）'
+    const tool = defineTraitsTool({
+      userId: 'u1',
+      personalPrefix: 'personal_memory_',
+      reader: { search: async () => ({ hits: SOURCES.map((s) => ({ source: s })) }) },
+      writer: { index: async () => ({ id: 'x', result: 'created', status: 200 }) },
+      summarize: async () => DIAG,
+    } as never)
+
+    const value = (await tool.execute(
+      { dry_run: false },
+      { signal: new AbortController().signal } as never,
+    )) as { candidates: number; text: string; rawPreview?: string }
+
+    assert.equal(value.candidates, 0, '诊断字符串解析不出候选')
+    assert.ok(value.rawPreview?.includes('[诊断]'), `rawPreview 必须带原文，实际 ${String(value.rawPreview)}`)
+    assert.ok(
+      value.text.includes('[诊断]'),
+      `返回 text 也要能看到 —— 否则用户只看到「0 条候选」：${value.text}`,
+    )
   })
 })
 

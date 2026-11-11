@@ -189,6 +189,14 @@ export async function runDistillJob(
 ): Promise<DistillJobResult> {
   const log = deps.log ?? (() => {})
   const startedAt = Date.now()
+  // 写闸（2026-11-10 下沉）：必须在烧模型之前拦。
+  // 放到 distillMemory 里也能拦住，但那时 LLM 已经调完——维护期白烧一次；
+  // 而且它的异常会被下面的 catch 归成 content_fault:true（普通 Error ≠ EsError），
+  // 让清扫误以为是「这条内容有问题」去计次，分类是错的。
+  if ((deps.writeMode ?? 'on') !== 'on') {
+    log({ tool: 'distill', memory_id: job.memoryId, skipped: 'write_gate', writeMode: deps.writeMode })
+    return { ok: false, reason: 'write_gate' }
+  }
   const llm = deps.llm
   if (!llm || typeof llm.prepareCall !== 'function') {
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_llm_service' })
@@ -328,6 +336,23 @@ export async function runDistillSweep(
     markedSkipped: 0,
     markedFailed: 0,
     envDeferred: 0,
+  }
+
+  // 写闸（2026-11-10 下沉，用户拍板「全拦」）：governance.write=off 时整轮退出。
+  //
+  // 为什么在最前面而不是逐条拦：sweep 的四个写入点（skipped/done/failed×2）都是
+  // **状态收口**，关闸时一条都写不进去；先拦可以省掉 query + 每条的 LLM 调用，
+  // 也让 pending 队列原样保留——重开 write 后下一轮自然接着处理。
+  // （逐条写入处仍各有一道 assertWriteAllowed 兜底，防将来有人绕过这里直接调。）
+  if ((deps.writeMode ?? 'on') !== 'on') {
+    log({
+      tool: 'distill-sweep',
+      user: deps.userId,
+      skipped: 'write_gate',
+      writeMode: deps.writeMode,
+      note: 'governance.write 非 on，本轮清扫整轮跳过（pending 原样保留）',
+    })
+    return result
   }
 
   // 模型路由**惰性**解析：只有真要蒸馏时才需要它。

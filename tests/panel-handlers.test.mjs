@@ -125,7 +125,7 @@ test('findEntryRow：configEditor 不可用时明确报错', () => {
 
 // ── 权限：普通账号（没有整理身份）不该能审 ────────────────────────────────
 const panel = await import('../panel/index.js')
-const { handleCapabilities, handleDeleteMemory, handleMemories, handleMaintenanceGet, handleReviewAction, handleUsers } = panel
+const { handleCapabilities, handleDeleteMemory, handleDocArchive, handleDocRestore, handleMemories, handleMaintenanceGet, handleRestoreMemory, handleReviewAction, handleUsers } = panel
 
 const fs = await import('node:fs')
 const os = await import('node:os')
@@ -320,7 +320,20 @@ const { createServer } = await import('node:http')
 const SINGLE = { userId: 'xqh', username: 'mem-user-xqh', password: 'pw', teamWrite: true }
 
 /** 假 ES：_has_privileges 按索引名分别回答，DELETE / 审计写入按参数给状态码 */
-async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, deleteStatus = 200, indexBuckets = [] } = {}) {
+async function startFakeEs({
+  canDeletePersonal = true,
+  canDeleteTeam = true,
+  deleteStatus = 200,
+  auditStatus = 201,
+  indexBuckets = [],
+  restoreSource = null,
+  // 归档/恢复（2026-11-10 审查 P6/#21）：线上跑的 setDocStatus 要这三样
+  docSlices = null,
+  /** 切片上的 cold_memory_id（审查 16b：恢复时按它精确删掉冷引用） */
+  sliceColdRef = null,
+  failUpdateFor = null,
+  coldRefFail = false,
+} = {}) {
   const calls = []
   const server = createServer((req, res) => {
     const chunks = []
@@ -341,16 +354,62 @@ async function startFakeEs({ canDeletePersonal = true, canDeleteTeam = true, del
       if (req.method === 'DELETE') {
         return send(deleteStatus, { result: deleteStatus === 404 ? 'not_found' : 'deleted' })
       }
-      if (req.url.startsWith('/memory_audit/_doc')) return send(201, { result: 'created' })
+      if (req.url.startsWith('/memory_audit/_doc')) return send(auditStatus, { result: auditStatus >= 400 ? 'error' : 'created' })
       // /users 用的 _index 聚合：任何 personal_memory_* 的 _search 都回同一份 buckets；
       // 其他 _search 回空页（handleMemories 会拿它拼两库结果）
       if (req.url.includes('_search')) {
+        // restore 走 `ids` 查询取单条（面板读侧没有 get）——给了 restoreSource 就回它，
+        // 这样才能断言「恢复写出去的 patch 长什么样」
+        if (restoreSource !== null && body.includes('"ids"')) {
+          return send(200, {
+            hits: { total: { value: 1 }, hits: [{ _id: 'es-1', _score: 1, _source: restoreSource }] },
+          })
+        }
+        // 归档/恢复（#21）：`term: doc_id` 取这篇文档的**全部切片**一起改状态
+        if (docSlices !== null && body.includes('"term"')) {
+          return send(200, {
+            took: 1,
+            hits: {
+              total: { value: docSlices.length, relation: 'eq' },
+              hits: docSlices.map((id) => ({
+                _id: id,
+                _score: 1,
+                _source: {
+                  doc_id: 'doc-1',
+                  title: '测试文档',
+                  domain: 'general',
+                  chunk_total: docSlices.length,
+                  // 老文档没有这个字段 —— 只有显式给了才带上（这样才能测「没有也不报错」）
+                  ...(sliceColdRef === null ? {} : { cold_memory_id: sliceColdRef }),
+                },
+              })),
+            },
+          })
+        }
         return send(200, {
           hits: { total: { value: 0 }, hits: [] },
           // docs: 维护页"文档数"的 cardinality 聚合（固定 42，方便断言它不再是占位）
           aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 } },
         })
       }
+
+      // 逐切片状态更新（setDocStatus 的主循环）；可按切片 id 让某些失败
+      if (req.url.includes('/_update/')) {
+        const id = decodeURIComponent((req.url.split('/_update/')[1] ?? '').split(/[?/]/)[0] ?? '')
+        if ((failUpdateFor ?? []).includes(id)) {
+          return send(500, { error: { type: 'internal_server_error', reason: `update ${id} boom` } })
+        }
+        return send(200, { _id: id, result: 'updated' })
+      }
+
+      // 冷引用写入（personal 索引 _doc）——归档必写；失败要降级提示、不回滚归档
+      if ((req.method === 'POST' || req.method === 'PUT') && req.url.includes('/_doc')) {
+        if (coldRefFail) {
+          return send(500, { error: { type: 'internal_server_error', reason: 'coldref boom' } })
+        }
+        return send(201, { result: 'created' })
+      }
+
       return send(200, {})
     })
   })
@@ -442,6 +501,53 @@ test('删除：团队删除成功 → 200 且写 memory_audit', async () => {
     assert.ok(audit, '团队删除必须写审计')
     assert.equal(JSON.parse(audit.body).event, 'deleted')
     assert.equal(JSON.parse(audit.body).reason, '内容过时')
+    // 顺序是这次修复的核心：审计必须**早于**删除（旧版先删后审计，审计失败就无痕删掉了）
+    const auditIdx = es.calls.findIndex((c) => c.url.startsWith('/memory_audit/_doc'))
+    const delIdx = es.calls.findIndex((c) => c.method === 'DELETE')
+    assert.ok(auditIdx < delIdx, `审计必须先于删除，实际 audit@${auditIdx} del@${delIdx}`)
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：团队审计写入失败 → 502 且不执行删除（无审计不删）', async () => {
+  const es = await startFakeEs({ canDeleteTeam: true, auditStatus: 403 })
+  try {
+    const res = fakeRes()
+    await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '内容过时' }))
+    assert.equal(res.statusCode, 502, '审计写不进去必须报错，不能返回 200 假装成功')
+    const body = JSON.parse(res.body)
+    assert.equal(body.ok, false)
+    assert.match(body.error, /审计写入失败/)
+    assert.match(body.error, /已中止删除/)
+    assert.equal(
+      es.calls.filter((c) => c.method === 'DELETE').length,
+      0,
+      '审计没写成时绝不能删 —— 否则团队记忆被无痕删除（memory_audit 是唯一的人维度证据）',
+    )
+  } finally {
+    await es.close()
+  }
+})
+
+test('删除：审计已写但删除失败 → 补一条更正审计，不让审计说谎', async () => {
+  const es = await startFakeEs({ canDeletePersonal: true, canDeleteTeam: true, deleteStatus: 500 })
+  try {
+    const res = fakeRes()
+    // handler 直接把删除失败抛出去，由路由层顶层 catch 兜成 500（panel/index.js 的 500 分支）
+    let thrown = null
+    try {
+      await handleDeleteMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'doc-1', scope: 'team', confirm: true, reason: '内容过时' }))
+    } catch (error) {
+      thrown = error
+    }
+    assert.ok(thrown, '删除失败必须抛出，不能静默返回 200')
+    assert.match(String(thrown?.message ?? thrown), /500|HTTP/)
+    const audits = es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc'))
+    assert.equal(audits.length, 2, `应有 deleted + delete_failed 两条，实际 ${audits.length}`)
+    assert.equal(JSON.parse(audits[0].body).event, 'deleted')
+    assert.equal(JSON.parse(audits[1].body).event, 'delete_failed')
+    assert.match(JSON.parse(audits[1].body).reason, /作废/)
   } finally {
     await es.close()
   }
@@ -471,6 +577,262 @@ test('删除：个人库删除成功，且按设计不写审计', async () => {
     assert.equal(es.calls.filter((c) => c.url.startsWith('/memory_audit/_doc')).length, 0)
     const del = es.calls.find((c) => c.method === 'DELETE')
     assert.match(del.url, /personal_memory_xqh\/_doc\/doc-2/)
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 恢复隔离：distill_state 必须跟着重置（2026-11-10 审查 #16）─────────────
+// 面板与工具侧是**两套独立实现**，历史上正是「一边修了另一边漏」反复出 bug
+// （工具侧恢复曾经不清 quarantine_reason，就是这么发现的）。所以两边都得钉。
+test('恢复：distill_state=skipped → 重置为 pending，回执带 requeueDistill', async () => {
+  const es = await startFakeEs({
+    restoreSource: { status: 'quarantine', distill_state: 'skipped', quarantine_reason: '命中赋值式凭证', embedding: null },
+  })
+  try {
+    const res = fakeRes()
+    await handleRestoreMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'es-1', scope: 'personal' }))
+    assert.equal(res.statusCode, 200, `实际：${res.body}`)
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.status, 'active')
+    assert.equal(body.value.requeueDistill, true, '回执要告诉客户端「已重新排队蒸馏」')
+    assert.equal(body.value.embeddingMissing, true, '隔离条目按设计无向量')
+
+    const upd = es.calls.find((c) => c.url.includes('/_update/'))
+    assert.ok(upd, '应发出 update')
+    const patch = JSON.parse(upd.body).doc
+    assert.equal(patch.status, 'active')
+    assert.equal(patch.quarantine_reason, null)
+    assert.equal(patch.distill_state, 'pending', '不重置的话清扫只查 pending，这条永不蒸馏、永远补不回向量')
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：distill_state=done → 不动它（已蒸馏过，别白烧一轮模型）', async () => {
+  const es = await startFakeEs({
+    restoreSource: { status: 'quarantine', distill_state: 'done', embedding: [0.1] },
+  })
+  try {
+    const res = fakeRes()
+    await handleRestoreMemory(ctxWithEs(SINGLE, es.url), res, postReq({ esId: 'es-1', scope: 'personal' }))
+    const body = JSON.parse(res.body)
+    assert.equal(body.value.requeueDistill, false)
+    assert.equal(body.value.embeddingMissing, false)
+
+    const patch = JSON.parse(es.calls.find((c) => c.url.includes('/_update/')).body).doc
+    assert.equal(
+      'distill_state' in patch,
+      false,
+      `已蒸馏的条目不该被重置，实际 patch=${JSON.stringify(patch)}`,
+    )
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 文档归档/恢复：**线上跑的那套** setDocStatus（2026-11-10 审查 P6/#21）─────
+// 背景：`src/memory/doc-archive.ts` 是**死代码**（只有它自己那份测试在引用），
+// 而线上走的是 `panel/index.js` 的 `setDocStatus` —— 逐切片改状态 + **直写冷引用**，
+// 绕过 saveMemory / governance / 准入，**以前零测试**。
+// 归档是管理员的日常动作（清容量），所以把线上这份钉住，而不是去测那份没人跑的。
+// ⚠️ 修法里的「接 doc.limitBytes」与「统一两套实现」按用户 2026-11-10 拍板**本次不做**：
+//   前者要先对 11 个 personal_doc_* 索引（5454 切片）加字段迁移再上代码（与单独排的 16b 同类）；
+//   后者与「面板刻意不 import 主插件产物」的现有结构冲突，属高风险结构性改动。
+//   两者都已记进修复文档第 21 项，别当成做完。
+const DOC_ADMIN = { ...SINGLE, consolidatorUsername: 'mem-consolidator', consolidatorPassword: 'z' }
+// 非管理员：canReviewTeam 的判据是「单账号 + teamWrite」**或**「有整理身份」，
+// 所以必须两条都不满足 —— 直接用 SINGLE（teamWrite:true）会反而被放行。
+const DOC_MEMBER = { ...SINGLE, teamWrite: false, consolidatorUsername: '', consolidatorPassword: '' }
+const coldWrites = (es) => es.calls.filter((c) => c.url.includes('personal_memory') && c.url.includes('/_doc'))
+const sliceUpdates = (es) => es.calls.filter((c) => c.url.includes('/_update/'))
+
+test('归档：非管理员 403，且一次都不碰 ES', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0'] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_MEMBER, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 403, `实际 ${res.statusCode}: ${res.body}`)
+    assert.match(JSON.parse(res.body).error, /管理员/)
+    assert.equal(es.calls.length, 0, '权限没过之前连查询都不该发')
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：缺 docId → 400（先于权限检查，报错更具体）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0'] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ reason: '占容量' }))
+    assert.equal(res.statusCode, 400)
+    assert.match(JSON.parse(res.body).error, /docId/)
+    assert.equal(es.calls.length, 0)
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：文档不存在 → 404（不是 200 装作改了）', async () => {
+  const es = await startFakeEs({ docSlices: [] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'nope' }))
+    assert.equal(res.statusCode, 404)
+    assert.match(JSON.parse(res.body).error, /不存在/)
+    assert.equal(sliceUpdates(es).length, 0, '查不到就不该发任何状态更新')
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：全部切片成功 + 冷引用写入（否则归档等于失踪）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1', 'd1-2'] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1', reason: '占满容量' }))
+    assert.equal(res.statusCode, 200, `实际 ${res.statusCode}: ${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.status, 'archived')
+    assert.equal(value.chunks, 3, '三个切片都要改（只改一部分会一半出现一半消失）')
+    assert.equal(value.total, 3)
+    assert.deepEqual(value.failures, [])
+    assert.match(value.coldMemoryId, /^coldref-/, '冷引用必须有 id，否则调用方无从回收')
+
+    const cold = coldWrites(es)[0]
+    assert.ok(cold, '必须写冷引用 —— 没有冷引用的归档等于失踪')
+    assert.match(cold.body, /doc_id: doc-1/, '冷引用正文必须带 doc_id 才能被 memory_search 捡回来')
+    assert.match(cold.body, /占满容量/, '归档原因要落进冷引用正文')
+    // 审查 16b：归档时每个切片写**两次** —— 一次 status、一次 cold_memory_id
+    // （后者给恢复用：没有它，恢复就只能按 content 模糊搜，代价大且会误伤别的文档）
+    const statusWrites = sliceUpdates(es).filter((c) => c.body.includes('"status"'))
+    const coldIdWrites = sliceUpdates(es).filter((c) => c.body.includes('cold_memory_id'))
+    assert.equal(statusWrites.length, 3, '3 个切片各写一次 status')
+    assert.equal(coldIdWrites.length, 3, '3 个切片各写一次 cold_memory_id（16b）')
+    assert.match(coldIdWrites[0].body, /"cold_memory_id":"coldref-/, '写回的必须是刚生成的那个冷引用 id')
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：部分切片失败 → failures 逐条列出，仍返回 200（部分成功不算全败）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1', 'd1-2'], failUpdateFor: ['d1-1'] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `部分失败不该整体报错：${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.chunks, 2)
+    assert.equal(value.total, 3)
+    assert.equal(value.failures.length, 1, `要报出是哪一片失败，实际 ${JSON.stringify(value.failures)}`)
+    assert.match(value.failures[0], /d1-1/, 'failures 必须带切片 id，否则运维没法定位')
+    assert.match(value.coldMemoryId, /^coldref-/, '部分成功时冷引用照写（归档确实生效了）')
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 16b：归档→恢复必须清掉冷引用（2026-11-11）────────────────────────────
+// 不清理的话：personal_memory 里永远留一条「【已归档文档】…」的记忆，而文档其实
+// 已经活了 —— 它还会被 memory_search 命中，指路的却是一篇并未归档的文档。
+// 根因是 restore 手上只有 docId，而冷引用 id 是 `coldref-<8位>-<ts>`，没有反向索引；
+// 解法是归档时把 id 写回切片，恢复时按它**精确**删。
+test('恢复：按切片上的 cold_memory_id 精确删掉冷引用（16b）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1'], sliceColdRef: 'coldref-doc1-abc' })
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `实际 ${res.statusCode}: ${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.status, 'active')
+    // 两个切片共用同一个冷引用 → 只该删一次（去重）
+    const dels = es.calls.filter((c) => c.method === 'DELETE')
+    assert.equal(dels.length, 1, `两个切片共用一个冷引用，只该删一次，实际 ${dels.length} 次`)
+    assert.match(
+      dels[0].url,
+      /\/personal_memory_xqh\/_doc\/coldref-doc1-abc/,
+      '删的必须是冷引用 id，不能是切片 id',
+    )
+    assert.match(value.note, /已清理 1\/1/, `note 要说明清了几条，实际 ${JSON.stringify(value.note)}`)
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：老文档没有 cold_memory_id → 不发删除、不报错（向后兼容）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0'] }) // 不给 sliceColdRef
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `缺字段不该让恢复失败：${res.body}`)
+    assert.equal(
+      es.calls.filter((c) => c.method === 'DELETE').length,
+      0,
+      '没有冷引用 id 就不该删任何东西（猜着删会误伤别的记忆）',
+    )
+    assert.equal(JSON.parse(res.body).value.note, '', '没东西可清时 note 留空')
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：冷引用已被手删（DELETE 404）→ 按清理成功算，保持幂等', async () => {
+  const es = await startFakeEs({
+    docSlices: ['d1-0'],
+    sliceColdRef: 'coldref-gone-x',
+    deleteStatus: 404,
+  })
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `404 不该让恢复失败：${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.match(value.note, /已清理 1\/1/, '本来就没了也算清理成功，否则重跑会一直报失败')
+    assert.deepEqual(value.failures, [], '404 不该进 failures')
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：一条都没改成 → 500，且不写冷引用（不能留一条指向未归档文档的指路条）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1'], failUpdateFor: ['d1-0', 'd1-1'] })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 500)
+    assert.match(JSON.parse(res.body).error, /一条都没改成功/)
+    assert.equal(coldWrites(es).length, 0, '全败时绝不能写冷引用 —— 那会指向一篇没归档的文档')
+  } finally {
+    await es.close()
+  }
+})
+
+test('归档：冷引用写失败 → 降级提示，但归档本身仍成功（不回滚成半成品）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0'], coldRefFail: true })
+  try {
+    const res = fakeRes()
+    await handleDocArchive(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `冷引用失败不该让归档整体失败：${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.chunks, 1, '切片状态已经改成功了')
+    assert.equal(value.coldMemoryId, '', '写失败时必须把 id 清空，不能让调用方以为拿到了可用引用')
+    assert.match(value.note, /冷引用写入失败/, '要给出可读提示，而不是静默')
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：改成 active，且**不写**冷引用（恢复不是归档，不该留「已归档」条）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1'] })
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `实际 ${res.statusCode}: ${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.status, 'active')
+    assert.equal(value.chunks, 2)
+    assert.equal(value.coldMemoryId, '')
+    assert.equal(coldWrites(es).length, 0, '恢复路径不写冷引用（29.5 那个「不清理」是另一条待办）')
   } finally {
     await es.close()
   }
@@ -906,13 +1268,74 @@ test('表情包新增：缺 when / svg / 超大 / 重名 / 穿越文件名 / 坏
   assert.equal(fs.readFileSync(path.join(dir, 'stickers.json'), 'utf8'), '{ broken')
 })
 
-test('表情包新增：POST 路由必须排在 405 兜底之前（否则请求被吞成 405）', async () => {
+// ── 顶层路由器（2026-11-11 审查 #32）────────────────────────────────────
+// 两个缺口：① 405 守卫夹在路由表**中间**，语义是「非 GET 一律 405」——
+//   任何 POST 路由排到它后面就会被吞成 405（identity/review 踩过）。
+//   原来只钉了 `/stickers/add` 一条；这里扫**全部** POST 路由。
+// ② `handle()` 本身从未被调用过：方法过滤 / 404 / 「POST 能穿过去」都没测。
+test('顶层路由：**所有** POST 路由都必须排在 405 兜底之前', async () => {
   const source = fs.readFileSync(new URL('../panel/index.js', import.meta.url), 'utf8')
-  const addAt = source.indexOf("'/stickers/add' && req.method === 'POST'")
   const guardAt = source.indexOf("req.method !== 'GET'")
-  assert.ok(addAt > 0, '路由没注册：找不到 /stickers/add')
   assert.ok(guardAt > 0, '找不到 405 兜底，测试的前提变了')
-  assert.ok(addAt < guardAt, 'POST /stickers/add 必须出现在 405 兜底之前')
+
+  // 路由表里两形态：`path === '…' && req.method === 'POST'`，以及 review 那条
+  // `req.method === 'POST' && reviewMatch`（正则路由，path 是动态的）。
+  const postRouteRe = /(?:path === '[^']+'[^\n]*?req\.method === 'POST'|req\.method === 'POST' && reviewMatch)/g
+  const hits = [...source.matchAll(postRouteRe)].map((m) => ({ text: m[0].trim(), at: m.index ?? 0 }))
+  assert.ok(hits.length >= 8, `只找到 ${hits.length} 条 POST 路由，正则可能已失效（先修正则再信任这条测试）`)
+
+  const late = hits.filter((h) => h.at > guardAt)
+  assert.deepEqual(
+    late.map((h) => h.text),
+    [],
+    '这些 POST 路由排在 405 兜底之后，请求会被吞成 405；'
+    + '要么把它挪到 `req.method !== \'GET\'` 之前，要么把它改成不受该守卫影响的写法',
+  )
+})
+
+test('顶层路由：405 / 404 / 方法过滤的先后（handle 从未被测过）', async () => {
+  const { handle } = await import('../panel/index.js')
+  const es = await startFakeEs({ docSlices: ['d1-0'] })
+  try {
+    const ctx = ctxWithEs(DOC_MEMBER, es.url)
+    /** 造一条带 url 的请求（postReq 没有 url，不能直接用） */
+    const reqWith = (method, url, payload) =>
+      Object.assign(
+        Readable.from(payload === undefined ? [] : [Buffer.from(JSON.stringify(payload))]),
+        { method, url },
+      )
+
+    // ① POST 到只支持 GET 的路径 → 405（不是 404，也不是真的执行）
+    let res = fakeRes()
+    await handle(ctx, reqWith('POST', '/overview'), res)
+    assert.equal(res.statusCode, 405, `实际 ${res.statusCode}: ${res.body}`)
+    assert.match(JSON.parse(res.body).error, /只支持 GET/)
+
+    // ② GET 到不存在的路径 → 404，且报错里带路径（排查时能知道打到了哪）
+    res = fakeRes()
+    await handle(ctx, reqWith('GET', '/no-such-endpoint-zzz'), res)
+    assert.equal(res.statusCode, 404)
+    assert.match(JSON.parse(res.body).error, /未知接口/)
+    assert.match(JSON.parse(res.body).error, /no-such-endpoint-zzz/)
+
+    // ③ POST 到不存在的路径 → 405（方法过滤比路径更早 —— 这正是 405 夹在路由表中间的后果）
+    res = fakeRes()
+    await handle(ctx, reqWith('POST', '/no-such-endpoint-zzz'), res)
+    assert.equal(res.statusCode, 405)
+
+    // ④ POST 到**真实**的 POST 路由 → 必须穿过 405 守卫进到 handler。
+    // 用非管理员身份：期望 403（handler 的权限判定），**不是** 405（被守卫吞掉）。
+    res = fakeRes()
+    await handle(ctx, reqWith('POST', '/maintenance/doc-archive', { docId: 'doc-1' }), res)
+    assert.equal(
+      res.statusCode,
+      403,
+      `POST 路由没穿过去：拿到 ${res.statusCode}（405 就是被兜底吞了）: ${res.body}`,
+    )
+    assert.match(JSON.parse(res.body).error, /管理员/)
+  } finally {
+    await es.close()
+  }
 })
 
 // ── 星图构图：度数上限与节点上限决定了图是"能看"还是"一团毛球" ────────────
@@ -1012,7 +1435,13 @@ test('配置页字段都带 default，且与 schema 的默认值一致', () => {
   // 只对「容易被误当成 0」的数值字段做 schema 对照（其余字段由上一行的存在性断言兜住）
   for (const key of ['maxPerDay', 'maxOutput', 'dedupMinScore', 'dedupMinScoreAnchored', 'days']) {
     const field = EDITABLE.find((item) => item.path.join('.').endsWith(`.${key}`))
-    if (!field) continue
+    // 2026-11-11 审查 #33：原来是 `if (!field) continue` —— 把这个字段从 EDITABLE
+    // 删掉（或改名）时对照会**静默消失**，测试照样绿。改成硬断言：要动这份名单，
+    // 就得同时改这里，否则这条测试立刻红。
+    assert.ok(
+      field !== undefined,
+      `EDITABLE 里找不到 ${key}：字段被删/改名了？那这条「default 与 schema 一致」的对照就静默失效了`,
+    )
     const expected = schemaDefault(key)
     assert.ok(expected !== null, `config.ts 里找不到 ${key} 的 default`)
     assert.equal(String(field.default), expected, `${field.path.join('.')} 的 default 与 schema 不一致`)

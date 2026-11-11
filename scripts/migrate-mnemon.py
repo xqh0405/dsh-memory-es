@@ -199,6 +199,20 @@ def main() -> int:
                 "memory_id": mem_id,
                 "user_id": args.user,
                 "content": content,
+                # 标识符精确匹配字段（es/dsl.ts 的 IDENTIFIER_FIELD）。
+                # **不写它 = 迁出来的这批记忆，`lot.bd_write_sync` / 类名 / 主机名这类
+                # 标识符查询永远不命中** —— 而 content 的 standard 分词会把点号、斜杠切开，
+                # 短语匹配根本对不上（2026-11-10 审查 L12/#29）。
+                # 数据上现在是干净的（origin=import 26 条缺 0 条），只因有人事后跑过
+                # migrate-identifier-field.sh 回填；**下次跑这个脚本就会重新变脏**。
+                "content_exact": content,
+                # 与 buildMemoryDoc 对齐的几个字段：缺了不影响「能搜到」，但会让
+                # 排序/过滤/置顶统计的口径和正常入库的条目不一致（同一批数据两种形状）。
+                "importance": "normal",
+                "pinned": False,   # 显式 false 而不是省略：注入侧按 pinned=true 精确匹配，
+                                   # 省略会让「没置顶」和「老文档没这字段」在统计上分不开
+                "related": [],     # 建边步骤后续补；给初值让字段语义明确
+                "activation": 0,   # 由检索命中回写累加（HIT_UPDATE_SCRIPT 会 null→0 兜底）
                 "memory_type": mtype,
                 "domain": domain,
                 # 来源戳：迁移脚本直写（缺了审计时查不到这批是谁灌的）

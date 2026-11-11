@@ -50,3 +50,13 @@ jobs:
       # 只能在能连 ES 的内网环境跑——这台 runner 没有索引，也不该有。
       - name: 契约静态闸
         run: npm run check:contracts
+
+      # 索引字段对拍（2026-11-10 审查 M11/#19 接入）：不连 ES，只读仓库里的
+      # scripts/init-indices.sh 两份模板，比对团队库两个写入方的必需字段
+      # （promote-team.ts 的 doc + search.ts 的 HIT_UPDATE_SCRIPT）。
+      # #17「团队模板缺 activation、新装机命中回写必 400」之所以一路溜过去，
+      # 就是因为这道闸当时只在本地手动跑、从没进流水线 —— 现在缺字段、或 REQUIRED
+      # 与代码 drift，都会让本步 exit 1。
+      # 需要 python3（ubuntu-latest 自带）与 bash，不需要 ES 与凭据。
+      - name: 索引字段对拍
+        run: bash scripts/diff-index-fields.sh

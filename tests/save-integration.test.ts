@@ -19,7 +19,7 @@ import { bm25Body } from '../src/es/dsl.ts'
 import { createEsClient } from '../src/es/http.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { countByDomain, deleteByDomain, getAdminDoc } from './helpers/es-admin.ts'
-import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { writeGate, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__save_it'
 const CONTENT = '集成测试记忆：北单中断开奖要同时写 win_price 与 win_price_practical。'
@@ -30,8 +30,8 @@ const env = loadEsTestEnv()
 
 if (!env) {
   test('memory_save 集成测试', { skip: esSkipReason() }, () => {})
-} else if (!isLoopbackUrl(env.url)) {
-  test('memory_save 集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
+} else if (!writeGate(env.url).ok) {
+  test('memory_save 集成测试', { skip: writeGate(env.url).reason }, () => {})
 } else {
   defineSaveIntegration(env)
 }

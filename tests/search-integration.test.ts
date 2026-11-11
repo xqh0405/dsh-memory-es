@@ -19,7 +19,7 @@ import { createEsClient } from '../src/es/http.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { searchMemories, type SearchDeps } from '../src/memory/search.ts'
 import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
-import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { writeGate, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__search_it'
 const RETRIEVAL = { topK: 20, rrfK: 60, limit: 8 }
@@ -35,8 +35,8 @@ const env = loadEsTestEnv()
 
 if (!env) {
   test('memory_search 集成测试', { skip: esSkipReason() }, () => {})
-} else if (!isLoopbackUrl(env.url)) {
-  test('memory_search 集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
+} else if (!writeGate(env.url).ok) {
+  test('memory_search 集成测试', { skip: writeGate(env.url).reason }, () => {})
 } else {
   defineSearchIntegration(env)
 }

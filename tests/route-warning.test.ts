@@ -61,6 +61,20 @@ describe('missingRouteWarning', () => {
     assert.doesNotMatch(warning!, /日记\(journal\)/, '关掉的功能不该被点名')
   })
 
+  // 2026-11-10 审查 #15 修误报：蒸馏有两条链路 —— 即时蒸馏（memory_save 之后）带**会话路由**，
+  // 配置留空照样能蒸；只有 15 分钟清扫会整轮跳过。旧版把 distill.enabled 直接列进受影响面，
+  // 于是「即时蒸馏其实在正常工作」也被说成坏了。
+  test('只有蒸馏开着 → 警告要分清「清扫会跳过」与「即时蒸馏仍可用」', () => {
+    const warning = missingRouteWarning(
+      baseConfig({ traits: { enabled: false }, journal: { enabled: false }, distill: { enabled: true } }),
+    )
+    assert.notEqual(warning, null, '清扫确实受影响，仍要警告')
+    assert.match(warning!, /15 分钟清扫/, '要点名是哪条链路受影响')
+    assert.match(warning!, /会话路由/, '要说明即时蒸馏仍可能可用，不能一并说死')
+    // 不该再把蒸馏当成「完全依赖配置路由」来点名
+    assert.doesNotMatch(warning!, /后台蒸馏\(distill\)/, '旧版那种「distill 已启用」的笼统点名要去掉')
+  })
+
   test('只配了 provider 没配 model → 仍然警告（半个路由等于没有）', () => {
     const warning = missingRouteWarning(
       baseConfig({ distill: { provider: 'deepseek-official', model: '' } }),

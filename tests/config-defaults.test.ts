@@ -18,7 +18,9 @@ describe('配置默认值', () => {
     assert.equal(cfg.recallInject.prewarm.enabled, false, '预热默认关：实测无效且有超时副作用')
   })
 
-  test('阶段 32：pinned 段默认关，预算默认 600 字符', () => {
+  // 2026-11-11 审查 #33：原标题写「默认关，预算默认 600」，与断言（true / 800）**相反**。
+  // 断言是对的（2026-11-09 用户决定打开 + 上调 800），是标题忘了跟着改 —— 改标题，不改断言。
+  test('阶段 32：pinned 段默认**开**、预算默认 **800** 字符（2026-11-09 调整过）', () => {
     const cfg = Config({} as never).recallInject
     assert.equal(cfg.pinnedEnabled, true, '2026-11-09 用户决定默认打开（32 已对照过，33 已下沉规则）')
     assert.equal(cfg.pinnedMaxChars, 800, '2026-11-09 上调到 800：成员下沉的规则条数比预估多')

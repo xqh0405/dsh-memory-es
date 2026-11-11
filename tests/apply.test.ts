@@ -17,6 +17,17 @@ import { Config, type ConfigType } from '../src/config.ts'
 import { apply, inject, name } from '../src/index.ts'
 import { sendJson, startFakeEs, sendEsError } from './helpers/fake-es.ts'
 
+/**
+ * 影子观测必须落临时目录——**不配就会写进生产真文件**。
+ *
+ * `recallShadow.path` 默认 `''` → 回退 `dshMemoryDataDir()` → `~/.dsh/memory-es/recall-shadow.jsonl`，
+ * 而那正是线上在用的观测文件。2026-11-10 审查实测：439 条里 **112 条（25.5%）是本文件写的
+ * `agent='a1'`**（最近一条当天还在写），shadow 那 4 条 `POST /_msearch → 超时（1000ms）`
+ * 也全是测试的——1000ms 就来自下面 baseConfig 的 `requestTimeoutMs`；生产影子其实 error=0。
+ * 注入侧早就指了 tmpDir（`mem-inject-`/`mem-gate-`），影子侧漏了，这里补上。
+ */
+const shadowLogPath = join(mkdtempSync(join(tmpdir(), 'mem-shadow-')), 'recall-shadow.jsonl')
+
 /** 最小可用的 Config（默认值走 schema） */
 // identity 允许只覆盖部分字段：schema 有默认值，测试只想改动其中一两项
 function baseConfig(
@@ -28,6 +39,8 @@ function baseConfig(
     // 自签 CA —— 本机有 deploy/es/certs 才侥幸通过，CI 上没有就整片失败（2026-11-06）。
     // 这些用例只跑编排、不发真请求，端点写成什么都不影响语义。
     es: { url: 'http://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 1_000 },
+    // 影子 JSONL 指到临时目录（放在 ...overrides 之前：需要显式覆盖的用例仍可改）
+    recallShadow: { path: shadowLogPath },
     ...overrides,
   } as never) as ConfigType
   return parsed
@@ -157,8 +170,8 @@ describe('apply', () => {
     assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      23,
-      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
+      24,
+      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 自更新 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
@@ -180,9 +193,67 @@ describe('apply', () => {
       }),
     )
     assert.equal(on.disposers.length, off.disposers.length + 1, '开着蒸馏就该多注册一个清扫 effect')
-    // 卸载要能收干净（定时器必须在 disposer 里清掉，否则 fiber 卸载后还在跑）
-    for (const dispose of on.disposers) dispose()
-    assert.ok(true)
+  })
+
+  // 2026-11-11 审查 #33：原来这条用例的尾部是
+  //   for (const dispose of on.disposers) dispose()
+  //   assert.ok(true)          ← 恒真，等于没断言
+  // 而注释写的正是「定时器必须在 disposer 里清掉，否则 fiber 卸载后还在跑」。
+  // 现在把 setInterval/clearInterval 真的包起来：装钩子 → apply → 逐个 dispose →
+  // 断言**apply 期间起的每一个定时器都被 clearInterval 掉了**。
+  test('卸载后**真的**没有定时器还在跑（原断言恒真，等于没测）', () => {
+    const realSetInterval = globalThis.setInterval
+    const realClearInterval = globalThis.clearInterval
+    type Timer = { id: ReturnType<typeof setInterval>; cleared: boolean }
+    const timers: Timer[] = []
+    const restore = () => {
+      globalThis.setInterval = realSetInterval
+      globalThis.clearInterval = realClearInterval
+      // 兜底：off 那份没被 dispose，别把真定时器留到测试进程里
+      for (const t of timers) if (!t.cleared) realClearInterval(t.id)
+    }
+
+    globalThis.setInterval = ((fn: () => void, ms?: number) => {
+      const id = realSetInterval(fn, ms)
+      timers.push({ id, cleared: false })
+      return id
+    }) as typeof globalThis.setInterval
+    globalThis.clearInterval = ((id: ReturnType<typeof setInterval>) => {
+      const hit = timers.find((t) => t.id === id)
+      if (hit !== undefined) hit.cleared = true
+      return realClearInterval(id)
+    }) as typeof globalThis.clearInterval
+
+    try {
+      const off = fakeCtx()
+      apply(off.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
+      const baseline = timers.length
+
+      const on = fakeCtx()
+      apply(
+        on.ctx as never,
+        baseConfig({
+          es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 },
+          distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000 },
+        }),
+      )
+      const started = timers.slice(baseline)
+      assert.ok(
+        started.length > 0,
+        'distill.enabled=true 至少该起一个定时器（清扫），否则这条测试什么也没守住',
+      )
+
+      for (const dispose of on.disposers) dispose()
+
+      const leaked = started.filter((t) => !t.cleared)
+      assert.deepEqual(
+        leaked.map((t) => String(t.id)),
+        [],
+        `${leaked.length}/${started.length} 个定时器在 dispose 之后仍然活着 —— fiber 卸载后会继续跑`,
+      )
+    } finally {
+      restore()
+    }
   })
 
   test('配置非法：一次列出全部问题（不只报第一个）', () => {

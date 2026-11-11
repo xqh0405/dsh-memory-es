@@ -203,9 +203,12 @@ window.__ModuleLoader__.load({
       stateArchived: '已拒绝',
       tabSearchLog: '检索',
       tabInject: '注入',
-      injHint: '数据源只有 recall-inject.jsonl（每回合最多一行）；统计按本次读到的全部记录算，明细只显示最近 50 条。',
+      injHint: '数据源只有 recall-inject.jsonl（每回合最多一行）；统计按本次读到的全部记录算，明细只显示最近 50 条。注入率只算检索段，常驻段另计在「常驻注入」里，两段任一进了上下文才计入整段注入率。',
+      injWindow: '统计窗口',
       injTotal: '注入尝试',
-      injInjected: '注入率',
+      injInjected: '注入率（检索段）',
+      injWhole: '整段注入率',
+      injLegacy: '旧口径记录',
       injTimeout: '超时率',
       injAvgItems: '条均',
       injAvgChars: '字符均',
@@ -313,6 +316,9 @@ window.__ModuleLoader__.load({
       restoreBtn: '恢复为有效',
       restoreDone: '已恢复为有效',
       restoreDoneNoVector: '已恢复为有效（这条没有向量，此后只能关键词检索）',
+      // 2026-11-10 审查 #16：恢复时把 distill_state 从 skipped 重置回 pending，
+      // 「只能关键词检索」就不再是终局了 —— 下一轮清扫会改写正文并补回向量，文案要说准。
+      restoreDoneQueued: '已恢复为有效（已重新排队蒸馏：下一轮会改写正文并补回向量）',
       colUpdated: '更新时间',
       detail: '详情',
       delBtn: '删除',
@@ -368,6 +374,17 @@ window.__ModuleLoader__.load({
       maintExportNow: '立即导出',
       maintSnapshot: '快照',
       maintCron: '定时任务',
+      // 自更新（2026-11-11）
+      maintUpdate: '自动更新',
+      maintUpdateAt: '检查时间',
+      maintUpdateOn: '已开启',
+      maintUpdateOff: '已关闭',
+      maintUpdateMigrate: '管理员实例：升级前先给索引补字段',
+      maintUpdateMember: '成员实例：只换代码；索引缺字段就等下一轮',
+      labelCurrentVersion: '当前版本',
+      labelLatestVersion: '最新版本',
+      labelLastCheck: '上次检查',
+      labelLastResult: '上次结果',
       maintResult: '结果',
       labelPersonal: '个人库',
       labelTeam: '团队库',
@@ -534,9 +551,12 @@ window.__ModuleLoader__.load({
       stateArchived: 'rejected',
       tabSearchLog: 'Search log',
       tabInject: 'Injection',
-      injHint: 'Single source: recall-inject.jsonl (at most one line per turn). Stats cover everything read; the list shows the latest 50.',
+      injHint: 'Single source: recall-inject.jsonl (at most one line per turn). Stats cover everything read; the list shows the latest 50. Injected rate counts the recall segment only; pinned rounds are counted under "Pinned runs", and whole-injection rate counts either segment.',
+      injWindow: 'Window',
       injTotal: 'Attempts',
-      injInjected: 'Injected',
+      injInjected: 'Injected (recall)',
+      injWhole: 'Whole injected',
+      injLegacy: 'Legacy records',
       injTimeout: 'Timeout',
       injAvgItems: 'Items avg',
       injAvgChars: 'Chars avg',
@@ -644,6 +664,8 @@ window.__ModuleLoader__.load({
       restoreBtn: 'Restore',
       restoreDone: 'Restored',
       restoreDoneNoVector: 'Restored (no vector; keyword search only)',
+      // 见中文侧同名条目（#16：重排队后向量会被下一轮清扫补回）
+      restoreDoneQueued: 'Restored (re-queued for distillation: the next sweep rewrites it and restores the vector)',
       colUpdated: 'Updated',
       detail: 'Detail',
       delBtn: 'Delete',
@@ -685,6 +707,16 @@ window.__ModuleLoader__.load({
       maintExportNow: 'Export now',
       maintSnapshot: 'Snapshots',
       maintCron: 'Scheduled job',
+      maintUpdate: 'Auto update',
+      maintUpdateAt: 'Check time',
+      maintUpdateOn: 'Enabled',
+      maintUpdateOff: 'Disabled',
+      maintUpdateMigrate: 'Admin instance: adds missing index fields before upgrading',
+      maintUpdateMember: 'Member instance: code only; waits for the next round if fields are missing',
+      labelCurrentVersion: 'Current version',
+      labelLatestVersion: 'Latest release',
+      labelLastCheck: 'Last check',
+      labelLastResult: 'Last result',
       maintResult: 'Result',
       labelPersonal: 'Personal',
       labelTeam: 'Team',
@@ -3079,6 +3111,33 @@ window.__ModuleLoader__.load({
           }, busy === 'export' ? t('reviewBusy') : t('maintExportNow'))],
         ),
 
+        data.update
+          ? card(t('maintUpdate'),
+              h('div', null,
+                line(t('labelCurrentVersion'), `v${data.update.localVersion || '?'}`),
+                line(t('labelLatestVersion'), data.update.releaseVersion ? `v${data.update.releaseVersion}` : '—'),
+                line(t('labelLastCheck'), data.update.lastCheckAt ? new Date(data.update.lastCheckAt).toLocaleString() : '—'),
+                line(t('maintUpdateAt'), `${data.update.at}（${data.update.enabled ? t('maintUpdateOn') : t('maintUpdateOff')}）`),
+                line(t('labelManagedBy'), data.update.migrate ? t('maintUpdateMigrate') : t('maintUpdateMember')),
+                data.update.lastResult
+                  ? h('p', { style: { ...S.muted, fontSize: 12, margin: '6px 0 0', lineHeight: 1.6 } },
+                      `${t('labelLastResult')}：${data.update.lastResult}`)
+                  : null,
+                data.update.diagnostics
+                  ? h('pre', {
+                      style: {
+                        margin: '6px 0 0',
+                        fontSize: 11.5,
+                        whiteSpace: 'pre-wrap',
+                        lineHeight: 1.6,
+                        color: 'var(--dsw-alias-label-secondary)',
+                      },
+                    }, data.update.diagnostics)
+                  : null,
+              ),
+            )
+          : null,
+
         card(t('maintSnapshot'),
           h('div', null,
             line(t('labelManagedBy'), data.snapshot.managedBy),
@@ -4127,14 +4186,27 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontSize: 18, fontWeight: 600 } }, value),
         )
 
+      const fmtTs = (iso) => String(iso ?? '').replace('T', ' ').replace('Z', '').slice(0, 16)
+
       return h('div', { style: { display: 'grid', gap: 12 } },
         h('div', { style: S.muted }, t('injHint')),
+        // 统计窗口必须显式显示：读文件按尾部 512KB 截断，文件涨过截断点后窗口会自己缩，
+        // 不说的话同一个页面的「注入尝试」会悄悄变少（2026-11-10 实测 901 → 739 无提示）。
+        stats && stats.since
+          ? h('div', { style: S.muted }, `${t('injWindow')}：${fmtTs(stats.since)} ~ ${fmtTs(stats.through)}`)
+          : null,
+        // 旧口径记录（pinned 折叠期）的检索段结果不可知，注入率按已知部分算——要如实说明
+        stats && stats.legacyFolded > 0
+          ? h('div', { style: { color: 'var(--dsw-alias-state-warn-primary)' } },
+              `${t('injLegacy')} ${stats.legacyFolded}（pinned 折叠期，检索段结果不可知，注入率按已知部分计）`)
+          : null,
         state.loading ? h('div', { style: S.muted }, t('loading')) : null,
         state.error ? h('div', { style: S.err }, state.error) : null,
         stats
           ? h('div', { style: { ...S.card, display: 'flex', gap: 24, flexWrap: 'wrap' } },
               metric(t('injTotal'), String(stats.total)),
               metric(t('injInjected'), pct(stats.injectedRate)),
+              metric(t('injWhole'), pct(stats.wholeInjectedRate)),
               metric(t('injTimeout'), pct(stats.timeoutRate)),
               metric(t('injAvgItems'), String(stats.avgItems)),
               metric(t('injAvgChars'), String(stats.avgChars)),
@@ -4178,6 +4250,19 @@ window.__ModuleLoader__.load({
                         `${t('injDropped')} ${record.dropped.length}`)
                     : null,
                 ),
+                // 失败原因（2026-11-10 起新记录才带）：以前 JSONL 里只有 outcome=error，
+                // 一个字的原因都没有，排障无从下手。
+                record.note
+                  ? h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } },
+                      `${t('injOutcomeError')}: ${String(record.note)}`)
+                  : null,
+                // 挤掉的明细带段名与真实原因（新记录是 segment，老记录只有 pinned-budget）
+                Array.isArray(record.dropped) && record.dropped.length > 0
+                  ? h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } },
+                      record.dropped.map((d, i) =>
+                        h('span', { key: `${d.memory_id}-${i}`, style: { marginRight: 10 } },
+                          `${d.segment === 'pinned' ? '常驻' : '检索'}·${d.reason}`)))
+                  : null,
               ),
             ),
       )
@@ -4480,7 +4565,11 @@ window.__ModuleLoader__.load({
           .then((value) => {
             setRestoreResult({
               ok: true,
-              text: value?.embeddingMissing ? t('restoreDoneNoVector') : t('restoreDone'),
+              // requeueDistill 优先：重排队后下一轮清扫会改写正文并补回向量，
+              // 此时不能再说「此后只能关键词检索」（#16 改的正是这一点）。
+              text: value?.requeueDistill
+                ? t('restoreDoneQueued')
+                : (value?.embeddingMissing ? t('restoreDoneNoVector') : t('restoreDone')),
             })
             setSelected(null)
             load()

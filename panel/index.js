@@ -920,20 +920,65 @@ function summarizeInjectRecords(records) {
   let pinnedItemsSum = 0
   let pinnedCharsSum = 0
   let pinnedDropped = 0
+  // 2026-11-10 口径修正：outcome 从这天起只描述**检索段**（旧版只要 pinned 段非空就覆盖成
+  // 'injected'，于是 error/low_confidence/no_match 全被折叠、超时率恒 0、注入率虚高）。
+  // 新旧记录必须分开算，否则同一张表上两代数据会互相污染。
+  let recallInjected = 0 // 检索段真的进了上下文
+  let wholeInjected = 0 // 整段（检索段或常驻段）进了上下文
+  let newStyle = 0 // 带 pinnedInjected 字段的记录（新版口径）
+  let legacyFolded = 0 // 旧版折叠记录：outcome=injected 且 pinnedOnly=true → 检索段结果不可知
+  let since = ''
+  let through = ''
+
   for (const r of records) {
     const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
     byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
+    const ts = typeof r.ts === 'string' ? r.ts : ''
+    if (ts !== '') {
+      if (since === '' || ts < since) since = ts
+      if (ts > through) through = ts
+    }
     if (typeof r.ms === 'number' && Number.isFinite(r.ms)) {
       msSum += r.ms
       msCount += 1
     }
-    if (outcome === 'injected') {
-      if (Array.isArray(r.items)) itemCounts.push(r.items.length)
-      if (typeof r.chars === 'number') charCounts.push(r.chars)
+    const pinnedCount =
+      typeof r.pinnedInjected === 'number'
+        ? r.pinnedInjected
+        : Array.isArray(r.pinnedItems)
+          ? r.pinnedItems.length
+          : 0
+
+    if (typeof r.pinnedInjected === 'number') {
+      // 新版：outcome 就是检索段的真实结果
+      newStyle += 1
+      if (outcome === 'injected') {
+        recallInjected += 1
+        wholeInjected += 1
+        if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+        if (typeof r.chars === 'number') charCounts.push(r.chars)
+      } else if (pinnedCount > 0) {
+        wholeInjected += 1
+      }
+    } else if (outcome === 'injected') {
+      // 旧版：pinnedOnly=true 说明这条 outcome 是被 pinned 折叠出来的，检索段结果已不可知
+      wholeInjected += 1
+      if (r.pinnedOnly === true) {
+        legacyFolded += 1
+      } else {
+        recallInjected += 1
+        if (Array.isArray(r.items)) itemCounts.push(r.items.length)
+        if (typeof r.chars === 'number') charCounts.push(r.chars)
+      }
     }
+
     if (Array.isArray(r.dropped)) {
       dropped += r.dropped.length
-      pinnedDropped += r.dropped.filter((item) => item && item.reason === 'pinned-budget').length
+      // 老记录的 pinned 段被改写成 reason='pinned-budget'（无 segment），
+      // 新记录是 segment='pinned' + 真实原因，两种都要认。
+      pinnedDropped += r.dropped.filter(
+        (item) => item && (item.segment === 'pinned' || item.reason === 'pinned-budget'),
+      ).length
     }
     if (Array.isArray(r.pinnedItems) && r.pinnedItems.length > 0) {
       pinnedRuns += 1
@@ -949,9 +994,19 @@ function summarizeInjectRecords(records) {
   return {
     total,
     byOutcome,
+    // 统计窗口：读文件按尾部 512KB 截断，超长后窗口会自己缩，必须显式告诉用户，
+    // 否则同一个页面的「注入尝试」会随文件增长悄悄变少（2026-11-10 实测 901 → 739 且无提示）。
+    since,
+    through,
     // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
     timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
-    injectedRate: total === 0 ? 0 : (byOutcome.injected ?? 0) / total,
+    // 注入率 = **检索段**口径，与「注入了/超时/低分·低置信/无匹配」四态一致
+    injectedRate: total === 0 ? 0 : recallInjected / total,
+    // 整段口径：检索段或常驻段任一进了上下文。pinned 关着时两者相等。
+    wholeInjectedRate: total === 0 ? 0 : wholeInjected / total,
+    // 旧版折叠记录数 > 0 时要提示：这部分检索段结果不可知，注入率按已知部分算（偏低）
+    legacyFolded,
+    newStyle,
     avgItems: Number(avg(itemCounts).toFixed(2)),
     avgChars: Math.round(avg(charCounts)),
     avgMs: msCount === 0 ? 0 : Math.round(msSum / msCount),
@@ -1399,20 +1454,12 @@ async function handleDeleteMemory(ctx, res, req) {
 
   const now = new Date().toISOString()
   const actor = `panel:${str(config.identity?.userId) || 'unknown'}`
-  let deleted = true
-  try {
-    await client.del(target, esId, { refresh: 'wait_for' })
-  } catch (error) {
-    if (error?.status === 404) {
-      // 本来就不存在 = 目标状态已达成，按幂等成功算（重复点两次不该报错）
-      deleted = false
-    } else {
-      throw error
-    }
-  }
 
-  let auditWritten = false
-  let auditError = ''
+  // ⚠️ 团队删除必须**先写审计、再删**（2026-11-10 审查修复）：
+  // 旧版先 client.del 再写审计，审计写失败（403/索引缺失）时只 console.error 照样返回 200
+  // → 一条团队记忆被无痕删除，而 memory_audit 是免费版**唯一的人维度证据**。
+  // 现在审计是删除的前置条件：写不进去就不删，返回明确错误。
+  // 个人删除按设计不审计（用户 2026-10-29 确认），不受此约束。
   if (scope === 'team') {
     try {
       await client.index(names.audit, {
@@ -1424,21 +1471,50 @@ async function handleDeleteMemory(ctx, res, req) {
         team_doc_id: esId,
         reason,
       }, { refresh: 'wait_for' })
-      auditWritten = true
     } catch (error) {
-      auditError = String(error?.message ?? error).slice(0, 200)
-      console.error(`[memory-es-panel] 删除审计写入失败 ${esId}: ${auditError}`)
+      const auditError = String(error?.message ?? error).slice(0, 200)
+      console.error(`[memory-es-panel] 删除审计写入失败，已中止删除 ${esId}: ${auditError}`)
+      return json(res, 502, {
+        ok: false,
+        error: `审计写入失败，已中止删除（无审计不删）：${auditError}`,
+      })
     }
-  } else {
-    // 个人删除按设计不审计（用户 2026-10-29 确认）：不是"没权限写"的缺陷，就别在响应里
-    // 编一条错误说明；auditWritten=false 如实返回即可
-    auditError = ''
   }
 
+  let deleted = true
+  try {
+    await client.del(target, esId, { refresh: 'wait_for' })
+  } catch (error) {
+    if (error?.status === 404) {
+      // 本来就不存在 = 目标状态已达成，按幂等成功算（重复点两次不该报错）
+      deleted = false
+    } else {
+      // 审计已写「deleted」但删除没成，补一条更正记录，别让审计说谎
+      try {
+        await client.index(names.audit, {
+          event: 'delete_failed',
+          actor,
+          at: new Date().toISOString(),
+          subject_type: 'team_doc',
+          subject_id: esId,
+          team_doc_id: esId,
+          reason: `删除失败，上一条 deleted 记录作废：${String(error?.message ?? error).slice(0, 160)}`,
+        }, { refresh: 'wait_for' })
+      } catch (auditError) {
+        console.error(`[memory-es-panel] 删除失败的更正审计也没写成 ${esId}: ${String(auditError?.message ?? auditError)}`)
+      }
+      throw error
+    }
+  }
+
+  const auditWritten = scope === 'team'
   console.error(`[memory-es-panel] 删除 ${scope} esId=${esId} deleted=${deleted} audit=${auditWritten} actor=${actor}`)
   json(res, 200, {
     ok: true,
-    value: { esId, scope, deleted, auditWritten, auditError, at: now },
+    // auditError 恒为空串：团队删除的审计失败现在会在**删之前**就中止（返回 502），
+    // 走到这里的团队删除必然已留痕；个人删除按设计不审计（2026-10-29 用户确认）。
+    // 保留该键是为了不破坏已有响应契约。
+    value: { esId, scope, deleted, auditWritten, auditError: '', at: now },
   })
 }
 
@@ -1560,18 +1636,25 @@ async function handleRestoreMemory(ctx, res, req) {
   }
 
   const now = new Date().toISOString()
+  // distill_state 跟着重置（2026-11-10 审查 #16）：隔离时 saveMemory 把它标成 `skipped`，
+  // 只把 status 改回 active 的话，清扫只查 `distill_state=pending` —— 这条**永远不会再蒸馏、
+  // 也就永远补不回向量**（隔离条目按设计无向量）。改回 pending 后下一轮清扫会改写正文并重建向量。
+  // 只认 `skipped`：`done` 已蒸馏过不白烧，`traits/persona/journal` 归别的管线，
+  // `failed` 是连败放弃的，三者都保持原样。
+  const requeueDistill = str(source.distill_state) === 'skipped'
   await client.update(names.personal, esId, {
     status: 'active',
     // 置 null 而不是删字段：ES 的 exists 对 null 返回 false，效果等价且不需要脚本权限
     quarantine_reason: null,
+    ...(requeueDistill ? { distill_state: 'pending' } : {}),
     updated_at: now,
   }, { refresh: 'wait_for' })
 
   const embeddingMissing = !Array.isArray(source.embedding) || source.embedding.length === 0
-  console.error(`[memory-es-panel] 恢复隔离 esId=${esId} embeddingMissing=${embeddingMissing}`)
+  console.error(`[memory-es-panel] 恢复隔离 esId=${esId} embeddingMissing=${embeddingMissing} requeueDistill=${requeueDistill}`)
   json(res, 200, {
     ok: true,
-    value: { esId, status: 'active', embeddingMissing, at: now },
+    value: { esId, status: 'active', embeddingMissing, requeueDistill, at: now },
   })
 }
 
@@ -2535,6 +2618,29 @@ const EDITABLE = [
     default: false,
     hint: '打开后模型引用记忆时会标 id 前 8 位；会改变回答风格，默认关',
   },
+  // 自更新（2026-11-11）：用户要求「默认开、可关」。
+  // 注意这里只暴露三个键，repo / restartDelayMs 之类要改走 cordis.patch.yml。
+  {
+    path: ['update', 'enabled'],
+    label: '自动更新',
+    type: 'boolean',
+    default: true,
+    hint: '每天到点检查 GitHub Release，有新版就自动安装并重启（约中断 5~10 秒）；关掉后连检查也不做',
+  },
+  {
+    path: ['update', 'at'],
+    label: '检查时间',
+    type: 'string',
+    default: '06:00',
+    hint: 'HH:MM（按 update.timeZone，默认北京时间）。管理员实例建议 05:30：先迁移索引，再让成员升级',
+  },
+  {
+    path: ['update', 'migrate'],
+    label: '负责索引迁移',
+    type: 'boolean',
+    default: false,
+    hint: '只有管理员实例开：升级前会给索引补字段。成员实例保持关闭，只做只读体检（缺字段就等下一轮）',
+  },
 ]
 
 function pick(config, path) {
@@ -2919,6 +3025,36 @@ async function handleMaintenanceGet(ctx, res, url) {
     /* 忽略 */
   }
 
+  // 自更新状态（2026-11-11）：这里只读展示结果，开关与时间在「配置」页。
+  // 状态目录必须与主插件一致：留空 = $DSH_HOME/memory-es/update（不是 STATE_DIR）。
+  const updateDir = typeof config.update?.dir === 'string' && config.update.dir.trim() !== ''
+    ? config.update.dir.trim()
+    : join(DSH_HOME, 'memory-es', 'update')
+  let updateInfo = {
+    enabled: config.update?.enabled !== false,
+    at: typeof config.update?.at === 'string' ? config.update.at : '06:00',
+    migrate: config.update?.migrate === true,
+    localVersion: '',
+    releaseVersion: '',
+    lastCheckAt: '',
+    lastResult: '',
+    lastAction: '',
+    additions: [],
+    diagnostics: '',
+  }
+  try {
+    const state = JSON.parse(readFileSync(join(updateDir, 'state.json'), 'utf8'))
+    updateInfo = { ...updateInfo, ...state }
+  } catch {
+    /* 还没检查过 */
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(DSH_HOME, 'local-plugins', 'dsh-memory-es', 'package.json'), 'utf8'))
+    updateInfo.localVersion = typeof pkg.version === 'string' ? pkg.version : ''
+  } catch {
+    /* 读不到就留空 */
+  }
+
   json(res, 200, {
     ok: true,
     value: {
@@ -2928,6 +3064,7 @@ async function handleMaintenanceGet(ctx, res, url) {
       viewingOther: targetUser !== config.identity.userId,
       lastRunAt,
       pendingCount,
+      update: updateInfo,
       mirror,
       cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },
       // 静态事实：这两件事不由面板管，写清楚免得误以为是面板漏了功能
@@ -2968,7 +3105,7 @@ async function setDocStatus(ctx, res, body, nextStatus) {
   // 该 doc_id 的**全部切片**一起改：只改一部分会让同一篇文档一半出现一半消失
   const found = await client.search(names.docs, {
     size: 1000,
-    _source: ['doc_id', 'title', 'domain', 'source_path', 'source_paths', 'chunk_total'],
+    _source: ['doc_id', 'title', 'domain', 'source_path', 'source_paths', 'chunk_total', 'cold_memory_id'],
     query: { term: { doc_id: docId } },
   })
   const hits = found.hits?.hits ?? []
@@ -2988,10 +3125,13 @@ async function setDocStatus(ctx, res, body, nextStatus) {
 
   let changed = 0
   const failures = []
+  /** 真正换成目标状态的切片：补写 cold_memory_id 只针对它们（失败的那部分别再报一次） */
+  const updated = []
   for (const hit of hits) {
     try {
       await client.update(names.docs, hit._id, { status: nextStatus })
       changed++
+      updated.push(hit)
     } catch (error) {
       failures.push(`${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
     }
@@ -3034,6 +3174,50 @@ async function setDocStatus(ctx, res, body, nextStatus) {
       // 归档已完成，冷引用失败只提示——不回滚状态（回滚会变成半成品归档）
       note = `冷引用写入失败：${String(error?.message ?? error).slice(0, 120)}`
       coldMemoryId = ''
+    }
+
+    // 审查 16b：冷引用 id 必须**写回切片**，否则恢复时无从查起
+    // （`coldref-<8位>-<ts>` 里没有可反查 doc_id 的信息，只能按 content 模糊搜，
+    //  代价大且会误伤别的文档）。id 是上面才生成的，所以只能在这个位置补写。
+    // 失败不回滚归档（归档已是既成事实），但要如实记进 failures ——
+    // 否则「恢复时清不掉冷引用」会变成一个没有任何痕迹的幽灵问题。
+    if (coldMemoryId !== '') {
+      for (const hit of updated) {
+        try {
+          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId })
+        } catch (error) {
+          failures.push(`cold_memory_id@${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
+        }
+      }
+    }
+  } else if (nextStatus === 'active') {
+    // 审查 16b：归档→恢复必须清掉那条冷引用，否则 personal_memory 里永远留着一条
+    // 「【已归档文档】…」的记忆，而文档其实已经活了。它还会被 memory_search 命中，
+    // 指路的却是一篇并未归档的文档 —— 这正是 16b 要解决的「恢复不清理冷引用」。
+    // 按切片上的 cold_memory_id **精确**删；老文档没有这个字段，跳过即可。
+    const coldIds = [
+      ...new Set(hits.map((hit) => str(hit._source?.cold_memory_id)).filter((id) => id !== '')),
+    ]
+    if (coldIds.length > 0) {
+      let cleared = 0
+      for (const id of coldIds) {
+        try {
+          await client.del(names.personal, id, { refresh: 'wait_for' })
+          cleared++
+        } catch (error) {
+          // 404 = 本来就不在（用户手删过），按清理成功算，保持幂等
+          const msg = String(error?.message ?? error)
+          if (msg.includes('404') || /not.?found/i.test(msg)) {
+            cleared++
+            continue
+          }
+          failures.push(`cold ref ${id}: ${msg.slice(0, 80)}`)
+        }
+      }
+      note = `已清理 ${cleared}/${coldIds.length} 条冷引用`
+      // 切片上的 cold_memory_id **不清空**：它记录「这篇上次归档时留下的冷引用」，
+      // 留着无害（下次归档覆盖），清空反而要多写一轮。恢复后再恢复会重复删同一个 id，
+      // 404 已按成功处理，幂等。
     }
   }
 
@@ -3533,6 +3717,10 @@ export function apply(ctx) {
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
   admitRequest,
+  // 顶层路由器：2026-11-11 审查 #32 之前**从未被测**。它的 405 守卫夹在路由表中间，
+  // 语义是「非 GET 一律 405」，所以任何 POST 路由只要排到它后面就会被吞成 405
+  // （identity/review 踩过）。导出它，测试才能直接验证「方法过滤 / 404 / POST 能穿过去」。
+  handle,
   summarizeInjectRecords,
   readTailText,
   handleInjectLog,
@@ -3552,6 +3740,7 @@ export {
   handleConfigWrite,
   handleMaintenanceGet,
   handleMemories,
+  handleRestoreMemory,
   handleSearchLog,
   handleSearchLogUsedIn,
   handleMemoryFeedback,

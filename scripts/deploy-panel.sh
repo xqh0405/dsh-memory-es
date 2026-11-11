@@ -67,8 +67,27 @@ exit 1
 REMOTE
 
 echo "==> 面板自检（最后一行）"
-ssh "${SSH_OPTS[@]}" "$HOST" "docker logs --since 3m $CONTAINER 2>&1 | grep '记忆库面板.*自检' | tail -1" || true
+# 这里原来写的是 `ssh … | grep … | tail -1 || true`，然后**无条件**打印「完成：vX 已部署」——
+# 于是「容器 healthy 但插件/面板没起来」时（grep 找不到自检行 → 管道非 0 → `|| true` 吞掉），
+# 脚本照样打印成功并 exit 0。**部署脚本报假成功比不报更糟**：它会连累调用方
+# （deploy-all-panel.sh 只看退出码，于是整批都记成成功）。
+# 与 scripts/deploy-all-containers.sh 对齐：取不到 `自检通过 v${VERSION}` 就非 0 退出。
+# 用 `|| true` 只包住「取这行」这一步，判断留给下面的 case。
+selfcheck=$(ssh "${SSH_OPTS[@]}" "$HOST" "docker logs --since 3m $CONTAINER 2>&1 | grep '记忆库面板.*自检' | tail -1" || true)
+echo "    ${selfcheck:-（一条自检行都没有）}"
 
-echo
-echo "完成：v${VERSION} 已部署到 ${CONTAINER}（插件与面板同一个包）"
-echo "核对：插件日志 'ready: v${VERSION}'、面板自检 '自检通过 v${VERSION}'、面板页脚「版本 ${VERSION}」"
+# --- 部署成败判定（改这里时同步 tests/deploy-gate.test.mjs 的同款用例）---
+case "$selfcheck" in
+  *"自检通过 v${VERSION}"*)
+    echo
+    echo "完成：v${VERSION} 已部署到 ${CONTAINER}（插件与面板同一个包）"
+    echo "核对：插件日志 'ready: v${VERSION}'、面板自检 '自检通过 v${VERSION}'、面板页脚「版本 ${VERSION}」"
+    ;;
+  *)
+    echo >&2
+    echo "✗ 部署未确认：容器已 healthy，但自检行里没有「自检通过 v${VERSION}」" >&2
+    echo "   实际自检行：${selfcheck:-（一条都没有 —— 插件或面板没起来）}" >&2
+    echo "   排查：docker logs --since 3m $CONTAINER | grep -E '自检|error|Error'" >&2
+    exit 1
+    ;;
+esac

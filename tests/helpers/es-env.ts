@@ -10,8 +10,16 @@ import { fileURLToPath } from 'node:url'
 
 /** 仓库根目录下的 .env（相对本文件：tests/helpers → ../../） */
 export const ES_ENV_PATH = fileURLToPath(new URL('../../deploy/es/.env', import.meta.url))
-/** 默认 CA 路径（与 scripts/*.sh 一致） */
-export const ES_CA_PATH = fileURLToPath(new URL('../../deploy/es/certs/ca.crt', import.meta.url))
+/**
+ * CA 路径。**默认**是仓库内 `deploy/es/certs/ca.crt`（已退役的本地 ES 的 CA），
+ * 但部署早已迁到 125 —— 那台的 CA 是另一张自签根，硬编码会让 TLS 直接
+ * `Verify return code: 19 (self-signed certificate in certificate chain)`，
+ * 而这个错误**看起来像环境没起**，其实只是 CA 指错了（2026-11-10 审查 #30）。
+ * 所以允许 `ES_CA_PATH` 环境变量覆盖；125 那张的副本在
+ * `~/.dsh/certs/dsh-es-lan-ca.crt`（SAN 含 192.168.50.125 / dshserver.local / dsh-es）。
+ */
+export const ES_CA_PATH = process.env.ES_CA_PATH
+  ?? fileURLToPath(new URL('../../deploy/es/certs/ca.crt', import.meta.url))
 
 export interface EsCredential {
   username: string
@@ -56,6 +64,35 @@ export function isLoopbackUrl(url: string): boolean {
 }
 
 /**
+ * 写闸（2026-11-10 审查 #30）：决定「这台 ES 允不允许写测试数据」。
+ *
+ *  · 回环地址 → 放行（本机那套一次性 ES）；
+ *  · 非回环 → **必须显式放行** `MEM_ES_ALLOW_REMOTE_WRITE=1`，否则 skip。
+ *
+ * 为什么不能直接放开：集成测试写的是**真实索引**（`personal_memory_<uid>` 与
+ * 全员共享的 `team_knowledge`），靠 `__it` 类 marker 域标记 + before/after 双清。
+ * 指向生产 ES 时，运行窗口内成员可能搜到测试文档；而 CI runner 根本没有 ES
+ * （路线 21.4 已明确撤销「CI 真连 ES」）。
+ *
+ * 放行的前提是**目标是一次性测试实例**：`scripts/es-test-up.sh` 在 125 上起的
+ * `dsh-es-test`（与生产 `dsh-es` 同机、不同端口/数据/密码，`discovery.type=single-node`
+ * 保证不会并进生产集群），测完 `es-test-down.sh` 删掉。这个开关只是把「写非本机」
+ * 从**永久 skip**变成**有意为之**，不是把闸拆了。
+ */
+export function writeGate(url: string): { ok: boolean; reason: string } {
+  if (isLoopbackUrl(url)) return { ok: true, reason: '' }
+  if (process.env.MEM_ES_ALLOW_REMOTE_WRITE === '1') {
+    return { ok: true, reason: '' }
+  }
+  return {
+    ok: false,
+    reason: `es.url=${url} 不是本机回环，拒绝写入测试数据`
+      + '（确认目标是一次性测试实例后，设 MEM_ES_ALLOW_REMOTE_WRITE=1 放行；'
+      + '起/删实例见 scripts/es-test-up.sh 与 scripts/es-test-down.sh）',
+  }
+}
+
+/**
  * 读测试环境。返回 null 表示“这台机器没准备好”（.env 不存在或缺关键项），
  * 调用方据此 skip —— 但 skip 的原因必须打印出来，不能静默变绿。
  *
@@ -68,6 +105,9 @@ export function isLoopbackUrl(url: string): boolean {
  * 说「未找到 deploy/es/.env」——文件其实在**。现在缺项会把**具体缺哪个键**报出来。
  */
 export function loadEsTestEnv(): EsTestEnv | null {
+  // CA 不在就别往下走了：否则测试会在建 client 时报 `Verify return code: 19`，
+  // 那句错误**看起来像环境没起**，而真因只是 CA 路径指错（默认指向已退役的本地 ES）。
+  if (!existsSync(ES_CA_PATH)) return null
   const fileVars = existsSync(ES_ENV_PATH) ? parseDotEnv(readFileSync(ES_ENV_PATH, 'utf8')) : {}
   const pick = (key: string): string => process.env[key] ?? fileVars[key] ?? ''
 
@@ -119,6 +159,10 @@ export function loadEsTestEnv(): EsTestEnv | null {
  * 让人误以为环境没起。
  */
 export function esSkipReason(): string {
+  if (!existsSync(ES_CA_PATH)) {
+    return `CA 文件不存在：${ES_CA_PATH}`
+      + '（默认是已退役的本地 ES 的 CA；连 125 请设 ES_CA_PATH=~/.dsh/certs/dsh-es-lan-ca.crt）'
+  }
   if (!existsSync(ES_ENV_PATH)) {
     return `未找到 ${ES_ENV_PATH}（先跑 scripts/es-up.sh 与 scripts/init-security.sh）`
   }

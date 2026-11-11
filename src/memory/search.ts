@@ -7,7 +7,10 @@
  *     RRF 融合分尺度又差一个数量级，都不能拿来比 0.05；
  *  3. **命中不足两条时不判空**：margin 至少要两个分数才能算，只有一条记忆≠低置信
  *     （否则「库里就一条」会被永久判成没有记忆）；
- *  4. **向量不可用不等于检索不可用**：embedding 失败就只走 BM25，返回 `degraded=true`。
+ *  4. **降级不等于不可用**：embedding 失败就只走 BM25、团队库读不到（403，如
+ *     `--personal-only` 档位）就只查个人库 —— 两种都返回 `degraded=true`，
+ *     但**其它错误仍然整体抛**（§6.5 那条「不做猜到一半结果的降级」只豁免这两类
+ *     **能力边界**，不豁免超时/网络/服务端这类瞬时故障）。
  *
  * @module dsh-memory-es/memory/search
  */
@@ -275,7 +278,13 @@ export interface SearchResult {
   /** 阶段 10：`explain=true` 时给出，与 hits 逐条同序；否则缺省 */
   receipts?: HitReceipt[]
   note: SearchNote
-  /** true = 向量不可用，本次只走了 BM25 */
+  /**
+   * true = 本次是**降级结果**，两种情形：
+   *   · 向量不可用 → 只走了 BM25；
+   *   · 团队库读不到（403，典型是 `--personal-only` 档位没有 `mem_team_read`）
+   *     → 只查了个人库（2026-11-10 审查 M12/#28）。
+   * 两种都不影响「个人库这一路的结果是真的」，但模型该知道自己看到的不是全量。
+   */
   degraded: boolean
   /** true = 用了团队库的兜底时间窗（模型可据此知道自己没给收窄条件） */
   filtered: boolean
@@ -454,35 +463,70 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     pushQuery('team', deps.teamIndex, { ...teamMeta, review_state: [...teamReviewFilter] })
   }
 
-  let settled: Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>
-  try {
+  /**
+   * 跑一批子查询：能一次 `_msearch` 就一次，否则逐条。
+   * 抽成函数是为了下面「权限不足时**只重跑个人库那几路**」能复用同一套逻辑。
+   */
+  const runQueries = async (
+    list: Array<{ scope: Scope; route: 'bm25' | 'knn'; index: string; body: SearchBody }>,
+  ): Promise<Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>> => {
     const msearch = deps.reader.msearch
-    if (msearch !== undefined && queries.length > 1) {
+    if (msearch !== undefined && list.length > 1) {
       // 一次往返打完全部子查询。ES 允许 `_msearch` 跨索引，响应顺序与请求严格一致；
       // 任一条失败会整体抛（见 http.ts 的 msearch），与逐条版「任一路出错就失败」同一语义。
       const results = await msearch.call(
         deps.reader,
-        queries.map((item) => ({ index: item.index, body: item.body })),
+        list.map((item) => ({ index: item.index, body: item.body })),
         { signal: deps.signal },
       )
-      settled = queries.map((item, index) => ({
+      return list.map((item, index) => ({
         scope: item.scope,
         route: item.route,
         hits: results[index]?.hits ?? [],
       }))
-    } else {
-      settled = await Promise.all(
-        queries.map(async (item) => ({
-          scope: item.scope,
-          route: item.route,
-          hits: (await deps.reader.search(item.index, item.body, { signal: deps.signal })).hits,
-        })),
-      )
     }
+    return Promise.all(
+      list.map(async (item) => ({
+        scope: item.scope,
+        route: item.route,
+        hits: (await deps.reader.search(item.index, item.body, { signal: deps.signal })).hits,
+      })),
+    )
+  }
+
+  /**
+   * true = 团队库这一路被跳过（见下面 catch 里的权限降级）。
+   * 只用于内部构造（不再建 team 分组、basis 里不写 personal+team）；
+   * 对外的信号走 `degraded`（SearchResult 本来就有这个字段）。
+   */
+  let teamUnavailable = false
+
+  let settled: Array<{ scope: Scope; route: 'bm25' | 'knn'; hits: Hit[] }>
+  try {
+    settled = await runQueries(queries)
   } catch (err) {
-    // 任一路 ES 出错就明确失败（§6.5）；不做“猜到一半结果”的降级
-    log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
-    throw err
+    // 权限不足是**能力边界**，不是瞬时故障：个人库照常可读。
+    //
+    // `scripts/init-user.sh --personal-only` 建的账号只有 `mem_personal_rw_<uid>`、
+    // **没有 `mem_team_read`** —— 默认 `scope=both` 会带上团队子查询，而 msearch
+    // 任一条失败就整体抛（§6.5），于是整条 `memory_search` 直接 403，
+    // **连自己的记忆都搜不到**（2026-11-10 审查 M12/#28）。
+    //
+    // 只对 `permission` 降级；**其它错误仍按 §6.5 整体抛** —— 那条「不做猜到一半
+    // 结果的降级」的规矩针对的是瞬时故障（超时/网络/服务端），403 不属于那一类：
+    // 它是这次调用**永远不会成功**的能力限制，猜都不用猜。
+    // 显式要 `scope='team'` 的调用没有个人库可退，照旧抛。
+    const kind = (err as { kind?: string }).kind
+    const personalOnly = queries.filter((item) => item.scope === 'personal')
+    if (kind !== 'permission' || scope !== 'both' || personalOnly.length === 0) {
+      log({ tool: 'search', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
+      throw err
+    }
+    log({ tool: 'search', user: deps.userId, event: 'team_scope_degraded', error: formatEsError(err) })
+    degraded = true
+    teamUnavailable = true
+    // 个人库这一路再抛就让它往上抛：个人库也读不了时本来就该失败
+    settled = await runQueries(personalOnly)
   }
 
   const pick = (target: Scope, route: 'bm25' | 'knn'): Hit[] =>
@@ -500,7 +544,9 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       }),
     })
   }
-  if (scope !== 'personal') {
+  // `teamUnavailable` = 上面那次权限降级把团队路跳过了（personal-only 档位），
+  // 这时不能建一个空的 team 分组 —— 空分组会让「查了哪些库」的回执说谎。
+  if (scope !== 'personal' && !teamUnavailable) {
     const routes = [pick('team', 'bm25')]
     if (vector) routes.push(pick('team', 'knn'))
     groups.push({
@@ -551,7 +597,14 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   // 阶段 12：同一 domain 最多 N 条（默认 0 = 关）。放在乘子之后、切片之前——
   // 多样化的语义是「别让一个域刷屏」，而不是改变相关性打分。
   const merged = diversifyByDomain(ranked, deps.retrieval.maxPerDomain ?? 0)
-  const basis = `${scope === 'both' ? 'personal+team' : scope}:${degraded ? 'bm25' : 'bm25+knn'}`
+  // 埋点里「查了哪些库 / 走了哪条路」必须是**实际发生的事**：
+  //   · 团队权限降级后只剩个人库，不能还写 personal+team；
+  //   · 路由要按「settled 里到底有没有 kNN 那一路」判，**不能沿用 degraded** ——
+  //     `degraded` 现在也承载「团队库不可读」（#28），而那种情况下 kNN 照样跑了，
+  //     沿用它会把 bm25+knn 误报成 bm25。
+  const effectiveScope = teamUnavailable ? 'personal' : scope === 'team' ? 'team' : scope
+  const ranKnn = settled.some((item) => item.route === 'knn')
+  const basis = `${effectiveScope}:${ranKnn ? 'bm25+knn' : 'bm25'}`
 
   /**
    * 检索埋点（P1）：只回答四个问题——查了什么、召回几条、花了多久、是不是空/降级。

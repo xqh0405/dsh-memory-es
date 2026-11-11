@@ -17,9 +17,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # 默认是本仓库的本地部署；远端部署用 ES_DIR=/path/to/deploy/es ES_URL=https://host:9200
+# CA 可单独覆盖（与 init-user.sh 已有的 ${CA:-...} 模式对齐）：目标实例的证书目录
+# 不在本地时（例如 es-test-up.sh 起的一次性测试实例），传 CA= 就够，不必为它造一个
+# 与运行无关的 certs 目录（2026-11-10 审查 #30）。
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 ENV_FILE="$ES_DIR/.env"
-CA="$ES_DIR/certs/ca.crt"
+CA="${CA:-$ES_DIR/certs/ca.crt}"
 source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
@@ -30,13 +33,33 @@ SEARCH_LOG="search_log_$USER_ID"
 
 es() { es_curl "elastic:$PASS" --fail-with-body -H 'Content-Type: application/json' "$@"; }
 
+# 把成功响应体丢掉，但**失败时必须回显**（2026-11-10 审查 M1/#22）。
+#
+# 为什么要有它：`es()` 开了 --fail-with-body，错误体走 **stdout** ——
+# 原来的 `es … >/dev/null` 把 `strict_dynamic_mapping_exception` 的整段原文
+# 连同成功输出一起丢了，只剩 curl 那句 `error: 400`，模板/mapping 哪个字段
+# 不对完全看不出来。同仓 `migrate-identifier-field.sh` 修过同类
+# （「第一次跑 403 被 grep 吞掉」），这里补上。
+#
+# 注意是**包装而不是改 es()**：`exists()` 走的是 `es_curl`（另一个函数），
+# 别处还要 `es` 的正常输出（如 GET 后接 grep）。
+es_quiet() {
+  local out rc=0
+  out=$(es "$@" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '✗ 失败（curl 退出码 %s）：%s\n' "$rc" "$out" >&2
+    return "$rc"
+  fi
+  return 0
+}
+
 exists() {
   code=$(es_curl "elastic:$PASS" -o /dev/null -w '%{http_code}' -I "$ES/$1")
   [ "$code" = "200" ]
 }
 
 echo '== 索引模板 personal_memory_* =='
-es -X PUT "$ES/_index_template/personal_memory_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/personal_memory_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_memory_*"],
   "priority": 100,
@@ -118,7 +141,7 @@ put_index() {
     return 0
   fi
   echo "[create] 索引 $name"
-  es -X PUT "$ES/$name" -d @- >/dev/null
+  es_quiet -X PUT "$ES/$name" -d @-
   echo '  ok'
 }
 
@@ -127,6 +150,15 @@ put_index "$PERSONAL" <<'JSON'
 {}
 JSON
 
+# 2026-11-10 审查 P1/#17 补 activation：它与 hit_count / last_hit_at 是**同一支
+# painless 脚本一起写**的（src/memory/search.ts 的 HIT_UPDATE_SCRIPT 三行），
+# 且 `hit.origin === 'team'` 时打到**团队索引**（search.ts 的回写按 origin 选索引）。
+# 缺它的后果不是「少个字段」：dynamic:strict 下 merge 抛 strict_dynamic_mapping_exception
+# → 该条 bulk 400 → 三行脚本原子回滚 → hit_count 与 last_hit_at **一起丢**，
+# 只在 hit_record_partial 留一条观测日志。
+# 线上团队索引有这个字段（migrate-activation-fields.sh 补过），但 es-setup.sh 只跑
+# init-indices.sh → **新装机必中**，所以模板自己必须带。
+# ⚠️ 下面是喂给 curl 的 raw JSON，**不许出现 // 注释**（JSON 不支持，会整份解析失败）。
 put_index team_knowledge <<'JSON'
 {
   "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
@@ -147,6 +179,7 @@ put_index team_knowledge <<'JSON'
       "importance":        { "type": "keyword" },
       "hit_count":         { "type": "integer" },
       "last_hit_at":       { "type": "date" },
+      "activation":        { "type": "float" },
       "superseded_at":     { "type": "date" },
       "related":           { "type": "object", "enabled": false },
 
@@ -178,7 +211,13 @@ JSON
 #   · status           —— active / archived。归档后默认不进检索（29 用它做冷热分层）。
 #   · last_accessed_at —— 每次检索命中后回写（bulk，失败静默）。它撑起「热度」与
 #                         将来的 LRU 归档；空表示「入库后还没被用过」。
-es -X PUT "$ES/_index_template/personal_doc_template" -d @- >/dev/null <<'JSON'
+#
+# 审查 16b 新增：
+#   · cold_memory_id   —— 归档时写回冷引用的 memory_id。恢复时靠它**精确**删掉那条
+#                         「【已归档文档】…」记忆；没有它只能按 content 模糊搜，
+#                         代价大且会误伤别的文档。老文档没这个字段（留空）是正确的。
+#                         ⚠️ 已存在的索引不受模板影响，必须跑 scripts/migrate-cold-ref-field.sh。
+es_quiet -X PUT "$ES/_index_template/personal_doc_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_doc_*"],
   "priority": 100,
@@ -211,6 +250,7 @@ es -X PUT "$ES/_index_template/personal_doc_template" -d @- >/dev/null <<'JSON'
 
         "status":            { "type": "keyword" },
         "last_accessed_at":  { "type": "date" },
+        "cold_memory_id":    { "type": "keyword" },
 
         "created_at":        { "type": "date" },
         "updated_at":        { "type": "date" }
@@ -253,7 +293,7 @@ JSON
 #   · 个人操作写进共享审计还意味着任何人能写别人的审计记录，无法防伪造。
 # 字段刻意与 memory_audit 对齐：以后要汇总时可以直接并起来看。
 echo '== 索引模板 personal_audit_* =='
-es -X PUT "$ES/_index_template/personal_audit_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/personal_audit_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_audit_*"],
   "priority": 100,
@@ -290,7 +330,7 @@ echo '  personal_audit_* → 每用户一份操作审计（采纳/拒绝/晋升�
 # 检索是高频读操作（一天几十次），混进去会把 audit 撑成日志表，
 # 也会让「谁晋升了什么」这种审计问题被噪声淹没。
 echo '== 索引模板 search_log_* =='
-es -X PUT "$ES/_index_template/search_log_template" -d @- >/dev/null <<'JSON'
+es_quiet -X PUT "$ES/_index_template/search_log_template" -d @- <<'JSON'
 {
   "index_patterns": ["search_log_*"],
   "priority": 100,

@@ -34,8 +34,9 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_MAX_ITEMS, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
+import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
 import type { Projected } from './fragment.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -161,6 +162,9 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineSaveTool({
           userId,
           personalPrefix,
+          // 只用于建边时区分文档边（2026-11-10 审查 P5/#20）：
+          // related 里已有文档边时不能按权重截断，否则记忆边被整组挤掉
+          docPrefix: config.index.docPrefix,
           defaultDomain: config.defaults.domain,
           // 阶段 24：写开关（全局 + 按域覆盖）；闸在 saveMemory 里，内部调用也过
           writeMode: config.governance.write,
@@ -192,6 +196,7 @@ export function apply(ctx: Context, config: ConfigType): void {
               {
                 userId,
                 personalPrefix,
+                writeMode: config.governance.write,
                 reader,
                 writer,
                 embed,
@@ -232,6 +237,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         void runDistillSweep({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           embed,
@@ -341,6 +347,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineStatusTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           log: (event) => logger.info('status %o', event),
@@ -355,6 +362,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         definePromoteTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           log: (event) => logger.info('promote %o', event),
@@ -369,6 +377,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineDistillTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           embed,
@@ -443,6 +452,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineHistoryTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           reader,
           writer,
           now: () => new Date(),
@@ -459,6 +469,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         defineReviewTool({
           userId,
           personalPrefix,
+          writeMode: config.governance.write,
           auditIndex: config.index.audit,
           auditPrefix: config.index.auditPrefix,
           reader,
@@ -474,6 +485,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const traitsDeps = {
     userId,
     personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     // 判重与候选向量都靠它；embedding 挂了只跳过判重，不影响提炼与写入
@@ -572,6 +584,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const personaDeps: PersonaDeps = {
     userId,
     personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     embed,
@@ -630,6 +643,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     const journalDeps = {
       userId,
       personalPrefix,
+      writeMode: config.governance.write,
       reader,
       writer,
       now: () => new Date(),
@@ -670,6 +684,98 @@ export function apply(ctx: Context, config: ConfigType): void {
       () => ctx.tools.register(defineJournalTool({ journal: () => journalDeps })),
       'dsh-memory-es.journal-tool',
     )
+  }
+
+  /**
+   * 自更新（2026-11-11）：每天 `update.at`（默认 06:00）查一次 Release，
+   * 有新版本就体检索引 → 安装 → 延迟 60 秒退出，由服务管理器拉起新代码。
+   *
+   * 为什么用「自己退出」而不是 `systemctl restart` / `docker restart`：
+   *  · 容器内没有 docker socket，也没有 systemctl；
+   *  · 本机 systemctl 要 polkit 交互认证，插件进程拿不到；
+   *  · 而两边本来就有人管：本机 `Restart=always`、容器 `unless-stopped`。
+   *
+   * 每 5 分钟醒一次判断「到点了吗、今天查过没有」，没到点零网络请求。
+   */
+  if (config.update.enabled) {
+    const dshHome = (process.env.DSH_HOME ?? '').trim() !== ''
+      ? (process.env.DSH_HOME as string).trim()
+      : join(homedir(), '.dsh')
+    const profile = (process.env.DSH_PROFILE ?? '').trim() !== ''
+      ? (process.env.DSH_PROFILE as string).trim()
+      : 'web'
+    const updateStateDir = config.update.dir.trim() !== ''
+      ? expandHome(config.update.dir.trim())
+      : join(dshHome, 'memory-es/update')
+    const updateDeps: UpdateDeps = {
+      // 管理员实例负责补字段；成员只换代码（ES 是共享的，索引迁移做一次就够）
+      mode: config.update.migrate ? 'migrate' : 'member',
+      stateDir: updateStateDir,
+      pluginDir: join(dshHome, 'local-plugins/dsh-memory-es'),
+      dshHome,
+      profile,
+      localVersion: PLUGIN_VERSION,
+      repo: config.update.repo,
+      timeZone: config.update.timeZone,
+      at: config.update.at,
+      restartDelayMs: config.update.restartDelayMs,
+      indexes: {
+        memory: personalIndexName(config),
+        doc: `${config.index.docPrefix}${userId}`,
+        searchLog: `${config.index.searchLogPrefix}${userId}`,
+        audit: `${config.index.auditPrefix}${userId}`,
+      },
+      es: {
+        getMapping: (name: string) => writer.getMapping(name),
+        putMapping: (name: string, properties: Record<string, unknown>) => writer.putMapping(name, properties),
+      },
+      log: (message: string) => logger.info('update %s', message),
+      now: () => new Date(),
+      exit: (code: number) => process.exit(code),
+      // 迁移失败才叫一次模型：只让它解释差异与给人工建议，**不执行任何命令**
+      diagnose: async ({ error, additions }) => {
+        try {
+          return await summarizeTraits(
+            '自更新在给 Elasticsearch 索引补字段时失败。\n'
+              + `错误：${error.slice(0, 800)}\n`
+              + `待补字段：${additions.slice(0, 40).join(', ')}\n`
+              + '请用中文给出 3 条以内的诊断与人工修复建议；不要输出可直接执行的危险命令。',
+            '你是 Elasticsearch 运维助手，只做诊断。回答 200 字以内，用中文，不要执行任何操作。',
+          )
+        } catch {
+          return null
+        }
+      },
+    }
+    // 同一进程内不并发跑两轮（5 分钟 tick 可能撞上上一轮还没结束）
+    let updateRunning = false
+    const updateTick = async (): Promise<void> => {
+      if (updateRunning) return
+      const state = readUpdateState(updateStateDir)
+      if (!isDue(config.update.at, config.update.timeZone, state.lastCheckDate, new Date())) return
+      updateRunning = true
+      try {
+        const outcome = await runUpdate(updateDeps)
+        if (outcome.action !== 'skipped') {
+          logger.info('update: %s（%s）', outcome.action, outcome.reason)
+        }
+      } catch (err) {
+        logger.warn('update: 失败 %s', String(err).slice(0, 160))
+      } finally {
+        updateRunning = false
+      }
+    }
+    ctx.effect(() => {
+      const timer = setInterval(() => { void updateTick() }, 5 * 60_000)
+      timer.unref?.()
+      // 启动 1 分钟先探一次：跨天重启时别等到下一个检查点才补
+      const kick = setTimeout(() => { void updateTick() }, 60_000)
+      kick.unref?.()
+      return () => {
+        clearInterval(timer)
+        clearTimeout(kick)
+      }
+    }, 'dsh-memory-es.update-daily')
   }
 
   /**
@@ -719,6 +825,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   const moodStore = {
     userId: config.identity.userId,
     personalPrefix: config.index.personalPrefix,
+    writeMode: config.governance.write,
     reader,
     writer,
     log: (event: Record<string, unknown>) => logger.info('mood %o', event),
@@ -909,7 +1016,10 @@ export function apply(ctx: Context, config: ConfigType): void {
         try {
           const res = await reader.search(
             pinnedIndex,
-            pinnedSearchBody(PINNED_MAX_ITEMS * 2),
+            // 取数池必须明显大于 PINNED_MAX_ITEMS（8）：进程内还要按 importance 挑前 8，
+            // 只取 16 条等于「先让 ES 随便挑 16 条、再在这 16 条里排序」。
+            // 旧版 `PINNED_MAX_ITEMS * 2` 且无 sort → 超 16 条时选中哪批不确定（审查 #13）。
+            pinnedSearchBody(PINNED_FETCH_SIZE),
             { signal: AbortSignal.timeout(inject.timeoutMs) },
           )
           return normalizePinnedHits(res.hits)
@@ -980,6 +1090,9 @@ export function apply(ctx: Context, config: ConfigType): void {
               ranking: config.ranking,
               mood: () => mood.state,
               signal: AbortSignal.timeout(inject.timeoutMs),
+              // 传 log：否则 search.ts 的 log 默认 noop，它在 catch 里算好的
+              // formatEsError（含 ES 错误类型与提示）会被白扔，排查时只剩一个 outcome。
+              log: (event) => logger.info('inject-search %o', event),
             },
             // limit 多取两条：预算裁剪会丢掉末尾，与影子召回同一口径。
             // explain: true 只为拿到 top1 的向量分数——note 分不出闲聊与相关（见 passesInjectGate）
@@ -995,28 +1108,38 @@ export function apply(ctx: Context, config: ConfigType): void {
           if (!gate) {
             // 区分两种「不注入」：note 本来就不是 ok，vs 分数不够（噪声）。
             // 阶段 32：检索段不注入 ≠ 整段不注入——pinned 不经过这道门，仍要出。
+            //
+            // ⚠️ outcome 只写**检索段**的真实结果，不再因 pinned 段非空就覆盖成 'injected'——
+            // 旧写法让 error/low_confidence/no_match 全被折叠（2026-11-10 审查：11-09 之后
+            // 432 条 outcome 全是 injected，面板超时率恒 0、注入率虚高 74% vs 真实 53%）。
+            // 整段是否注入改由 pinnedInjected 表达。
             const outcome = result.note !== 'ok' ? result.note : 'low_score'
             const only = compose([])
             writeRecord({
-              outcome: only.text === '' ? outcome : 'injected',
+              outcome,
               hits: result.hits.length,
               items: only.items,
               pinnedItems: only.pinnedItems,
+              pinnedInjected: only.pinnedItems.length,
               chars: only.chars,
               ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
-              ...(only.text === '' ? {} : { pinnedOnly: true }),
+              ...(only.pinnedItems.length > 0 && only.items.length === 0 ? { pinnedOnly: true } : {}),
               ...(top1Score === undefined ? {} : { top1Score }),
             })
             return only.text
           }
           const composed = compose(result.hits)
           writeRecord({
-            outcome: composed.text === '' ? 'no_match' : 'injected',
+            // 只看**检索段**：composed.text 含 pinned 段，拿它判 no_match 会把
+            // 「检索没命中但常驻注入了」记成 injected（同属 outcome 被折叠的问题）。
+            outcome: composed.items.length === 0 ? 'no_match' : 'injected',
             hits: result.hits.length,
             items: composed.items,
             pinnedItems: composed.pinnedItems,
+            pinnedInjected: composed.pinnedItems.length,
             chars: composed.chars,
             ...(composed.dropped.length === 0 ? {} : { dropped: composed.dropped }),
+            ...(composed.pinnedItems.length > 0 && composed.items.length === 0 ? { pinnedOnly: true } : {}),
             ...(top1Score === undefined ? {} : { top1Score }),
           })
           if (composed.text !== '') {
@@ -1035,13 +1158,19 @@ export function apply(ctx: Context, config: ConfigType): void {
           const only = compose([])
           const failure = classifyInjectError(err)
           writeRecord({
-            outcome: only.text === '' ? failure : 'injected',
+            // outcome 保持失败原值（timeout/error），不再因 pinned 非空覆盖成 'injected'——
+            // 否则超时在数据里永远看不见（旧版面板超时率恒 0%）。
+            outcome: failure,
             hits: 0,
             items: only.items,
             pinnedItems: only.pinnedItems,
+            pinnedInjected: only.pinnedItems.length,
             chars: only.chars,
+            // 失败原因必须落盘，否则 JSONL 里只有一个 outcome=error、没有任何线索
+            // （对照影子侧 recall-shadow.ts 的 note，注入侧旧版没有这个字段）。
+            note: String(err instanceof Error ? err.message : err).slice(0, 120),
             ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
-            ...(only.text === '' ? {} : { pinnedOnly: true }),
+            ...(only.pinnedItems.length > 0 && only.items.length === 0 ? { pinnedOnly: true } : {}),
           })
           logger.info('注入跳过检索段（%d ms）：%s', Date.now() - startedAt, String(err).slice(0, 120))
           return only.text

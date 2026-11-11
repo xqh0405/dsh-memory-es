@@ -29,8 +29,8 @@ import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
-import { assertDocOwner, nowIso, personalIndexFor } from './common.ts'
-import { mergeEdges, pickNeighbors, readEdges, type Edge } from '../edges.ts'
+import { assertDocOwner, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor, type WriteMode } from './common.ts'
+import { mergeEdges, mergeEdgesSegmented, pickNeighbors, readEdges, type Edge } from '../edges.ts'
 import {
   checkAdmission,
   DEFAULT_ORIGIN,
@@ -117,8 +117,13 @@ export interface SaveResult {
   text: string
 }
 
-/** 阶段 24：写入模式。`on` 正常；`readonly` / `off` 拒绝一切写入。 */
-export type WriteMode = 'on' | 'readonly' | 'off'
+/**
+ * 阶段 24：写入模式。`on` 正常；`readonly` / `off` 拒绝一切写入。
+ *
+ * 类型本体已搬到 `common.ts`（写闸下沉后所有写入模块都要用），这里 re-export
+ * 保住老 import 路径（`config.ts` 与历史代码仍从 save.ts 取）。
+ */
+export type { WriteMode } from './common.ts'
 
 /** 建边配置（阶段 5.2）。缺省 = 不建边。 */
 export interface EdgeWriteConfig {
@@ -175,6 +180,16 @@ export interface SaveDeps {
   userId: string
   /** 个人索引前缀；索引名在这里拼（`personalIndex` 由前缀 + userId 派生，不给调用点拼错的机会） */
   personalPrefix: string
+  /**
+   * 文档索引前缀（`personal_doc_`），只用于**建边时区分文档边**（2026-11-10 审查 P5/#20）。
+   *
+   * `related` 里可能已有 `scripts/link-docs.ts` 写的**文档边**（权重 0.83~0.86，
+   * 比记忆边 0.55~0.85 更重），直接 `mergeEdges` 按权重截断 topK 会把记忆边
+   * **整组挤掉**（2026-11-09 实测 8 条归零，`git show 3209607`）。
+   * 缺省 undefined = 判不出文档边 → 此时**本轮不动 related**（宁可不建边也不破坏），
+   * 老调用点与测试不受影响。
+   */
+  docPrefix?: string
   defaultDomain: string
   /** 去重检索用只读身份；`get` 缺失时不建边（老调用点与测试不受影响） */
   reader: Pick<EsClient, 'search'> & Partial<Pick<EsClient, 'get'>>
@@ -307,7 +322,12 @@ export function buildMemoryDoc(
     // 蒸馏状态：入库立刻可见（pending），后台子代理处理后改成 done。
     // 由插件自己写，不依赖 LLM —— 入库不能被模型可用性卡住。
     distill_state: 'pending',
-    status: 'active',
+    // 非事实类（identity / persona / journal）**只能落 pending**，由 memory_review 采纳后才生效。
+    // 旧版这里固定 'active' —— 模型一句 `memory_save(memory_type='identity')` 就能拿到
+    // 生效自述，直接绕过采纳闸与锚点（2026-11-10 审查 G5）；而提炼侧 traits.ts:8 的纪律
+    // 明写「只写候选 pending、不写生效条目」，review.ts:9 也只动 pending —— 两条路必须一致。
+    // 与 search.ts:348 的排除口径同源（都用 NON_FACT_MEMORY_TYPES），加类型只改一处。
+    status: (NON_FACT_MEMORY_TYPES as readonly string[]).includes(memoryType) ? 'pending' : 'active',
     // 阶段 5：联结与激活。写入时给初值，让字段语义明确（老文档缺失按同值处理）：
     // related 由建边步骤补；activation 由检索命中回写累加（search.ts 的 HIT_UPDATE_SCRIPT），
     // 扩散激活消费时按 last_hit_at 做时间衰减（fragment.ts 的 spreadActivation，默认 alpha=0 关着）。
@@ -345,6 +365,41 @@ export function buildMemoryDoc(
 interface NeighborProbe {
   similar: string[]
   linked: number
+}
+
+/**
+ * 判定 `related` 里哪些 id 是**文档边**（2026-11-10 审查 P5/#20）。
+ *
+ * 文档边是 `scripts/link-docs.ts` 写进记忆侧的 `{id, weight}`，id 指向
+ * `personal_doc_<uid>` 里的切片；判定只能靠查那个索引 —— id 形态上
+ * 「`{doc_id}-{chunk}`」与 UUID 记忆 id 分不开（UUID 也以数字结尾）。
+ *
+ * 返回 `null` = **判不出**（没给 docPrefix / 文档索引不存在 / 查询失败），
+ * 调用方应当跳过本轮写入而不是猜：判错的代价是**丢掉已有文档边**，
+ * 不写的代价只是晚一轮建边。
+ *
+ * 与 `scripts/backfill-edges.ts` 的处理不同：那边判不出时按「没有文档边」继续，
+ * 因为它是**主动回填**、覆盖面就是全部条目；save 是热路径且**当前 existing 恒为空**
+ * （只对刚创建的文档跑），判不出属于异常形态，保守跳过更合适。
+ */
+async function probeDocEdgeIds(deps: SaveDeps, existing: readonly Edge[]): Promise<Set<string> | null> {
+  const prefix = deps.docPrefix
+  if (prefix === undefined || existing.length === 0) return null
+  if (typeof deps.reader.search !== 'function') return null
+  try {
+    const res = await deps.reader.search(
+      `${prefix}${deps.userId}`,
+      {
+        size: existing.length,
+        query: { ids: { values: existing.map((edge) => edge.id) } },
+        _source: false,
+      },
+      { signal: deps.signal },
+    )
+    return new Set(res.hits.map((hit) => hit.id))
+  } catch {
+    return null
+  }
 }
 
 async function probeNeighbors(
@@ -397,10 +452,38 @@ async function probeNeighbors(
       if (picked.length > 0) {
         // 读回再合并：幂等，将来重跑建边不会把已有边冲掉
         const current = await get(index, memoryId, { signal: deps.signal })
-        const next = mergeEdges(readEdges(current.source.related), picked, edgeCfg.topK)
-        await update(index, memoryId, { related: next }, { refresh: 'wait_for', signal: deps.signal })
-        linked = next.length
-        log({ tool: 'save', user: deps.userId, event: 'edges_linked', count: next.length, added: picked.length })
+        const existing = readEdges(current.source.related)
+
+        let next: Edge[] | null = null
+        if (existing.length === 0) {
+          // 常态：本路径只对**刚创建**的文档跑（saveMemory 用新 id 建，去重命中会提前 return），
+          // 所以 related 恒为 [] —— 一次文档边判定查询都不会发，行为与旧版完全一致。
+          next = mergeEdges(existing, picked, edgeCfg.topK)
+        } else {
+          // 只有 existing 非空才需要判定（2026-11-10 审查 P5/#20）。
+          // 旧写法直接 mergeEdges：文档边（0.83~0.86）比记忆边重，按权重截断 topK
+          // 会把记忆边整组挤掉 —— 2026-11-09 实测 8 条记忆的记忆边被清空。
+          const docIds = await probeDocEdgeIds(deps, existing)
+          if (docIds === null) {
+            // 判不出（没给 docPrefix / 文档索引不存在 / 查询失败）→ 本轮不写 related。
+            // 宁可不建边也不许破坏已有边：判错的代价是**丢数据**，不写的代价是晚一轮建边。
+            log({
+              tool: 'save',
+              user: deps.userId,
+              memory_id: memoryId,
+              event: 'edges_skipped_unclassifiable',
+              existing: existing.length,
+            })
+          } else {
+            next = mergeEdgesSegmented(existing, picked, edgeCfg.topK, docIds)
+          }
+        }
+
+        if (next !== null) {
+          await update(index, memoryId, { related: next }, { refresh: 'wait_for', signal: deps.signal })
+          linked = next.length
+          log({ tool: 'save', user: deps.userId, event: 'edges_linked', count: next.length, added: picked.length })
+        }
       }
     }
 
@@ -630,7 +713,8 @@ export function defineSaveTool(deps: SaveDeps) {
         type: 'string',
         enum: [...MEMORY_TYPES],
         description:
-          '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景，identity=稳定自述（由提炼任务产出、审核后写入，不要随手用）。',
+          '记忆类型，缺省 fact。preference=偏好，decision=决定，task_progress=进度，context=背景，'
+          + 'identity=稳定自述（**只落 pending，要审核台采纳后才生效** —— 正常由提炼任务产出，别随手用）。',
       },
       importance: {
         type: 'string',

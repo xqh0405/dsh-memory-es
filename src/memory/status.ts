@@ -26,7 +26,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { MemoryStoreDeps } from './common.ts'
-import { loadOwnedDoc, nowIso, personalIndexFor } from './common.ts'
+import { assertWriteAllowed, loadOwnedDoc, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor } from './common.ts'
+import { PINNED_ITEM_MAX_CHARS, PINNED_MAX_ITEMS } from '../recall-inject.ts'
 
 export const STATUS_ACTIONS = ['supersede', 'expire', 'archive', 'restore', 'mark_private', 'pin', 'unpin'] as const
 export type StatusAction = (typeof STATUS_ACTIONS)[number]
@@ -88,6 +89,36 @@ function describe(action: StatusAction, status: string, replacement: string): st
 }
 
 /**
+ * 数一下当前有多少条「可注入的常驻」，供 pin 回执报上限用。
+ *
+ * 口径与 `pinnedSearchBody` 完全一致（pinned + active，且排除非事实三类）——
+ * 报出来的数字必须等于「真正会进注入段的条数」，否则回执又变成另一种过度承诺。
+ * `reader.search` 是可选能力（有的测试只给 get），数不出来返回 null 走降级文案；
+ * 查询失败同理：**数不清不该让 pin 这个动作失败**。
+ */
+async function countPinned(deps: UpdateStatusDeps, index: string): Promise<number | null> {
+  if (typeof deps.reader.search !== 'function') return null
+  try {
+    const res = await deps.reader.search(
+      index,
+      {
+        size: 0,
+        query: {
+          bool: {
+            filter: [{ term: { pinned: true } }, { term: { status: 'active' } }],
+            must_not: [{ terms: { memory_type: [...NON_FACT_MEMORY_TYPES] } }],
+          },
+        },
+      },
+      { signal: deps.signal },
+    )
+    return res.total
+  } catch {
+    return null
+  }
+}
+
+/**
  * 编排。所有写都走 writer 凭证；读走 reader。
  * 失败一律抛（不吞）：改状态失败却回报成功，会让模型以为旧记忆已经下架。
  */
@@ -95,6 +126,10 @@ export async function updateStatus(
   deps: UpdateStatusDeps,
   input: UpdateStatusInput,
 ): Promise<UpdateStatusResult> {
+  // 写闸（2026-11-10 下沉，用户拍板「全拦」）：pin/unpin、归档、supersede、过期、恢复隔离
+  // 全走这一个入口，一道闸就够。旧版这里零检查 —— 24.3 只堵了 memory_save，
+  // governance.write=off 时仍能置顶并每轮注入（审查 A2 里最像后门的一条）。
+  assertWriteAllowed(deps, `memory_update_status action=${String(input.action)}`)
   const startedAt = Date.now()
   const log = deps.log ?? (() => {})
   const action = input.action
@@ -179,12 +214,42 @@ export async function updateStatus(
     // 只把 status 改回 active 会让原因残留，面板详情看起来像「已生效但还挂着隔离理由」，
     // 审的人分不清它到底恢复干净了没有。（面板的 /memories/restore 早就清了，工具侧漏了。）
     // 其它状态被误写这个字段时也一并无害——它只在 status=quarantine 时有语义。
+    //
+    // `distill_state` 要跟着重置（2026-11-10 审查 #16）：隔离与归档期间它可能被标成 `skipped`
+    // （save.ts 隔离时、distillRunner 对非 active 时），恢复成 active 后若不改回来，
+    // 清扫只查 `distill_state=pending` —— 这条**永远不会再蒸馏**，而隔离来的那批
+    // **按设计还没有向量**（隔离不写向量），恢复后只能关键词检索。
+    //
+    // 但 `skipped` 不等于「有病」——线上实测 status=active 且 distill_state=skipped 共 93 条，
+    // 其中 91 条是 `origin=import`（阶段 33 下沉的短规则，向量已补齐、本就是人工收紧过的），
+    // 另 1 条 `origin=tool` 是人工写的种子规则。无脑重置会把它们重新扔进蒸馏队列、
+    // 让 LLM 再改写一遍。所以分三种：
+    //  · `prevStatus=quarantine` → **一定重排**（skipped 是「隔离期间跑不了」写的，且没有向量）；
+    //  · `origin=import` → 不动（脚本下沉时**有意**标 skip）；
+    //  · 已有 `summary` → 不动（蒸馏的产物就是 summary，有它说明已经蒸馏过）；
+    //  · 其余（归档前还是 pending、从没蒸馏过）→ 重排。
+    //
+    // 注：面板 `/memories/restore` 与 `scripts/restore-quarantine.ts` 只处理 `status=quarantine`，
+    // 那里 skipped 无歧义、直接重置即可；只有工具侧 restore 是多状态入口才要分。
+    const prevStatus = typeof current.source.status === 'string' ? current.source.status : ''
+    const origin = typeof current.source.origin === 'string' ? current.source.origin : ''
+    const condensed = typeof current.source.summary === 'string' && current.source.summary.trim() !== ''
+    const requeued = current.source.distill_state === 'skipped'
+      && (prevStatus === 'quarantine' || (origin !== 'import' && !condensed))
     await deps.writer.update(
       index,
       current.id,
-      { status: 'active', superseded_by: null, quarantine_reason: null, forget_reason: null, updated_at: now },
+      {
+        status: 'active',
+        superseded_by: null,
+        quarantine_reason: null,
+        forget_reason: null,
+        ...(requeued ? { distill_state: 'pending' } : {}),
+        updated_at: now,
+      },
       { refresh: 'wait_for', signal: deps.signal },
     )
+    const base = describe(action, 'active', '')
     return {
       memory_id: current.id,
       action,
@@ -192,7 +257,9 @@ export async function updateStatus(
       privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
       superseded_by: '',
       changed: true,
-      text: describe(action, 'active', ''),
+      text: requeued
+        ? `${base}；已重新排队蒸馏（distill_state pending → 下一轮清扫会改写正文并补向量）`
+        : base,
     }
   }
 
@@ -215,6 +282,17 @@ export async function updateStatus(
       ms: Date.now() - startedAt,
       changed: written.result !== 'noop',
     })
+    let text = describe(action, status, '')
+    // 回执必须把上限说清楚（2026-11-10 审查 #14）：旧版只承诺「每轮注入都会带上它」，
+    // 但常驻段实际有 8 条上限、单条截断到 200 字 —— 第 9 条被挤掉时用户毫无察觉，
+    // 于是「记住了」变成「以为记住了」。数不出来也不该让 pin 失败，退化成只报静态上限。
+    if (action === 'pin' && status === 'active') {
+      const total = await countPinned(deps, index)
+      const cap = `常驻段每轮只注入前 ${PINNED_MAX_ITEMS} 条、单条截断到 ${PINNED_ITEM_MAX_CHARS} 字`
+      text = total === null
+        ? `${text}（${cap}）`
+        : `${text}（当前常驻共 ${total} 条；${cap}——超出的按重要度与更新时间取舍）`
+    }
     return {
       memory_id: current.id,
       action,
@@ -222,7 +300,7 @@ export async function updateStatus(
       privacy: typeof current.source.privacy === 'string' ? current.source.privacy : 'normal',
       superseded_by: typeof current.source.superseded_by === 'string' ? current.source.superseded_by : '',
       changed: written.result !== 'noop',
-      text: describe(action, status, ''),
+      text,
     }
   }
 

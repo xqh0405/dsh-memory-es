@@ -71,7 +71,14 @@ async function main(): Promise<void> {
   const index = `${PERSONAL_PREFIX}${uid}`
 
   const current = await es.get(index, id)
-  const source = current.source as { status?: string; content?: string; embedding?: number[]; quarantine_reason?: string }
+  const source = current.source as {
+    status?: string
+    content?: string
+    embedding?: number[]
+    quarantine_reason?: string
+    /** 隔离时被写成 `skipped`；恢复要置回 `pending` 才能重新蒸馏（#16） */
+    distill_state?: string
+  }
   console.log(`id=${id} status=${source.status} reason=${source.quarantine_reason ?? '-'}`)
   if (source.status !== 'quarantine') {
     console.log('不是 quarantine 状态，无需恢复')
@@ -89,9 +96,19 @@ async function main(): Promise<void> {
   }
 
   // 1. 恢复状态（与面板 POST /memories/restore 同语义）
+  //    外加把 distill_state 从 `skipped` 重置回 `pending`（2026-11-10 审查 #16）：
+  //    隔离时 saveMemory 写的是 `skipped`，不重置的话清扫只查 pending，这条**永不蒸馏**。
+  //    （下面第 2 步的向量是**按当前原文**算的；置回 pending 后，蒸馏改写正文时会按新正文重建一次，
+  //     两段向量都指向真实正文，不会出现「内容变了向量还是旧的」。）
+  const requeue = String(source.distill_state ?? '') === 'skipped'
   const now = new Date().toISOString()
-  await es.update(index, id, { status: 'active', quarantine_reason: null, updated_at: now }, { refresh: 'wait_for' })
-  console.log('① status → active，quarantine_reason 已清')
+  await es.update(index, id, {
+    status: 'active',
+    quarantine_reason: null,
+    ...(requeue ? { distill_state: 'pending' } : {}),
+    updated_at: now,
+  }, { refresh: 'wait_for' })
+  console.log(`① status → active，quarantine_reason 已清${requeue ? '，distill_state → pending（重新排队蒸馏）' : '（distill_state 保持原样）'}`)
 
   // 2. 补向量（面板做不到的那步；隔离条目 embedding 恒为 null）
   const embed = createEmbedder({ url: EMBED_URL, model: 'bge-m3', dims: DIMS, timeoutMs: 30_000 })
