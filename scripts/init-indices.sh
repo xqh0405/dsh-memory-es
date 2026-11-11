@@ -17,9 +17,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # 默认是本仓库的本地部署；远端部署用 ES_DIR=/path/to/deploy/es ES_URL=https://host:9200
+# CA 可单独覆盖（与 init-user.sh 已有的 ${CA:-...} 模式对齐）：目标实例的证书目录
+# 不在本地时（例如 es-test-up.sh 起的一次性测试实例），传 CA= 就够，不必为它造一个
+# 与运行无关的 certs 目录（2026-11-10 审查 #30）。
 ES_DIR="${ES_DIR:-$ROOT/deploy/es}"
 ENV_FILE="$ES_DIR/.env"
-CA="$ES_DIR/certs/ca.crt"
+CA="${CA:-$ES_DIR/certs/ca.crt}"
 source "$(dirname "$0")/lib/curl-es.sh"
 ES="${ES_URL:-https://127.0.0.1:9200}"
 PASS=$(grep '^ELASTIC_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)

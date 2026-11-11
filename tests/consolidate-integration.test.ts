@@ -18,7 +18,7 @@ import { createEsClient } from '../src/es/http.ts'
 import { saveMemory, type SaveDeps } from '../src/memory/save.ts'
 import { searchMemories } from '../src/memory/search.ts'
 import { adminRequest, countByDomain, deleteByDomain, deleteDocsById, getAdminDoc } from './helpers/es-admin.ts'
-import { isLoopbackUrl, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
+import { writeGate, esSkipReason, loadEsTestEnv, type EsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__consol_it'
 const CONFLICT_DOMAIN = '__consol_it_conflict'
@@ -31,8 +31,8 @@ const env = loadEsTestEnv()
 
 if (!env) {
   test('整理任务集成测试', { skip: esSkipReason() }, () => {})
-} else if (!isLoopbackUrl(env.url)) {
-  test('整理任务集成测试', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
+} else if (!writeGate(env.url).ok) {
+  test('整理任务集成测试', { skip: writeGate(env.url).reason }, () => {})
 } else {
   defineConsolidateIntegration(env)
 }

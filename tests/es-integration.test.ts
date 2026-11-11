@@ -19,7 +19,7 @@ import { createEsClient, EsError, formatEsError } from '../src/es/http.ts'
 import { normalizeContent, sha256Hex } from '../src/fragment.ts'
 import { countByDomain, deleteByDomain } from './helpers/es-admin.ts'
 import type { EsTestEnv } from './helpers/es-env.ts'
-import { isLoopbackUrl, esSkipReason, loadEsTestEnv } from './helpers/es-env.ts'
+import { writeGate, esSkipReason, loadEsTestEnv } from './helpers/es-env.ts'
 
 const MARKER_DOMAIN = '__it'
 
@@ -34,10 +34,10 @@ if (!env) {
   test('ES 集成测试', { skip: esSkipReason() }, () => {})
 } else {
   defineReadOnlyTests(env)
-  if (isLoopbackUrl(env.url)) {
+  if (writeGate(env.url).ok) {
     defineReadWriteTests(env)
   } else {
-    test('ES 读写集成', { skip: `es.url=${env.url} 不是本机回环，拒绝写入测试数据` }, () => {})
+    test('ES 读写集成', { skip: writeGate(env.url).reason }, () => {})
   }
 }
 
