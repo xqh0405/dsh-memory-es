@@ -11,6 +11,7 @@ import { describe, test } from 'node:test'
 import {
   APPROVED_STATUS,
   approveCandidate,
+  defineReviewTool,
   listCandidates,
   REJECTED_STATUS,
   rejectCandidate,
@@ -234,5 +235,71 @@ describe('setAnchor（阶段 7.5）', () => {
     const out = await setAnchor(deps, 'nope', true)
     assert.equal(out.changed, false)
     assert.match(out.note, /找不到/)
+  })
+
+  // ── 工具级：锚点必须走自己的分支，不能掉进 reject（2026-11-11 审查 #34）──────
+  // `defineReviewTool` 的兜底是 `action === 'approve' ? approve : reject`。
+  // `anchor` 分支必须排在它**之前**（review.ts 里现在的顺序是对的）。
+  // 一旦有人把 anchor 分支挪后或删掉，`{action:'anchor'}` 会**掉进 reject** ——
+  // 把候选置 archived，是**破坏性**后果。
+  // 原来只有直接调 setAnchor 的测试（`grep "action: 'anchor'"` 在 tests 下 0 命中），
+  // 所以从工具入口走完整路径这条一直是空的。下面从 execute() 走一遍。
+  test('工具级：action=anchor 走锚点分支，绝不会掉进 reject', async () => {
+    const { deps, updates, audits } = makeDeps({
+      i1: { memory_id: 'i1', content: 'x', memory_type: 'identity', status: 'active' },
+    })
+    const def = defineReviewTool(deps)
+
+    const value = (await def.execute(
+      { action: 'anchor', memory_id: 'i1', anchor: true },
+      {} as never,
+    )) as Record<string, unknown>
+
+    // 返回的 action 变了就说明走错分支（掉进 approve/reject）
+    assert.equal(value.action, 'anchor')
+    assert.equal(value.changed, true)
+
+    // 真正的破坏性判据：写出去的只有「锚点位」，不能顺手改 status
+    assert.equal(updates.length, 1, `只该有一次写，实际 ${updates.length} 次 —— 多出来的就是 reject 路径`)
+    assert.equal(updates[0]?.doc.anchor, true)
+    assert.equal(
+      'status' in (updates[0]?.doc ?? {}),
+      false,
+      'anchor 不该碰 status —— 碰了就是把候选归档（reject 的后果）',
+    )
+
+    assert.equal(audits.length >= 1, true)
+    // 审计会写两处（个人审计索引 + 团队审计索引），所以按**事件名**断言，不数条数
+    const events = audits.map((a) => String(a.doc.event))
+    assert.ok(events.includes('identity_anchor_set'), `审计里必须有 identity_anchor_set，实际 ${events.join('/')}`)
+    assert.equal(events.includes('identity_rejected'), false, '出现 identity_rejected 就是掉进 reject 分支了')
+  })
+
+  // 上一条用 active 候选（能验证「锚点真写进去」）。但**破坏性**判据在这里：
+  // pending 候选在 anchor 分支里应当被拒绝（「只有生效中的自述能设锚点」），
+  // 可一旦 `{action:'anchor'}` 掉进 reject 分支，**pending 正好是 reject 的合法目标**
+  // —— 候选会被真的置成 archived/rejected，一条待办就这么被悄悄毁掉。
+  test('工具级：pending 候选走 anchor 分支会如实拒绝，绝不能被归档', async () => {
+    const { deps, updates, audits } = makeDeps({
+      p1: { memory_id: 'p1', content: 'x', memory_type: 'identity', status: 'pending' },
+    })
+    const def = defineReviewTool(deps)
+
+    const value = (await def.execute(
+      { action: 'anchor', memory_id: 'p1', anchor: true },
+      {} as never,
+    )) as Record<string, unknown>
+
+    assert.equal(value.action, 'anchor', '走错分支时 action 会变成 reject')
+    assert.equal(value.changed, false, 'pending 不能设锚点，必须如实返回 changed=false')
+
+    // 破坏性判据：一次写都不该发生
+    assert.deepEqual(
+      updates.map((u) => ({ id: u.id, keys: Object.keys(u.doc) })),
+      [],
+      'pending 候选在 anchor 分支下不该有任何写入；有写入就是掉进 reject 被归档了',
+    )
+    const events = audits.map((a) => String(a.doc.event))
+    assert.equal(events.includes('identity_rejected'), false, '出现 identity_rejected 就是被 reject 了')
   })
 })
