@@ -3616,6 +3616,10 @@ export function apply(ctx) {
 // 纯函数导出给测试用（不改变运行行为）：口径、配置合并、行匹配最容易悄悄错的地方
 export {
   admitRequest,
+  // 顶层路由器：2026-11-11 审查 #32 之前**从未被测**。它的 405 守卫夹在路由表中间，
+  // 语义是「非 GET 一律 405」，所以任何 POST 路由只要排到它后面就会被吞成 405
+  // （identity/review 踩过）。导出它，测试才能直接验证「方法过滤 / 404 / POST 能穿过去」。
+  handle,
   summarizeInjectRecords,
   readTailText,
   handleInjectLog,

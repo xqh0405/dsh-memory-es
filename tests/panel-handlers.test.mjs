@@ -1196,13 +1196,74 @@ test('表情包新增：缺 when / svg / 超大 / 重名 / 穿越文件名 / 坏
   assert.equal(fs.readFileSync(path.join(dir, 'stickers.json'), 'utf8'), '{ broken')
 })
 
-test('表情包新增：POST 路由必须排在 405 兜底之前（否则请求被吞成 405）', async () => {
+// ── 顶层路由器（2026-11-11 审查 #32）────────────────────────────────────
+// 两个缺口：① 405 守卫夹在路由表**中间**，语义是「非 GET 一律 405」——
+//   任何 POST 路由排到它后面就会被吞成 405（identity/review 踩过）。
+//   原来只钉了 `/stickers/add` 一条；这里扫**全部** POST 路由。
+// ② `handle()` 本身从未被调用过：方法过滤 / 404 / 「POST 能穿过去」都没测。
+test('顶层路由：**所有** POST 路由都必须排在 405 兜底之前', async () => {
   const source = fs.readFileSync(new URL('../panel/index.js', import.meta.url), 'utf8')
-  const addAt = source.indexOf("'/stickers/add' && req.method === 'POST'")
   const guardAt = source.indexOf("req.method !== 'GET'")
-  assert.ok(addAt > 0, '路由没注册：找不到 /stickers/add')
   assert.ok(guardAt > 0, '找不到 405 兜底，测试的前提变了')
-  assert.ok(addAt < guardAt, 'POST /stickers/add 必须出现在 405 兜底之前')
+
+  // 路由表里两形态：`path === '…' && req.method === 'POST'`，以及 review 那条
+  // `req.method === 'POST' && reviewMatch`（正则路由，path 是动态的）。
+  const postRouteRe = /(?:path === '[^']+'[^\n]*?req\.method === 'POST'|req\.method === 'POST' && reviewMatch)/g
+  const hits = [...source.matchAll(postRouteRe)].map((m) => ({ text: m[0].trim(), at: m.index ?? 0 }))
+  assert.ok(hits.length >= 8, `只找到 ${hits.length} 条 POST 路由，正则可能已失效（先修正则再信任这条测试）`)
+
+  const late = hits.filter((h) => h.at > guardAt)
+  assert.deepEqual(
+    late.map((h) => h.text),
+    [],
+    '这些 POST 路由排在 405 兜底之后，请求会被吞成 405；'
+    + '要么把它挪到 `req.method !== \'GET\'` 之前，要么把它改成不受该守卫影响的写法',
+  )
+})
+
+test('顶层路由：405 / 404 / 方法过滤的先后（handle 从未被测过）', async () => {
+  const { handle } = await import('../panel/index.js')
+  const es = await startFakeEs({ docSlices: ['d1-0'] })
+  try {
+    const ctx = ctxWithEs(DOC_MEMBER, es.url)
+    /** 造一条带 url 的请求（postReq 没有 url，不能直接用） */
+    const reqWith = (method, url, payload) =>
+      Object.assign(
+        Readable.from(payload === undefined ? [] : [Buffer.from(JSON.stringify(payload))]),
+        { method, url },
+      )
+
+    // ① POST 到只支持 GET 的路径 → 405（不是 404，也不是真的执行）
+    let res = fakeRes()
+    await handle(ctx, reqWith('POST', '/overview'), res)
+    assert.equal(res.statusCode, 405, `实际 ${res.statusCode}: ${res.body}`)
+    assert.match(JSON.parse(res.body).error, /只支持 GET/)
+
+    // ② GET 到不存在的路径 → 404，且报错里带路径（排查时能知道打到了哪）
+    res = fakeRes()
+    await handle(ctx, reqWith('GET', '/no-such-endpoint-zzz'), res)
+    assert.equal(res.statusCode, 404)
+    assert.match(JSON.parse(res.body).error, /未知接口/)
+    assert.match(JSON.parse(res.body).error, /no-such-endpoint-zzz/)
+
+    // ③ POST 到不存在的路径 → 405（方法过滤比路径更早 —— 这正是 405 夹在路由表中间的后果）
+    res = fakeRes()
+    await handle(ctx, reqWith('POST', '/no-such-endpoint-zzz'), res)
+    assert.equal(res.statusCode, 405)
+
+    // ④ POST 到**真实**的 POST 路由 → 必须穿过 405 守卫进到 handler。
+    // 用非管理员身份：期望 403（handler 的权限判定），**不是** 405（被守卫吞掉）。
+    res = fakeRes()
+    await handle(ctx, reqWith('POST', '/maintenance/doc-archive', { docId: 'doc-1' }), res)
+    assert.equal(
+      res.statusCode,
+      403,
+      `POST 路由没穿过去：拿到 ${res.statusCode}（405 就是被兜底吞了）: ${res.body}`,
+    )
+    assert.match(JSON.parse(res.body).error, /管理员/)
+  } finally {
+    await es.close()
+  }
 })
 
 // ── 星图构图：度数上限与节点上限决定了图是"能看"还是"一团毛球" ────────────
