@@ -124,7 +124,11 @@ admin -X PUT "$ES/_security/role/mem_personal_rw_${UID_ARG}" -d @- >/dev/null <<
   ]
 }
 JSON
-echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删（不是通配）"
+if [ "$MIGRATE" = "1" ]; then
+  echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删 + manage（自更新要补索引字段，仅管理员实例开）"
+else
+  echo "  mem_personal_rw_${UID_ARG} → ${PERSONAL} + personal_doc_ + search_log_ + personal_audit_ 读/写/删（不是通配）"
+fi
 
 echo "== 2.5/3 个人索引（幂等，空 body 继承索引模板）=="
 # 只建账号不建索引的话，新账号第一次打开面板会是 "ES 不可达 / index_not_found"，
