@@ -3051,7 +3051,7 @@ async function setDocStatus(ctx, res, body, nextStatus) {
   // 该 doc_id 的**全部切片**一起改：只改一部分会让同一篇文档一半出现一半消失
   const found = await client.search(names.docs, {
     size: 1000,
-    _source: ['doc_id', 'title', 'domain', 'source_path', 'source_paths', 'chunk_total'],
+    _source: ['doc_id', 'title', 'domain', 'source_path', 'source_paths', 'chunk_total', 'cold_memory_id'],
     query: { term: { doc_id: docId } },
   })
   const hits = found.hits?.hits ?? []
@@ -3071,10 +3071,13 @@ async function setDocStatus(ctx, res, body, nextStatus) {
 
   let changed = 0
   const failures = []
+  /** 真正换成目标状态的切片：补写 cold_memory_id 只针对它们（失败的那部分别再报一次） */
+  const updated = []
   for (const hit of hits) {
     try {
       await client.update(names.docs, hit._id, { status: nextStatus })
       changed++
+      updated.push(hit)
     } catch (error) {
       failures.push(`${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
     }
@@ -3117,6 +3120,50 @@ async function setDocStatus(ctx, res, body, nextStatus) {
       // 归档已完成，冷引用失败只提示——不回滚状态（回滚会变成半成品归档）
       note = `冷引用写入失败：${String(error?.message ?? error).slice(0, 120)}`
       coldMemoryId = ''
+    }
+
+    // 审查 16b：冷引用 id 必须**写回切片**，否则恢复时无从查起
+    // （`coldref-<8位>-<ts>` 里没有可反查 doc_id 的信息，只能按 content 模糊搜，
+    //  代价大且会误伤别的文档）。id 是上面才生成的，所以只能在这个位置补写。
+    // 失败不回滚归档（归档已是既成事实），但要如实记进 failures ——
+    // 否则「恢复时清不掉冷引用」会变成一个没有任何痕迹的幽灵问题。
+    if (coldMemoryId !== '') {
+      for (const hit of updated) {
+        try {
+          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId })
+        } catch (error) {
+          failures.push(`cold_memory_id@${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
+        }
+      }
+    }
+  } else if (nextStatus === 'active') {
+    // 审查 16b：归档→恢复必须清掉那条冷引用，否则 personal_memory 里永远留着一条
+    // 「【已归档文档】…」的记忆，而文档其实已经活了。它还会被 memory_search 命中，
+    // 指路的却是一篇并未归档的文档 —— 这正是 16b 要解决的「恢复不清理冷引用」。
+    // 按切片上的 cold_memory_id **精确**删；老文档没有这个字段，跳过即可。
+    const coldIds = [
+      ...new Set(hits.map((hit) => str(hit._source?.cold_memory_id)).filter((id) => id !== '')),
+    ]
+    if (coldIds.length > 0) {
+      let cleared = 0
+      for (const id of coldIds) {
+        try {
+          await client.del(names.personal, id, { refresh: 'wait_for' })
+          cleared++
+        } catch (error) {
+          // 404 = 本来就不在（用户手删过），按清理成功算，保持幂等
+          const msg = String(error?.message ?? error)
+          if (msg.includes('404') || /not.?found/i.test(msg)) {
+            cleared++
+            continue
+          }
+          failures.push(`cold ref ${id}: ${msg.slice(0, 80)}`)
+        }
+      }
+      note = `已清理 ${cleared}/${coldIds.length} 条冷引用`
+      // 切片上的 cold_memory_id **不清空**：它记录「这篇上次归档时留下的冷引用」，
+      // 留着无害（下次归档覆盖），清空反而要多写一轮。恢复后再恢复会重复删同一个 id，
+      // 404 已按成功处理，幂等。
     }
   }
 

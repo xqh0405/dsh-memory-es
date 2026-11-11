@@ -211,6 +211,12 @@ JSON
 #   · status           —— active / archived。归档后默认不进检索（29 用它做冷热分层）。
 #   · last_accessed_at —— 每次检索命中后回写（bulk，失败静默）。它撑起「热度」与
 #                         将来的 LRU 归档；空表示「入库后还没被用过」。
+#
+# 审查 16b 新增：
+#   · cold_memory_id   —— 归档时写回冷引用的 memory_id。恢复时靠它**精确**删掉那条
+#                         「【已归档文档】…」记忆；没有它只能按 content 模糊搜，
+#                         代价大且会误伤别的文档。老文档没这个字段（留空）是正确的。
+#                         ⚠️ 已存在的索引不受模板影响，必须跑 scripts/migrate-cold-ref-field.sh。
 es_quiet -X PUT "$ES/_index_template/personal_doc_template" -d @- <<'JSON'
 {
   "index_patterns": ["personal_doc_*"],
@@ -244,6 +250,7 @@ es_quiet -X PUT "$ES/_index_template/personal_doc_template" -d @- <<'JSON'
 
         "status":            { "type": "keyword" },
         "last_accessed_at":  { "type": "date" },
+        "cold_memory_id":    { "type": "keyword" },
 
         "created_at":        { "type": "date" },
         "updated_at":        { "type": "date" }

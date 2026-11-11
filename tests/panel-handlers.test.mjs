@@ -329,6 +329,8 @@ async function startFakeEs({
   restoreSource = null,
   // 归档/恢复（2026-11-10 审查 P6/#21）：线上跑的 setDocStatus 要这三样
   docSlices = null,
+  /** 切片上的 cold_memory_id（审查 16b：恢复时按它精确删掉冷引用） */
+  sliceColdRef = null,
   failUpdateFor = null,
   coldRefFail = false,
 } = {}) {
@@ -377,6 +379,8 @@ async function startFakeEs({
                   title: '测试文档',
                   domain: 'general',
                   chunk_total: docSlices.length,
+                  // 老文档没有这个字段 —— 只有显式给了才带上（这样才能测「没有也不报错」）
+                  ...(sliceColdRef === null ? {} : { cold_memory_id: sliceColdRef }),
                 },
               })),
             },
@@ -699,7 +703,13 @@ test('归档：全部切片成功 + 冷引用写入（否则归档等于失踪�
     assert.ok(cold, '必须写冷引用 —— 没有冷引用的归档等于失踪')
     assert.match(cold.body, /doc_id: doc-1/, '冷引用正文必须带 doc_id 才能被 memory_search 捡回来')
     assert.match(cold.body, /占满容量/, '归档原因要落进冷引用正文')
-    assert.equal(sliceUpdates(es).length, 3)
+    // 审查 16b：归档时每个切片写**两次** —— 一次 status、一次 cold_memory_id
+    // （后者给恢复用：没有它，恢复就只能按 content 模糊搜，代价大且会误伤别的文档）
+    const statusWrites = sliceUpdates(es).filter((c) => c.body.includes('"status"'))
+    const coldIdWrites = sliceUpdates(es).filter((c) => c.body.includes('cold_memory_id'))
+    assert.equal(statusWrites.length, 3, '3 个切片各写一次 status')
+    assert.equal(coldIdWrites.length, 3, '3 个切片各写一次 cold_memory_id（16b）')
+    assert.match(coldIdWrites[0].body, /"cold_memory_id":"coldref-/, '写回的必须是刚生成的那个冷引用 id')
   } finally {
     await es.close()
   }
@@ -717,6 +727,68 @@ test('归档：部分切片失败 → failures 逐条列出，仍返回 200（�
     assert.equal(value.failures.length, 1, `要报出是哪一片失败，实际 ${JSON.stringify(value.failures)}`)
     assert.match(value.failures[0], /d1-1/, 'failures 必须带切片 id，否则运维没法定位')
     assert.match(value.coldMemoryId, /^coldref-/, '部分成功时冷引用照写（归档确实生效了）')
+  } finally {
+    await es.close()
+  }
+})
+
+// ── 16b：归档→恢复必须清掉冷引用（2026-11-11）────────────────────────────
+// 不清理的话：personal_memory 里永远留一条「【已归档文档】…」的记忆，而文档其实
+// 已经活了 —— 它还会被 memory_search 命中，指路的却是一篇并未归档的文档。
+// 根因是 restore 手上只有 docId，而冷引用 id 是 `coldref-<8位>-<ts>`，没有反向索引；
+// 解法是归档时把 id 写回切片，恢复时按它**精确**删。
+test('恢复：按切片上的 cold_memory_id 精确删掉冷引用（16b）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0', 'd1-1'], sliceColdRef: 'coldref-doc1-abc' })
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `实际 ${res.statusCode}: ${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.status, 'active')
+    // 两个切片共用同一个冷引用 → 只该删一次（去重）
+    const dels = es.calls.filter((c) => c.method === 'DELETE')
+    assert.equal(dels.length, 1, `两个切片共用一个冷引用，只该删一次，实际 ${dels.length} 次`)
+    assert.match(
+      dels[0].url,
+      /\/personal_memory_xqh\/_doc\/coldref-doc1-abc/,
+      '删的必须是冷引用 id，不能是切片 id',
+    )
+    assert.match(value.note, /已清理 1\/1/, `note 要说明清了几条，实际 ${JSON.stringify(value.note)}`)
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：老文档没有 cold_memory_id → 不发删除、不报错（向后兼容）', async () => {
+  const es = await startFakeEs({ docSlices: ['d1-0'] }) // 不给 sliceColdRef
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `缺字段不该让恢复失败：${res.body}`)
+    assert.equal(
+      es.calls.filter((c) => c.method === 'DELETE').length,
+      0,
+      '没有冷引用 id 就不该删任何东西（猜着删会误伤别的记忆）',
+    )
+    assert.equal(JSON.parse(res.body).value.note, '', '没东西可清时 note 留空')
+  } finally {
+    await es.close()
+  }
+})
+
+test('恢复：冷引用已被手删（DELETE 404）→ 按清理成功算，保持幂等', async () => {
+  const es = await startFakeEs({
+    docSlices: ['d1-0'],
+    sliceColdRef: 'coldref-gone-x',
+    deleteStatus: 404,
+  })
+  try {
+    const res = fakeRes()
+    await handleDocRestore(ctxWithEs(DOC_ADMIN, es.url), res, postReq({ docId: 'doc-1' }))
+    assert.equal(res.statusCode, 200, `404 不该让恢复失败：${res.body}`)
+    const value = JSON.parse(res.body).value
+    assert.match(value.note, /已清理 1\/1/, '本来就没了也算清理成功，否则重跑会一直报失败')
+    assert.deepEqual(value.failures, [], '404 不该进 failures')
   } finally {
     await es.close()
   }
