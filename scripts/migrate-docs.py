@@ -173,6 +173,21 @@ def chunk_text(text: str, target=TARGET, overlap=OVERLAP, max_len=MAX_CHUNK):
             cur = (cur + "\n\n" + u).strip()
     if cur.strip():
         chunks.append(cur.strip())
+
+    # 硬上限兜底（2026-11-11 审查 #35）：句子切分对「无标点的长串」无解
+    # —— 代码块、长 URL、base64、没有句号的表格行，`sents` 只有一项，
+    # pieces 里就是一整段超长文本，于是 MAX_CHUNK 这个「单块硬上限」形同虚设。
+    # 这里按字符强制断开。硬切出来的相邻块**不带 overlap**：无标点串本来
+    # 没有语义边界，重叠只会让同一段文字重复进索引、拉低向量质量。
+    if any(len(c) > max_len for c in chunks):
+        forced: list[str] = []
+        for c in chunks:
+            if len(c) <= max_len:
+                forced.append(c)
+                continue
+            for i in range(0, len(c), max_len):
+                forced.append(c[i : i + max_len])
+        chunks = forced
     return chunks
 
 

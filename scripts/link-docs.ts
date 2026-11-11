@@ -30,8 +30,18 @@ const show = argv.includes('--show')
 const num = (flag: string, fallback: number): number => {
   const hit = argv.find((a) => a.startsWith(`${flag}=`))
   if (hit === undefined) return fallback
-  const v = Number(hit.slice(flag.length + 1))
-  return Number.isFinite(v) ? v : fallback
+  const raw = hit.slice(flag.length + 1)
+  const v = Number(raw)
+  // 2026-11-11 审查 #35：原来非有限值**静默 return fallback** —— `--limit=abc` 会按
+  // 50 片真的跑下去（exit 0），`--min-score=abc` 更糟：按默认阈值去写边。
+  // 与 `backfill-team-summary.ts` 的 parseLimit 对齐：给了参数却解析不出数字 → 显式报错。
+  if (!Number.isFinite(v)) {
+    console.error(`✗ ${flag} 需要一个数字（收到 ${JSON.stringify(raw)}）`)
+    console.error(`  正确用法：${flag}=40`)
+    console.error('  （想用默认值就别传这个参数 —— 静默回落会让你以为限了别的数）')
+    process.exit(2)
+  }
+  return v
 }
 const limit = num('--limit', 50)
 const minScore = num('--min-score', MIN_SCORE_DEFAULT)
