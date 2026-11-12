@@ -3184,7 +3184,12 @@ async function setDocStatus(ctx, res, body, nextStatus) {
     if (coldMemoryId !== '') {
       for (const hit of updated) {
         try {
-          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId })
+          // ⚠️ `refresh: 'wait_for'` 不能省（2026-11-12 真机验收抓到）：
+          // 文档索引的 refresh_interval 是 5s，而「归档 → 立刻恢复」是常见操作序列。
+          // 不刷新的话，恢复那一步的 search 读不到刚写的 cold_memory_id →
+          // coldIds 为空 → 冷引用根本不会被删，16b 等于没修。
+          // fake-ES 即时可见，所以 81 条单测全都测不出这个 —— 只有真机能暴露。
+          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId }, { refresh: 'wait_for' })
         } catch (error) {
           failures.push(`cold_memory_id@${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
         }

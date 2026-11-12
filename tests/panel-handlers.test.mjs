@@ -710,6 +710,15 @@ test('归档：全部切片成功 + 冷引用写入（否则归档等于失踪�
     assert.equal(statusWrites.length, 3, '3 个切片各写一次 status')
     assert.equal(coldIdWrites.length, 3, '3 个切片各写一次 cold_memory_id（16b）')
     assert.match(coldIdWrites[0].body, /"cold_memory_id":"coldref-/, '写回的必须是刚生成的那个冷引用 id')
+    // 2026-11-12 真机验收抓到的坑：这份写回**必须带 refresh=wait_for**。
+    // 文档索引 refresh_interval=5s，而「归档 → 立刻恢复」是常见序列；
+    // 不刷新时恢复那步的 search 读不到刚写的 cold_memory_id → 冷引用根本不会被删，
+    // 16b 等于没修。fake-ES 即时可见，所以只有这条断言能钉住它。
+    assert.deepEqual(
+      coldIdWrites.filter((c) => !c.url.includes('refresh=wait_for')).map((c) => c.url),
+      [],
+      '写 cold_memory_id 时不带 refresh=wait_for，归档后立刻恢复会读不到它（真机踩过）',
+    )
   } finally {
     await es.close()
   }
