@@ -30,9 +30,10 @@ list_presets() {
   local current
   # 必须用 bash 重新调本脚本：直接 python3 "$0" 会让 python 去解释 bash 脚本
   current=$(bash "$0" --read-current "$CONFIG" 2>/dev/null || echo '')
-  echo "可用预设（persona/）："
+  echo "可用预设（persona/presets/）："
   local f
-  for f in "$SEED_FILE" "$PRESET_DIR"/*.md; do
+  # 只列 presets：seed.md 是「当前默认实例」，不是预设条目（内容通常是其中一份的副本）
+  for f in "$PRESET_DIR"/*.md; do
     [ -f "$f" ] || continue
     local name chars first mark
     name="$(basename "$f" .md)"
@@ -40,7 +41,6 @@ list_presets() {
     # 用 python 按「字符」截断：cut -c 会切坏 UTF-8 多字节，终端里变成乱码
     first=$(python3 -c 'import sys;print(open(sys.argv[1],encoding="utf-8").readline().strip()[:46])' "$f")
     mark=""
-    [ "$name" = "seed" ] && name="seed(昔涟)"
     # 本机生效的那份：去掉所有空白后比对（配置里的块标量可能多/少空行，
     # 逐字节比会漏判；人格正文里空白不携带语义）
     if [ -n "$current" ] && [ "$(python3 -c '
@@ -50,7 +50,7 @@ print("1" if norm(open(sys.argv[1], encoding="utf-8").read()) == norm(sys.argv[2
 ' "$f" "$current")" = "1" ]; then
       mark="  ← 当前生效"
     fi
-    printf '  %-14s %5s 字  %s%s\n' "$name" "$chars" "$first" "$mark"
+    printf '  %-10s %5s 字  %s%s\n' "$name" "$chars" "$first" "$mark"
   done
   echo
   if [ -n "$current" ]; then
@@ -60,6 +60,18 @@ print("1" if norm(open(sys.argv[1], encoding="utf-8").read()) == norm(sys.argv[2
   else
     echo "当前本机生效：读不到配置里的 persona.seed（$CONFIG）"
   fi
+  # 仓库默认是发布用的「实例」：显示它现在等于哪份预设，避免只看文件分不清
+  local defaultTip defaultMatch
+  defaultTip=$(python3 -c 'import sys;print(open(sys.argv[1],encoding="utf-8").readline().strip()[:46])' "$SEED_FILE")
+  defaultMatch=""
+  for f in "$PRESET_DIR"/*.md; do
+    [ -f "$f" ] || continue
+    if cmp -s "$f" "$SEED_FILE"; then
+      defaultMatch=" = $(basename "$f" .md)"
+      break
+    fi
+  done
+  echo "仓库默认（persona/seed.md）：$defaultTip…${defaultMatch}"
   echo "切换：scripts/use-persona.sh <预设名>"
 }
 
@@ -122,13 +134,14 @@ for arg in "$@"; do
 done
 
 # 找预设：hutao → presets/hutao.md；xilian/seed → persona/seed.md
+# 预设只认 presets/ 下的文件；seed 是昔涟的历史别名（早期列表把它当预设名发出去过）
 case "$NAME" in
-  seed|xilian|昔涟) SRC="$SEED_FILE" ;;
+  seed|xilian|昔涟) SRC="$PRESET_DIR/xilian.md" ;;
   *) SRC="$PRESET_DIR/$NAME.md" ;;
 esac
 if [ ! -f "$SRC" ]; then
   echo "没有这个预设：$NAME" >&2
-  echo "可选：$(ls "$PRESET_DIR" | sed 's/\.md$//' | tr '\n' ' ')(另加 seed)" >&2
+  echo "可选：$(ls "$PRESET_DIR" | sed 's/\.md$//' | tr '\n' ' ')" >&2
   exit 2
 fi
 
@@ -222,9 +235,13 @@ then
   exit 1
 fi
 
-if [ "$ALSO_DEFAULT" = "1" ] && [ "$SRC" != "$SEED_FILE" ]; then
-  cp -p "$SRC" "$SEED_FILE"
-  echo "  仓库默认已更新：$SEED_FILE（--also-default）"
+if [ "$ALSO_DEFAULT" = "1" ]; then
+  if cmp -s "$SRC" "$SEED_FILE"; then
+    echo "  仓库默认已与目标一致，跳过复制"
+  else
+    cp -p "$SRC" "$SEED_FILE"
+    echo "  仓库默认已更新：$SEED_FILE（--also-default）"
+  fi
 fi
 echo
 echo "完成。本机配置监听会热生效，下一轮对话即换口吻。"

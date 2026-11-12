@@ -7,12 +7,16 @@
 
 | 文件 | 角色 | 性格一句话 |
 |---|---|---|
-| `seed.md` | 昔涟（Cyrene）· **当前默认** | 活过三千万次轮回的讲述者：温柔、能等、先接情绪再说事 |
+| `presets/xilian.md` | 昔涟（Cyrene） | 活过三千万次轮回的讲述者：温柔、能等、先接情绪再说事 |
 | `presets/hutao.md` | 胡桃（原神） | 白天讲冷笑话、夜里提灯送葬：吵是表，规矩和担当是里 |
 | `presets/dafeiyu.md` | 大肥鱼（DeepSeek 鲸鱼娘） | 认了自己叫「大肥鱼」的鲸鱼娘：软萌傲娇，干活超靠谱 |
+| `seed.md` | **当前仓库默认**（`persona.seed` 的实例） | 默认态 = 昔涟；用 `--also-default` 切换时会变成对应预设的副本 |
 
-三份都是**同一套六段结构**（内核 / 声音 / 三档语气 / 作为助手 / 场景 / 必须守住的边界），
+三份预设都是**同一套六段结构**（内核 / 声音 / 三档语气 / 作为助手 / 场景 / 必须守住的边界），
 所以换人格只换「味道」，工程纪律不缩水。
+
+> `seed.md` 不是第 4 份人格：它是「发布用实例」。默认态与 `presets/xilian.md` 内容相同，
+> 但改了预设不会自动同步过去——要同步得跑 `--also-default`。列表里会显示它当前等于哪份预设。
 
 ## 怎么用
 
@@ -21,6 +25,7 @@
 ```bash
 scripts/use-persona.sh                 # 列出预设，标出当前本机生效的是哪份
 scripts/use-persona.sh hutao           # 切到胡桃：只改本机配置，自动备份 + 校验
+scripts/use-persona.sh xilian          # 切回昔涟（别名：seed / 昔涟）
 scripts/use-persona.sh hutao --dry-run # 只看要做什么，不写文件
 scripts/use-persona.sh hutao --also-default  # 同时换掉仓库默认 persona/seed.md（发布用）
 scripts/use-persona.sh hutao --deploy  # 切换后分发到 125（需 PACK_HOST / PACK_SSH_KEY）
@@ -49,14 +54,18 @@ scripts/use-persona.sh hutao --deploy  # 切换后分发到 125（需 PACK_HOST 
 
 ## 只留一份
 
-**规格文档（`docs/昔涟-Cyrene-人设-v2.md`、`docs/胡桃-HuTao-人设-v1.md`、
-`docs/DeepSeek鲸鱼娘-大肥鱼-人设-v1.md`）只保留「为什么这么写」的证据与取舍，
-不再维护第二份精简版** ——两份都在用的文件迟早会漂移，模型读到冲突版本会左右摇摆。
-要改人格，改 preset，不要改文档里的旧附录。
+**人格正文的源头只有 `persona/presets/` 三份**：
+`seed.md` 是「当前默认」的发布实例（默认等于 `presets/xilian.md`），产物不是源头；
+规格文档（`docs/昔涟-Cyrene-人设-v2.md`、`docs/胡桃-HuTao-人设-v1.md`、
+`docs/DeepSeek鲸鱼娘-大肥鱼-人设-v1.md`）只保留「为什么这么写」的证据与取舍，不再维护第二份精简版。
+两份都在用的文件迟早会漂移，模型读到冲突版本会左右摇摆。要改人格，改 preset。
+
+**改完昔涟要同步两处**：`presets/xilian.md`（源头）→ `seed.md`（发布默认），
+用 `scripts/use-persona.sh xilian --also-default` 一次做完，别手工 cp。
 
 ## 写新预设的规范
 
-1. 结构照抄 `seed.md` 的六段，顺序不要变（模型对固定结构更稳）。
+1. 结构照抄 `presets/xilian.md` 的六段，顺序不要变（模型对固定结构更稳）。
 2. 目标 1000～1600 字：seed 每轮都进系统提示，是**固定成本**，只搬规则不搬素材（台词、考据、变更说明留在规格文档里）。
 3. 不写 Markdown 标题（`#`）、不写引用符（`>`）、不写列表符号之外的装饰；`【】` 分节即可。
 4. 三档语气必须齐（默认 / 干活 / 共感或认错），并写明**切换规则**与「哪一档禁止玩笑」。
