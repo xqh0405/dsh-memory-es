@@ -136,11 +136,11 @@ fi
 
 # 表情包：**只补缺**。用户可能改过某张图、加了自己的贴图、或删掉了不喜欢的，
 # 整目录替换会把这些全抹掉（旧版就是备份后覆盖），所以这里逐个文件判断存在性。
-if [ "$WITH_STICKERS" = "1" ] && [ -d "$HERE/stickers" ] && [ -f "$HERE/stickers/stickers.json" ]; then
-  echo "==> 4/4 表情包 → $DSH_HOME/stickers（只补缺，已有文件不动）"
+if [ "$WITH_STICKERS" = "1" ] && [ -d "$HERE/stickers" ] && [ -f "$HERE/stickers/xilian/stickers.json" ]; then
+  echo "==> 4/4 表情包 → $DSH_HOME/stickers/<人格>/（三套，只补缺，已有文件不动）"
   run mkdir -p "$DSH_HOME/stickers"
   if [ "$DRY_RUN" = "1" ]; then
-    echo "    [dry-run] 补缺 $(cd "$HERE/stickers" && find . -type f | wc -l | tr -d ' ') 个文件"
+    echo "    [dry-run] 补缺 $(cd "$HERE/stickers" && find . -type f | wc -l | tr -d ' ') 个文件（xilian/hutao/dafeiyu）"
   else
     added=0
     kept=0
@@ -155,6 +155,7 @@ if [ "$WITH_STICKERS" = "1" ] && [ -d "$HERE/stickers" ] && [ -f "$HERE/stickers
       added=$((added + 1))
     done < <(cd "$HERE/stickers" && find . -type f -print0)
     echo "    新增 ${added} 个；保留已有 ${kept} 个"
+    echo "    提示：把配置的 stickers.dir 指到 $DSH_HOME/stickers/xilian（或 hutao / dafeiyu）"
   fi
 else
   echo "==> 4/4 表情包：跳过"

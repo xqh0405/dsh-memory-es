@@ -10,7 +10,7 @@
 #     README-INSTALL.md
 #     plugin/                 ← 主插件（package.json + cordis.patch.yml + lib/）
 #     panel/                  ← 面板（含 cli/ 源码，面板「整理/导出」按钮要用）
-#     stickers/               ← 基础表情包（--no-stickers 可不打）
+#     stickers/               ← 三套表情包（xilian/hutao/dafeiyu，--no-stickers 可不打）
 #     es/                     ← ES 引导（评审 P0-3）：setup.sh + 自检 + compose 模板 + 引导脚本
 #
 # 用法：
@@ -85,9 +85,9 @@ cp -a panel/. "$STAGE/plugin/panel/"
 mkdir -p "$STAGE/plugin/panel/cli"
 cp -a consolidate src "$STAGE/plugin/panel/cli/"
 
-if [ "$WITH_STICKERS" = "1" ] && [ -f stickers/stickers.json ]; then
+if [ "$WITH_STICKERS" = "1" ] && [ -d persona/stickers/xilian ]; then
   mkdir -p "$STAGE/stickers"
-  cp -a stickers/. "$STAGE/stickers/"
+  cp -a persona/stickers/. "$STAGE/stickers/"
 fi
 
 cp -f scripts/install-package.sh "$STAGE/install.sh"

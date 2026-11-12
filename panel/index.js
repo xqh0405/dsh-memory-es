@@ -13,9 +13,10 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, extname, join } from 'node:path'
+import { basename, dirname, extname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { cliAvailable, runCli, summarize } from './cliRunner.js'
 import { createReadClient } from './es.js'
 
@@ -2835,6 +2836,322 @@ async function handleConfigWrite(ctx, res, req) {
   })
 }
 
+// ── 人格预设切换（阶段 34）──────────────────────────────────────────────
+/**
+ * 三份预设与三套贴图都在**插件包内**（`persona/presets`、`persona/stickers`），
+ * 打包与 deploy 时 persona/ 跟着插件走，所以按插件根推导，不硬编码绝对路径。
+ *
+ * 为什么不把 `stickers.dir` 加进 EDITABLE：读图接口能读 dir 下任意图片，一旦让它
+ * 自由可写，等于开了「读宿主任意目录图片」的口子。切换接口只接受「预设名」，
+ * 目标目录由服务端拼，客户端无法指定路径。
+ */
+const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const PRESET_DIR = join(PLUGIN_ROOT, 'persona', 'presets')
+const PRESET_STICKERS = join(PLUGIN_ROOT, 'persona', 'stickers')
+const PRESET_LABELS = { xilian: '昔涟', hutao: '胡桃', dafeiyu: '大肥鱼' }
+const PRESET_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/
+/** 恢复栈只留最近 3 次：再多也没人翻，而每次都是一份 1.4KB 的正文 */
+const PERSONA_PREV_LIMIT = 3
+
+/** 与 use-persona.sh 同一个判据：去掉所有空白再比，避免 YAML 折叠造成的假不等 */
+function normText(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 列出可用预设。只认 presets/ 目录里真实存在的 `.md`，名字再过一遍白名单正则，
+ * 这样客户端传什么都越不过目录边界（挡 `../`、绝对路径、非 md 文件）。
+ */
+function listPresets() {
+  let files
+  try {
+    files = readdirSync(PRESET_DIR)
+  } catch {
+    return []
+  }
+  const out = []
+  for (const file of files.sort()) {
+    if (!file.endsWith('.md')) continue
+    const name = file.slice(0, -3)
+    if (!PRESET_NAME_PATTERN.test(name)) continue
+    let body
+    try {
+      body = readFileSync(join(PRESET_DIR, file), 'utf8')
+    } catch {
+      continue
+    }
+    let stickerCount = 0
+    try {
+      const pack = JSON.parse(readFileSync(join(PRESET_STICKERS, name, 'stickers.json'), 'utf8'))
+      stickerCount = Array.isArray(pack.items) ? pack.items.length : 0
+    } catch {
+      stickerCount = 0
+    }
+    out.push({
+      name,
+      label: PRESET_LABELS[name] ?? name,
+      body,
+      chars: body.replace(/\s+/g, '').length,
+      firstLine: body.split('\n').find((line) => line.trim() !== '') ?? '',
+      stickers: stickerCount,
+    })
+  }
+  return out
+}
+
+function personaPrevPath() {
+  // 可用 MEMORY_ES_PERSONA_PREV 重定向（测试用）：否则单测会读写真实 ~/.dsh
+  return process.env.MEMORY_ES_PERSONA_PREV || join(DSH_HOME, 'memory-es', 'persona-prev.json')
+}
+
+function readPersonaPrev() {
+  try {
+    const rows = JSON.parse(readFileSync(personaPrevPath(), 'utf8'))
+    return Array.isArray(rows) ? rows.filter((row) => row && typeof row.seed === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writePersonaPrev(rows) {
+  try {
+    mkdirSync(dirname(personaPrevPath()), { recursive: true })
+    writeFileSync(personaPrevPath(), JSON.stringify(rows.slice(0, PERSONA_PREV_LIMIT), null, 1))
+    return ''
+  } catch (error) {
+    return String(error?.message ?? error)
+  }
+}
+
+/**
+ * 贴图根目录的推导：已是三套结构（`…/stickers/xilian`）取父目录，
+ * 平铺旧结构（`…/stickers`）就用它自己。容器与本机都适用，不必按环境写死。
+ */
+function resolveStickerRoot(currentDir) {
+  return Object.hasOwn(PRESET_LABELS, basename(currentDir)) ? dirname(currentDir) : currentDir
+}
+
+/**
+ * 把预设那一套图补进目标目录。**已存在的文件不覆盖**：用户可能换过某张图，
+ * 一次切换不该把他的手改动抹掉。返回新补的文件数。
+ */
+function copyStickers(source, target) {
+  let copied = 0
+  const walk = (rel) => {
+    const abs = rel === '' ? source : join(source, rel)
+    let entries
+    try {
+      entries = readdirSync(abs, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const next = rel === '' ? entry.name : join(rel, entry.name)
+      if (entry.isDirectory()) {
+        mkdirSync(join(target, next), { recursive: true })
+        walk(next)
+        continue
+      }
+      if (!entry.isFile()) continue
+      if (existsSync(join(target, next))) continue
+      mkdirSync(join(target, dirname(next)), { recursive: true })
+      copyFileSync(join(source, next), join(target, next))
+      copied += 1
+    }
+  }
+  mkdirSync(target, { recursive: true })
+  walk('')
+  return copied
+}
+
+/** 与 handleConfigWrite 同一套折叠补偿：configEditor 把多行串写成 `>`，单换行会丢 */
+function foldSeed(text) {
+  return String(text ?? '').replace(/\n(?!\n)/g, '\n\n')
+}
+
+/** 找到 `dsh-memory-es` 那一行（与 handleConfigWrite 同一匹配口径） */
+function findEntryTarget(editor) {
+  const rows = editor.configuration()
+  return rows.find((item) => {
+    const entry = item.entry ?? {}
+    return [entry.id, entry.name].some(
+      (label) => typeof label === 'string' && (label === ENTRY_ID || label.endsWith(`:${ENTRY_ID}`)),
+    )
+  })
+}
+
+/** 一次写入多个字段（seed / enabled / stickers.dir），复用手写配置的 merge 逻辑 */
+async function writeEntryConfig(ctx, pairs) {
+  const editor = ctx.configEditor
+  const target = findEntryTarget(editor)
+  if (!target) return { ok: false, error: `没有找到 ${ENTRY_ID} 的配置行，无法写入` }
+  const resolved = new Map(pairs.map((pair) => [pair.key, pair.value]))
+  const changes = pairs.map((pair) => ({ key: pair.key, value: pair.value, type: pair.type }))
+  try {
+    await editor.edit(target.entry, (current) => applyConfigChanges(current, changes, resolved))
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: `写入失败：${String(error?.message ?? error)}` }
+  }
+}
+
+/** 当前配置快照里的 seed 与贴图目录 */
+function currentPersonaState(ctx) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) return { ok: false, error: configRow.error }
+  return {
+    ok: true,
+    seed: str(configRow.value?.persona?.seed),
+    stickerDir: resolveStickerDir(configRow),
+    stickersEnabled: (configRow.value?.stickers?.enabled ?? true) !== false,
+  }
+}
+
+async function handlePersonaPresetsGet(ctx, res) {
+  const state = currentPersonaState(ctx)
+  if (!state.ok) return json(res, 503, { ok: false, error: state.error })
+  const presets = listPresets().map((preset) => ({
+    name: preset.name,
+    label: preset.label,
+    chars: preset.chars,
+    firstLine: preset.firstLine,
+    stickers: preset.stickers,
+    active: normText(preset.body) === normText(state.seed),
+  }))
+  const prev = readPersonaPrev()
+  json(res, 200, {
+    ok: true,
+    value: {
+      items: presets,
+      // 当前内核不是任何一份预设（手改过）时，前端要能说清楚「你切走就回不来」
+      custom: presets.length > 0 && presets.every((preset) => !preset.active),
+      stickerDir: state.stickerDir,
+      stickersEnabled: state.stickersEnabled,
+      prev: prev.map((row, index) => ({
+        index,
+        seedLength: normText(row.seed).length,
+        at: str(row.at),
+        stickerDir: str(row.stickerDir),
+      })),
+    },
+  })
+}
+
+async function handlePersonaSwitch(ctx, res, req) {
+  if (!requireAdmin(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  if (input.confirm !== true) return json(res, 400, { ok: false, error: '缺少 confirm:true' })
+
+  const name = str(input.name)
+  const preset = listPresets().find((item) => item.name === name)
+  if (!preset) return json(res, 400, { ok: false, error: `没有这个预设：${name === '' ? '（空）' : name}` })
+  if (preset.body.trim() === '') return json(res, 400, { ok: false, error: `预设 ${name} 是空的，拒绝写入` })
+  if (preset.body.length > 20000) {
+    return json(res, 400, { ok: false, error: `人格内核过长（${preset.body.length} 字，上限 20000）` })
+  }
+
+  const state = currentPersonaState(ctx)
+  if (!state.ok) return json(res, 503, { ok: false, error: state.error })
+
+  // 先补图、后写配置：复制失败就整单放弃，避免「配置指到空目录」
+  const withStickers = input.withStickers !== false && preset.stickers > 0
+  let stickerDir = ''
+  let copied = 0
+  if (withStickers) {
+    stickerDir = join(resolveStickerRoot(state.stickerDir), name)
+    try {
+      copied = copyStickers(join(PRESET_STICKERS, name), stickerDir)
+    } catch (error) {
+      return json(res, 500, {
+        ok: false,
+        error: `贴图复制失败，配置未改动：${String(error?.message ?? error)}`,
+      })
+    }
+  }
+
+  const pairs = [
+    { key: 'persona.seed', value: foldSeed(preset.body), type: 'string' },
+    { key: 'persona.enabled', value: true, type: 'boolean' },
+  ]
+  if (stickerDir !== '') pairs.push({ key: 'stickers.dir', value: stickerDir, type: 'string' })
+
+  const written = await writeEntryConfig(ctx, pairs)
+  if (!written.ok) return json(res, 500, { ok: false, error: written.error })
+
+  // 写前把「当前这份」压进恢复栈：手改过的内核切走后只有这里找得回来
+  const rememberWarn = writePersonaPrev([
+    { seed: state.seed, stickerDir: state.stickerDir, at: new Date().toISOString() },
+    ...readPersonaPrev(),
+  ])
+
+  // 写后校验：折叠加持下必须读回同一段文字，否则等于「点了切换但文件里还是旧的」
+  const after = currentPersonaState(ctx)
+  const savedOk = after.ok && normText(after.seed) === normText(preset.body)
+  json(res, 200, {
+    ok: true,
+    value: {
+      preset: name,
+      label: preset.label,
+      stickerDir,
+      copied,
+      // seed 与 stickers 都是每轮读配置/读 json，热生效；不写 restartRequired（那是 ES 连接参数的事）
+      nextTurn: true,
+      ...(savedOk ? {} : { warn: '写入后读回与预设不一致，请检查配置文件的 seed 段' }),
+      ...(rememberWarn === '' ? {} : { prevWarn: `恢复栈写入失败：${rememberWarn}` }),
+    },
+  })
+}
+
+async function handlePersonaRestore(ctx, res, req) {
+  if (!requireAdmin(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  if (input.confirm !== true) return json(res, 400, { ok: false, error: '缺少 confirm:true' })
+
+  const rows = readPersonaPrev()
+  if (rows.length === 0) return json(res, 404, { ok: false, error: '没有可恢复的上一份' })
+  const index = Number.isInteger(input.index) ? input.index : 0
+  const entry = rows[index]
+  if (!entry) return json(res, 400, { ok: false, error: `恢复栈里没有第 ${index} 条` })
+
+  const state = currentPersonaState(ctx)
+  if (!state.ok) return json(res, 503, { ok: false, error: state.error })
+
+  const pairs = [
+    { key: 'persona.seed', value: foldSeed(entry.seed), type: 'string' },
+    { key: 'persona.enabled', value: true, type: 'boolean' },
+  ]
+  if (str(entry.stickerDir) !== '') {
+    pairs.push({ key: 'stickers.dir', value: str(entry.stickerDir), type: 'string' })
+  }
+  const written = await writeEntryConfig(ctx, pairs)
+  if (!written.ok) return json(res, 500, { ok: false, error: written.error })
+
+  // 恢复也把「恢复前那份」压回去：误点一次不至于把当前版本弄丢
+  const rest = rows.filter((_, i) => i !== index)
+  const warn = writePersonaPrev([
+    { seed: state.seed, stickerDir: state.stickerDir, at: new Date().toISOString() },
+    ...rest,
+  ])
+
+  const after = currentPersonaState(ctx)
+  const savedOk = after.ok && normText(after.seed) === normText(entry.seed)
+  json(res, 200, {
+    ok: true,
+    value: {
+      restored: true,
+      index,
+      stickerDir: str(entry.stickerDir),
+      nextTurn: true,
+      ...(savedOk ? {} : { warn: '写入后读回与恢复内容不一致，请检查配置文件的 seed 段' }),
+      ...(warn === '' ? {} : { prevWarn: `恢复栈写入失败：${warn}` }),
+    },
+  })
+}
+
 /**
  * 探测「本人能不能删」：直接问 ES 的 `_has_privileges`，不看配置里的 teamWrite 声明。
  *
@@ -3000,6 +3317,44 @@ async function handleMaintenanceGet(ctx, res, url) {
       .then((r) => num(r.aggregations?.docs?.value)).catch(() => -1),
   ])
 
+  // 21b：文档库容量（已用 / 上限）。口径与 `src/memory/doc-archive.ts` 的
+  // `readDocCapacity` **逐字一致**：只计 `status=active`，按 `_source.content.length()`
+  // 求和、再 ×3 折算 UTF-8 上界（宁可早拦）。
+  // 面板刻意不 import 主插件产物（CA 路径、冷引用都各自实现过），所以这里是**第二份实现**
+  // ——改口径必须两处一起改；`tests/ca-path.test.ts` 的「同序断言」是同类做法。
+  // ⚠️ 面板拿到的是「配置行里显式写了什么」：没写 doc 段时 `config.doc` 是 undefined。
+  const docLimitBytes = (() => {
+    const raw = config.doc?.limitBytes
+    return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : 10 * 1024 * 1024
+  })()
+  const docCapacity = await client.search(docsIndex, {
+    size: 0,
+    track_total_hits: true,
+    query: { term: { status: 'active' } },
+    aggs: {
+      docs: { cardinality: { field: 'doc_id' } },
+      chars: {
+        sum: {
+          script: {
+            source:
+              '(params._source != null && params._source.content != null)'
+              + ' ? params._source.content.length() : 0',
+          },
+        },
+      },
+    },
+  }).then((r) => {
+    const usedBytes = Math.round(num(r.aggregations?.chars?.value) * 3)
+    return {
+      usedBytes,
+      activeChunks: num(r.hits?.total?.value),
+      activeDocs: num(r.aggregations?.docs?.value),
+      limitBytes: docLimitBytes,
+      // limitBytes=0 表示不限，永远不超限
+      overLimit: docLimitBytes > 0 && usedBytes > docLimitBytes,
+    }
+  }).catch(() => null)
+
   // 上次整理时间（CLI 的状态文件）
   let lastRunAt = ''
   let pendingCount = null
@@ -3059,6 +3414,8 @@ async function handleMaintenanceGet(ctx, res, url) {
     ok: true,
     value: {
       counts: { personal: counts[0], team: counts[1], pending: counts[2], docs: counts[3] },
+      // 21b：文档库容量（null = 聚合失败，前端显示 '-' 而不是 0，免得误读成"空的"）
+      docCapacity,
       // 统计对应的用户（前端用来确认"这些数字是谁的"）
       userId: targetUser,
       viewingOther: targetUser !== config.identity.userId,
@@ -3184,7 +3541,12 @@ async function setDocStatus(ctx, res, body, nextStatus) {
     if (coldMemoryId !== '') {
       for (const hit of updated) {
         try {
-          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId })
+          // ⚠️ `refresh: 'wait_for'` 不能省（2026-11-12 真机验收抓到）：
+          // 文档索引的 refresh_interval 是 5s，而「归档 → 立刻恢复」是常见操作序列。
+          // 不刷新的话，恢复那一步的 search 读不到刚写的 cold_memory_id →
+          // coldIds 为空 → 冷引用根本不会被删，16b 等于没修。
+          // fake-ES 即时可见，所以 81 条单测全都测不出这个 —— 只有真机能暴露。
+          await client.update(names.docs, hit._id, { cold_memory_id: coldMemoryId }, { refresh: 'wait_for' })
         } catch (error) {
           failures.push(`cold_memory_id@${hit._id}: ${String(error?.message ?? error).slice(0, 80)}`)
         }
@@ -3328,6 +3690,9 @@ async function handle(ctx, req, res) {
     // 管理员专用：列出有个人记忆的用户（浏览页/维护页切换目标用户）
     if (path === '/users' && req.method === 'GET') return await handleUsers(ctx, res)
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
+    // 阶段 34：切人格（同时换 stickers.dir）与「恢复上一份」——与 /config 同一条管理员门
+    if (path === '/persona/switch' && req.method === 'POST') return await handlePersonaSwitch(ctx, res, req)
+    if (path === '/persona/restore' && req.method === 'POST') return await handlePersonaRestore(ctx, res, req)
     // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
     if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
     if (path === '/memories/restore' && req.method === 'POST') return await handleRestoreMemory(ctx, res, req)
@@ -3351,6 +3716,8 @@ async function handle(ctx, req, res) {
     if (path === '/review/pending') return await handlePending(ctx, res, url)
     if (path === '/mood' && req.method === 'GET') return await handleMood(ctx, res)
     if (path === '/persona') return await handlePersonaGet(ctx, res)
+    // 阶段 34：人格预设切换（GET 列表 + 当前生效/恢复栈；写走 POST 两条，与 /config 同门）
+    if (path === '/persona/presets') return await handlePersonaPresetsGet(ctx, res)
     if (path === '/stickers') return await handleStickersGet(ctx, res)
     if (path === '/sticker') return await handleStickerImageGet(ctx, res, url)
     if (path === '/diary') return await handleDiaryGet(ctx, res, url)
@@ -3738,6 +4105,13 @@ export {
   handleExport,
   handleGraph,
   handleConfigWrite,
+  // 阶段 34：人格预设切换（导出给测试：目录白名单、恢复栈、贴图根推导都是易错点）
+  handlePersonaPresetsGet,
+  handlePersonaSwitch,
+  handlePersonaRestore,
+  listPresets,
+  resolveStickerRoot,
+  copyStickers,
   handleMaintenanceGet,
   handleMemories,
   handleRestoreMemory,

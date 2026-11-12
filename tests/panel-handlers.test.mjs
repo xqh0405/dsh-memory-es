@@ -9,6 +9,9 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const { pendingQuery, indexNames, mergeConfig, projectHit, entryLabels, findEntryRow, EDITABLE, classifyCluster, feedbackScript, classifyIdentityAction, summarizeInjectRecords, handleInjectLog } = await import(
   '../panel/index.js'
@@ -333,6 +336,8 @@ async function startFakeEs({
   sliceColdRef = null,
   failUpdateFor = null,
   coldRefFail = false,
+  /** 21b：文档库容量聚合里的字符总数（×3 折算字节）；改它就能构造「超限」 */
+  docChars = 1000,
 } = {}) {
   const calls = []
   const server = createServer((req, res) => {
@@ -389,7 +394,8 @@ async function startFakeEs({
         return send(200, {
           hits: { total: { value: 0 }, hits: [] },
           // docs: 维护页"文档数"的 cardinality 聚合（固定 42，方便断言它不再是占位）
-          aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 } },
+          // chars: 21b 容量聚合（×3 = usedBytes）；默认 1000 → 3000 B，不触发超限
+          aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 }, chars: { value: docChars } },
         })
       }
 
@@ -710,6 +716,15 @@ test('归档：全部切片成功 + 冷引用写入（否则归档等于失踪�
     assert.equal(statusWrites.length, 3, '3 个切片各写一次 status')
     assert.equal(coldIdWrites.length, 3, '3 个切片各写一次 cold_memory_id（16b）')
     assert.match(coldIdWrites[0].body, /"cold_memory_id":"coldref-/, '写回的必须是刚生成的那个冷引用 id')
+    // 2026-11-12 真机验收抓到的坑：这份写回**必须带 refresh=wait_for**。
+    // 文档索引 refresh_interval=5s，而「归档 → 立刻恢复」是常见序列；
+    // 不刷新时恢复那步的 search 读不到刚写的 cold_memory_id → 冷引用根本不会被删，
+    // 16b 等于没修。fake-ES 即时可见，所以只有这条断言能钉住它。
+    assert.deepEqual(
+      coldIdWrites.filter((c) => !c.url.includes('refresh=wait_for')).map((c) => c.url),
+      [],
+      '写 cold_memory_id 时不带 refresh=wait_for，归档后立刻恢复会读不到它（真机踩过）',
+    )
   } finally {
     await es.close()
   }
@@ -973,6 +988,43 @@ test('维护概览：带 user 时统计那个人的个人库', async () => {
     // 文档数不再是 '-'：接口要真的返回这个字段，且落到目标用户的文档索引
     assert.equal(body.value.counts.docs, 42)
     assert.ok(es.calls.some((c) => c.url.startsWith('/personal_doc_laoliu/_search')))
+  } finally {
+    await es.close()
+  }
+})
+
+test('21b 维护概览：返回文档库容量（已用 / 上限，超限有标记）', async () => {
+  const es = await startFakeEs({ docChars: 1000 })
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(SINGLE, es.url), res, new URL('http://x/maintenance'))
+    assert.equal(res.statusCode, 200)
+    const cap = JSON.parse(res.body).value.docCapacity
+    // 口径：chars ×3（UTF-8 上界）；1000 → 3000 B
+    assert.equal(cap.usedBytes, 3000)
+    // SINGLE 配置里没写 doc 段 → 取默认 10 MiB（面板拿到的是「显式写了什么」）
+    assert.equal(cap.limitBytes, 10 * 1024 * 1024)
+    assert.equal(cap.overLimit, false)
+    // 容量统计必须落到文档索引、且只算 active（否则归档过的文档会一直占着上限）。
+    // 注意维护页对同一个索引有两次 _search（篇数 / 容量），要挑带 status 的那次。
+    const call = es.calls.find(
+      (c) => c.url === '/personal_doc_xqh/_search' && c.body.includes('"status":"active"'),
+    )
+    assert.ok(call, '容量聚合要打到文档索引，且按 status=active 过滤')
+    assert.match(call.body, /"chars"/, '容量要带 chars 聚合（_source.content.length 求和）')
+  } finally {
+    await es.close()
+  }
+})
+
+test('21b 维护概览：超过上限时 overLimit=true（前端据此显示红字）', async () => {
+  // 4 Mi 字符 ×3 = 12 MiB 上界 > 默认 10 MiB
+  const es = await startFakeEs({ docChars: 4 * 1024 * 1024 })
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(SINGLE, es.url), res, new URL('http://x/maintenance'))
+    const cap = JSON.parse(res.body).value.docCapacity
+    assert.equal(cap.overLimit, true)
   } finally {
     await es.close()
   }
@@ -1622,5 +1674,136 @@ test('记忆浏览：空查询按时间排，不冒充名次（rank 仍给但有
     assert.equal(rows[0].score, undefined, '空查询不该有 score——前端据此隐藏名次')
   } finally {
     await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+// ── 阶段 34：人格预设切换 ─────────────────────────────────────────────
+/** 假 configEditor：把 edit 的结果写回行，写后校验才能读到「存下去的值」 */
+function presetFixture(overrides = {}) {
+  const row = {
+    entry: { id: 'dsh-memory-es' },
+    inherited: {
+      persona: { enabled: true, seed: '手改过的内核' },
+      stickers: { enabled: true, dir: '/tmp/sticker-root/xilian', maxPerTurn: 1 },
+      identity: { userId: 'xqh', username: 'mem-user-xqh', password: 'x', teamWrite: true },
+      ...overrides,
+    },
+    override: undefined,
+  }
+  const configEditor = {
+    configuration: () => [row],
+    edit: async (_entry, fn) => {
+      row.inherited = fn(row.inherited)
+    },
+  }
+  return { ctx: { configEditor, get: (name) => (name === 'configEditor' ? configEditor : undefined) }, row }
+}
+
+const readJsonReq = (value) => {
+  const handlers = {}
+  const req = {
+    on(event, fn) {
+      ;(handlers[event] ??= []).push(fn)
+      return req
+    },
+  }
+  queueMicrotask(() => {
+    const buf = Buffer.from(JSON.stringify(value))
+    for (const fn of handlers.data ?? []) fn(buf)
+    for (const fn of handlers.end ?? []) fn()
+  })
+  return req
+}
+
+test('listPresets：包内三份预设都能读到，且贴图张数来自各自的 stickers.json', async () => {
+  const { listPresets } = await import('../panel/index.js')
+  const presets = listPresets()
+  const names = presets.map((item) => item.name).sort()
+  assert.deepEqual(names, ['dafeiyu', 'hutao', 'xilian'])
+  const byName = Object.fromEntries(presets.map((item) => [item.name, item]))
+  assert.equal(byName.xilian.stickers, 23)
+  assert.equal(byName.hutao.stickers, 14)
+  assert.equal(byName.dafeiyu.stickers, 23)
+  assert.match(byName.hutao.firstLine, /胡桃/)
+})
+
+test('resolveStickerRoot：三套结构取父目录，平铺旧结构取自身', async () => {
+  const { resolveStickerRoot } = await import('../panel/index.js')
+  assert.equal(resolveStickerRoot('/data/dsh/stickers/xilian'), '/data/dsh/stickers')
+  assert.equal(resolveStickerRoot('/home/u/.dsh/stickers'), '/home/u/.dsh/stickers')
+  assert.equal(resolveStickerRoot('/data/dsh/stickers/unknown'), '/data/dsh/stickers/unknown')
+})
+
+test('handlePersonaSwitch：非管理员直接 403，且不写配置', async () => {
+  const { handlePersonaSwitch } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture({ identity: { userId: 'xqh', username: 'u', password: 'p', teamWrite: false } })
+  const before = JSON.stringify(row.inherited)
+  const res = fakeRes()
+  await handlePersonaSwitch(ctx, res, readJsonReq({ name: 'hutao', confirm: true }))
+  assert.equal(res.statusCode, 403)
+  assert.equal(JSON.stringify(row.inherited), before, '403 之后配置必须一个字节都没动')
+})
+
+test('handlePersonaSwitch：未知预设名 400（名字只能是 presets/ 里真实存在的）', async () => {
+  const { handlePersonaSwitch } = await import('../panel/index.js')
+  const { ctx } = presetFixture()
+  for (const name of ['../../../etc/passwd', 'seed', '', 'nope']) {
+    const res = fakeRes()
+    await handlePersonaSwitch(ctx, res, readJsonReq({ name, confirm: true }))
+    assert.equal(res.statusCode, 400, `${name} 应被拒绝，实际 ${res.statusCode}`)
+  }
+})
+
+test('handlePersonaSwitch：写入 seed + stickers.dir，并把切换前的内核压进恢复栈', async () => {
+  const { handlePersonaSwitch } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const prevFile = join(mkdtempSync(join(tmpdir(), 'persona-prev-')), 'persona-prev.json')
+  const oldEnv = process.env.MEMORY_ES_PERSONA_PREV
+  process.env.MEMORY_ES_PERSONA_PREV = prevFile
+  const stickerRoot = mkdtempSync(join(tmpdir(), 'sticker-root-'))
+  row.inherited.stickers.dir = join(stickerRoot, 'xilian')
+  try {
+    const res = fakeRes()
+    await handlePersonaSwitch(ctx, res, readJsonReq({ name: 'hutao', confirm: true, withStickers: true }))
+    assert.equal(res.statusCode, 200, res.body)
+    const saved = JSON.parse(res.body).value
+    assert.equal(saved.preset, 'hutao')
+    assert.equal(saved.nextTurn, true)
+    assert.match(row.inherited.persona.seed, /胡桃/, 'seed 应换成胡桃那份')
+    assert.equal(row.inherited.persona.enabled, true)
+    assert.equal(row.inherited.stickers.dir, join(stickerRoot, 'hutao'), 'dir 应跟着切到同名贴图包')
+    assert.equal(row.inherited.stickers.maxPerTurn, 1, '相邻字段不能被改坏')
+    // 恢复栈里第一条必须是切换前的内核
+    const prev = JSON.parse(readFileSync(prevFile, 'utf8'))
+    assert.equal(prev.length, 1)
+    assert.equal(prev[0].seed, '手改过的内核')
+    // 贴图确实补到了目标目录
+    assert.ok(existsSync(join(stickerRoot, 'hutao', 'stickers.json')))
+  } finally {
+    if (oldEnv === undefined) delete process.env.MEMORY_ES_PERSONA_PREV
+    else process.env.MEMORY_ES_PERSONA_PREV = oldEnv
+  }
+})
+
+test('handlePersonaRestore：空恢复栈 404；有记录时把内核与贴图一起写回', async () => {
+  const { handlePersonaRestore } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const prevFile = join(mkdtempSync(join(tmpdir(), 'persona-restore-')), 'persona-prev.json')
+  const oldEnv = process.env.MEMORY_ES_PERSONA_PREV
+  process.env.MEMORY_ES_PERSONA_PREV = prevFile
+  try {
+    const empty = fakeRes()
+    await handlePersonaRestore(ctx, empty, readJsonReq({ index: 0, confirm: true }))
+    assert.equal(empty.statusCode, 404, '没有恢复栈时必须是 404，不能假装成功')
+
+    writeFileSync(prevFile, JSON.stringify([{ seed: '上一份内核', stickerDir: '/tmp/sticker-root/xilian', at: 'x' }]))
+    const res = fakeRes()
+    await handlePersonaRestore(ctx, res, readJsonReq({ index: 0, confirm: true }))
+    assert.equal(res.statusCode, 200, res.body)
+    assert.match(row.inherited.persona.seed, /上一份内核/)
+    assert.equal(row.inherited.stickers.dir, '/tmp/sticker-root/xilian')
+  } finally {
+    if (oldEnv === undefined) delete process.env.MEMORY_ES_PERSONA_PREV
+    else process.env.MEMORY_ES_PERSONA_PREV = oldEnv
   }
 })

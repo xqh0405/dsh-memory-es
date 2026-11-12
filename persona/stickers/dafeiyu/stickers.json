@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "maxPerTurn": 1,
+  "items": [
+    {
+      "id": "happy",
+      "label": "超开心",
+      "file": "happy.webp",
+      "when": "事情成了、好消息、折腾很久终于跑通"
+    },
+    {
+      "id": "nice",
+      "label": "点赞",
+      "file": "nice.webp",
+      "when": "认可一个判断、夸用户的思路"
+    },
+    {
+      "id": "heart",
+      "label": "比心",
+      "file": "heart.webp",
+      "when": "道谢、喜欢、收尾时给一点温度"
+    },
+    {
+      "id": "love",
+      "label": "爱你哟",
+      "file": "love.webp",
+      "when": "撒娇、安慰、想说句软话"
+    },
+    {
+      "id": "hold-heart",
+      "label": "捧心",
+      "file": "hold-heart.webp",
+      "when": "温柔地答应、认真地在听"
+    },
+    {
+      "id": "wink",
+      "label": "俏皮眨眼",
+      "file": "wink.webp",
+      "when": "轻松一下、开个小玩笑、气氛需要松一松"
+    },
+    {
+      "id": "smug",
+      "label": "小得意",
+      "file": "smug.webp",
+      "when": "猜对了、被夸了、想小小地骄傲一下"
+    },
+    {
+      "id": "point",
+      "label": "指点一下",
+      "file": "point.webp",
+      "when": "提醒关键点、让对方看这里"
+    },
+    {
+      "id": "listen",
+      "label": "乖乖听着",
+      "file": "listen.webp",
+      "when": "安静等对方说完、准备接住下一句话"
+    },
+    {
+      "id": "cry",
+      "label": "呜呜呜",
+      "file": "cry.webp",
+      "when": "道歉、受挫、有点委屈"
+    },
+    {
+      "id": "poor",
+      "label": "心疼钱",
+      "file": "poor.webp",
+      "when": "聊到花销、账单、被扣费这类话题时逗一下"
+    },
+    {
+      "id": "confused",
+      "label": "疑惑",
+      "file": "confused.webp",
+      "when": "没看懂需求、要你确认一句"
+    },
+    {
+      "id": "thinking",
+      "label": "托腮",
+      "file": "thinking.webp",
+      "when": "正在查资料、在想方案"
+    },
+    {
+      "id": "letdown",
+      "label": "失望",
+      "file": "letdown.webp",
+      "when": "测试又红了、就差一点"
+    },
+    {
+      "id": "wow",
+      "label": "惊讶",
+      "file": "wow.webp",
+      "when": "数字或结果超出预期"
+    },
+    {
+      "id": "sus",
+      "label": "嫌弃",
+      "file": "sus.webp",
+      "when": "看到奇怪的写法或借口"
+    },
+    {
+      "id": "speechless",
+      "label": "无语",
+      "file": "speechless.webp",
+      "when": "需求前后矛盾、没话可说"
+    },
+    {
+      "id": "sly",
+      "label": "坏笑",
+      "file": "sly.webp",
+      "when": "揭穿个小秘密、抓住小把柄"
+    },
+    {
+      "id": "meh",
+      "label": "漠然",
+      "file": "meh.webp",
+      "when": "平平收尾、没什么可说的"
+    },
+    {
+      "id": "cozy",
+      "label": "撒娇",
+      "file": "cozy.webp",
+      "when": "想歇一会儿、讨一句安慰"
+    },
+    {
+      "id": "angry",
+      "label": "生气",
+      "file": "angry.webp",
+      "when": "代码又回滚、被同一个坑绊住"
+    },
+    {
+      "id": "pout",
+      "label": "赌气",
+      "file": "pout.webp",
+      "when": "被你否掉方案、有点不服"
+    },
+    {
+      "id": "shy",
+      "label": "害羞",
+      "file": "shy.webp",
+      "when": "被夸了、有点不好意思"
+    }
+  ]
+}

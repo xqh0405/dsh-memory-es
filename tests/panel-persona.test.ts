@@ -14,7 +14,8 @@ import { describe, test } from 'node:test'
 const SRC = readFileSync(new URL('../panel/client.js', import.meta.url), 'utf8')
 
 const personaSegment = (() => {
-  const start = SRC.indexOf('function Persona({ t })')
+  // 签名会随能力增长（阶段 34 加了 caps），这里只钉「组件存在」不钉参数表
+  const start = SRC.search(/function Persona\(\{[^}]*\}\)/)
   assert.ok(start > 0, '找不到 Persona 组件')
   const end = SRC.indexOf('function Identity({ t })', start)
   assert.ok(end > start, '找不到 Persona 之后的 Identity 组件')
