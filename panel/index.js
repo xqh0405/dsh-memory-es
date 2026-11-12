@@ -390,6 +390,26 @@ function requireAdmin(ctx, res) {
 }
 
 /**
+ * 「本人本机就能改」的那类操作（目前只有人格切换/恢复）的守卫。
+ *
+ * 人格**不是团队维护能力**：写入面被白名单锁死（persona.seed / persona.enabled /
+ * stickers.dir 三个键），目标只能是 persona/presets 里存在的预设，效果是这个容器
+ * 自己的提示词与贴图目录——碰不到任何人的记忆数据，也不改共享索引。
+ *
+ * 所以不要求 mem_admin。2026-11-12 实测：成员账号只有 mem_personal_rw_<uid>，
+ * 按 requireAdmin 守的结果是「人格页能打开、点切换恒 403」，成员完全用不了。
+ * 保留的最小前提只剩「配置行可读」——读不到就没有可写的目标。
+ */
+function requireLocalWrite(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) {
+    json(res, 503, { ok: false, error: configRow.error })
+    return null
+  }
+  return configRow.value
+}
+
+/**
  * 用户 id 白名单。索引名由 `personal_memory_<uid>` 拼出来，必须挡住 `*` `?` `../`
  * 这类会改变搜索范围的字符——否则管理员传 `user=*` 就等价于跨所有索引扫一遍。
  */
@@ -3038,7 +3058,7 @@ async function handlePersonaPresetsGet(ctx, res) {
 }
 
 async function handlePersonaSwitch(ctx, res, req) {
-  if (!requireAdmin(ctx, res)) return null
+  if (!requireLocalWrite(ctx, res)) return null
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
@@ -3105,7 +3125,7 @@ async function handlePersonaSwitch(ctx, res, req) {
 }
 
 async function handlePersonaRestore(ctx, res, req) {
-  if (!requireAdmin(ctx, res)) return null
+  if (!requireLocalWrite(ctx, res)) return null
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}

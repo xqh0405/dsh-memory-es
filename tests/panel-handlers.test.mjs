@@ -1734,14 +1734,34 @@ test('resolveStickerRoot：三套结构取父目录，平铺旧结构取自身',
   assert.equal(resolveStickerRoot('/data/dsh/stickers/unknown'), '/data/dsh/stickers/unknown')
 })
 
-test('handlePersonaSwitch：非管理员直接 403，且不写配置', async () => {
+test('handlePersonaSwitch：普通成员账号（无 mem_admin）也能切——人格是本机偏好，不是团队维护', async () => {
+  // 2026-11-12 反转：原来这里断言 403。但人格写入面被白名单锁死（persona.seed /
+  // persona.enabled / stickers.dir），目标只能是 presets 里存在的预设，效果是本容器
+  // 自己的提示词与贴图——碰不到记忆数据。而成员账号只有 mem_personal_rw_<uid>，
+  // 按 mem_admin 守的结果是「人格页能打开、点切换恒 403」，成员完全用不了。
   const { handlePersonaSwitch } = await import('../panel/index.js')
-  const { ctx, row } = presetFixture({ identity: { userId: 'xqh', username: 'u', password: 'p', teamWrite: false } })
-  const before = JSON.stringify(row.inherited)
+  const { ctx, row } = presetFixture({ identity: { userId: 'chencan', username: 'mem-user-chencan', password: 'p', teamWrite: false } })
+  const oldEnv = process.env.MEMORY_ES_PERSONA_PREV
+  const prevFile = join(mkdtempSync(join(tmpdir(), 'persona-reader-')), 'persona-prev.json')
+  process.env.MEMORY_ES_PERSONA_PREV = prevFile
+  try {
+    const res = fakeRes()
+    await handlePersonaSwitch(ctx, res, readJsonReq({ name: 'hutao', confirm: true, withStickers: false }))
+    assert.equal(res.statusCode, 200, res.body)
+    assert.match(row.inherited.persona.seed, /胡桃/, '普通账号切换也必须真的写进去')
+    assert.equal(JSON.parse(res.body).value.nextTurn, true, '人格是热生效，不要求重启')
+  } finally {
+    if (oldEnv === undefined) delete process.env.MEMORY_ES_PERSONA_PREV
+    else process.env.MEMORY_ES_PERSONA_PREV = oldEnv
+  }
+})
+
+test('handlePersonaSwitch：配置行读不到时 503（放宽到本人可写，但仍要有可写目标）', async () => {
+  const { handlePersonaSwitch } = await import('../panel/index.js')
   const res = fakeRes()
-  await handlePersonaSwitch(ctx, res, readJsonReq({ name: 'hutao', confirm: true }))
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.stringify(row.inherited), before, '403 之后配置必须一个字节都没动')
+  await handlePersonaSwitch({ get: () => undefined }, res, readJsonReq({ name: 'hutao', confirm: true }))
+  assert.equal(res.statusCode, 503, res.body)
+  assert.match(JSON.parse(res.body).error, /configEditor|配置/)
 })
 
 test('handlePersonaSwitch：未知预设名 400（名字只能是 presets/ 里真实存在的）', async () => {
