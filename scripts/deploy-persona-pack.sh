@@ -15,6 +15,8 @@ set -euo pipefail
 # 目标主机必填（仓库里不写真实内网地址）；留空走 ssh 默认配置的私钥
 HOST="${PACK_HOST:?请用 PACK_HOST=user@host 指定目标主机}"
 SSH_KEY="${PACK_SSH_KEY:-}"
+# 三套贴图一起分发，但容器的 stickers.dir 指向哪套由 PACK_PERSONA 决定
+PACK_PERSONA="${PACK_PERSONA:-xilian}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no)
 if [ -n "$SSH_KEY" ]; then SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}"); fi
@@ -28,11 +30,12 @@ echo "==> 打包主插件"
 # 所以 panel 必须一起带上（它只是几个 JS + locale，不增加依赖）。
 tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib panel persona package.json cordis.patch.yml
 
-echo "==> 打包表情包"
-if [ -d "$REPO_ROOT/stickers" ]; then
-  tar -czf "$work/stickers.tgz" -C "$REPO_ROOT" stickers
+echo "==> 打包表情包（三套：xilian / hutao / dafeiyu）"
+if [ -d "$REPO_ROOT/persona/stickers" ]; then
+  # 打进 tar 的路径是 stickers/，远程解到 /data/dsh 即 /data/dsh/stickers/<name>/
+  tar -czf "$work/stickers.tgz" -C "$REPO_ROOT/persona" stickers
 else
-  echo "  ! 仓库里没有 stickers/，退回本机 ~/.dsh/stickers"
+  echo "  ! 仓库里没有 persona/stickers/，退回本机已装目录"
   tar -czf "$work/stickers.tgz" -C "$HOME/.dsh" stickers
 fi
 
@@ -50,7 +53,7 @@ PY
 
 scp -q "${SSH_OPTS[@]}" "$work/plugin.tgz" "$work/stickers.tgz" "$work/seed.txt" "$HOST:/tmp/"
 
-ssh "${SSH_OPTS[@]}" "$HOST" bash -s -- "$@" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$HOST" "PACK_PERSONA='${PACK_PERSONA}' bash -s" -- "$@" <<'REMOTE'
 set -euo pipefail
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
@@ -87,8 +90,8 @@ for c in "${targets[@]}"; do
   # 为什么 seed 不能"已有就跳过"：人格内核会随版本更新，跳过等于把每个容器永远
   # 钉在第一次部署的那一版（2026-11-12 踩过：11 个容器全是旧口吻，脚本却报"跳过"）。
   docker exec "$c" cat /data/dsh/profiles/web/cordis.patch.yml > "/tmp/$c.yml"
-  python3 - "/tmp/$c.yml" <<'PY'
-import re, sys
+  STICKER_DIR="/data/dsh/stickers/$PACK_PERSONA" python3 - "/tmp/$c.yml" <<'PY'
+import os, re, sys
 path = sys.argv[1]
 seed = open('/tmp/seed.txt').read()
 lines = open(path).read().split('\n')
@@ -118,10 +121,16 @@ else:
     body = body.rstrip('\n') + '\n    persona:\n      enabled: true\n' + seed_block
     changed.append('加 persona 段')
 
-# ② stickers 只补缺：容器里可能改过 dir/maxPerTurn，不覆盖
+# ② stickers 段不存在就补；存在则只改 dir（跟人格一起切），enabled/maxPerTurn 不动
+target_dir = os.environ.get('STICKER_DIR', '/data/dsh/stickers/xilian')
 if not re.search(r'^    stickers:', body, re.M):
-    body = body.rstrip('\n') + '\n    stickers:\n      enabled: true\n      dir: /data/dsh/stickers\n      maxPerTurn: 1\n'
+    body = body.rstrip('\n') + '\n    stickers:\n      enabled: true\n      dir: ' + target_dir + '\n      maxPerTurn: 1\n'
     changed.append('补 stickers')
+else:
+    m = re.search(r'^(      dir: )\S+\s*$', body, re.M)
+    if m and m.group(1):
+        body = body[:m.start()] + '      dir: ' + target_dir + body[m.end():]
+        changed.append('切 stickers.dir')
 
 out = lines[:start] + body.split('\n') + lines[stop:]
 open(path, 'w').write('\n'.join(out))

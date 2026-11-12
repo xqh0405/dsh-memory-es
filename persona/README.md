@@ -11,6 +11,7 @@
 | `presets/hutao.md` | 胡桃（原神） | 白天讲冷笑话、夜里提灯送葬：吵是表，规矩和担当是里 |
 | `presets/dafeiyu.md` | 大肥鱼（DeepSeek 鲸鱼娘） | 认了自己叫「大肥鱼」的鲸鱼娘：软萌傲娇，干活超靠谱 |
 | `seed.md` | **当前仓库默认**（`persona.seed` 的实例） | 默认态 = 昔涟；用 `--also-default` 切换时会变成对应预设的副本 |
+| `stickers/<name>/` | **贴图包**（与人格同名） | xilian 23 张 / hutao 14 张 / dafeiyu 23 张，见 [stickers/README](stickers/README.md) |
 
 三份预设都是**同一套六段结构**（内核 / 声音 / 三档语气 / 作为助手 / 场景 / 必须守住的边界），
 所以换人格只换「味道」，工程纪律不缩水。
@@ -23,16 +24,21 @@
 ### 方式 A：一键切换（推荐）
 
 ```bash
-scripts/use-persona.sh                 # 列出预设，标出当前本机生效的是哪份
-scripts/use-persona.sh hutao           # 切到胡桃：只改本机配置，自动备份 + 校验
+scripts/use-persona.sh                 # 列出预设与贴图，标出当前生效的
+scripts/use-persona.sh hutao           # 切到胡桃：人格 + 贴图一起换
 scripts/use-persona.sh xilian          # 切回昔涟（别名：seed / 昔涟）
+scripts/use-persona.sh hutao --seed-only      # 只换人格，贴图不动
+scripts/use-persona.sh hutao --stickers-only  # 只换贴图，人格不动
 scripts/use-persona.sh hutao --dry-run # 只看要做什么，不写文件
 scripts/use-persona.sh hutao --also-default  # 同时换掉仓库默认 persona/seed.md（发布用）
 scripts/use-persona.sh hutao --deploy  # 切换后分发到 125（需 PACK_HOST / PACK_SSH_KEY）
 ```
 
-脚本只改 profile 配置里的 `persona.seed`（热生效），并打印备份路径；写坏了按提示 `cp` 回去即可。
+脚本只改 profile 配置（`persona.seed` 与 `stickers.dir`，热生效），并打印备份路径；写坏了按提示 `cp` 回去即可。
 它不会自作主张改仓库默认——那是发布动作，要显式 `--also-default`。
+
+贴图与人格**同名配套**：`persona/stickers/<name>/`，切人格时 `stickers.dir` 自动指向
+`<贴图根>/<name>`（本机根默认 `~/.dsh/stickers`）。三套的图与来源见 [stickers/README](stickers/README.md)。
 
 ### 方式 B：手工粘贴（没有脚本时）
 
