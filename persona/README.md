@@ -16,25 +16,28 @@
 
 ## 怎么用
 
-### 方式 A：直接贴进配置（最常用）
+### 方式 A：一键切换（推荐）
+
+```bash
+scripts/use-persona.sh                 # 列出预设，标出当前本机生效的是哪份
+scripts/use-persona.sh hutao           # 切到胡桃：只改本机配置，自动备份 + 校验
+scripts/use-persona.sh hutao --dry-run # 只看要做什么，不写文件
+scripts/use-persona.sh hutao --also-default  # 同时换掉仓库默认 persona/seed.md（发布用）
+scripts/use-persona.sh hutao --deploy  # 切换后分发到 125（需 PACK_HOST / PACK_SSH_KEY）
+```
+
+脚本只改 profile 配置里的 `persona.seed`（热生效），并打印备份路径；写坏了按提示 `cp` 回去即可。
+它不会自作主张改仓库默认——那是发布动作，要显式 `--also-default`。
+
+### 方式 B：手工粘贴（没有脚本时）
 
 1. 打开 `~/.dsh/profiles/web/cordis.patch.yml`
 2. 找到 `persona:` 段的 `seed: |+`
 3. 把预设文件**全文**粘到 `seed: |+` 下面，保持 8 空格缩进（与文件内容一致地整体右移）
 4. 保存即热生效（配置监听），下一轮对话换口吻
 
-### 方式 B：换掉仓库默认（要分发时才用）
-
-```bash
-cp persona/presets/hutao.md persona/seed.md
-# 本机生效：把同一份内容同步到 profile 配置的 persona.seed，然后
-bash scripts/sync-local-plugin.sh
-# 125 各容器分发：
-PACK_HOST=root@<host> PACK_SSH_KEY=~/.ssh/<key> bash scripts/deploy-persona-pack.sh
-```
-
 > ⚠️ `deploy-persona-pack.sh` 取的是**本机 profile 配置里的 seed**，不是仓库这份。
-> 仓库 `persona/seed.md` 只是「新装默认」，本机真相在配置里——改人格必须两处一致。
+> 仓库 `persona/seed.md` 只是「新装默认」，本机真相在配置里——两处不一致时以配置为准。
 
 ## 三处生效位置（别混）
 
