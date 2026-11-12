@@ -162,6 +162,22 @@ window.__ModuleLoader__.load({
       personaStickerLimit: '单次最多',
       personaStickerMissing: '文件缺失',
       personaStickerNone: '这个目录里没有 stickers.json（图片不进仓库，要自己放）',
+      // 阶段 34：人格预设切换
+      personaPreset: '预设',
+      personaPresetActive: '当前',
+      personaPresetSwitch: '切换',
+      personaPresetConfirm: '把人格内核换成',
+      personaPresetConfirmStickers: '贴图会一起换。',
+      personaPresetStickers: '贴图一起换',
+      personaPresetStickersHint: '勾选后同时把 stickers.dir 指向同名贴图包（已有的图不覆盖）',
+      personaPresetDone: '已切换，下一轮对话生效',
+      personaPresetNow: '当前生效：',
+      personaPresetCustom: '当前内核是手改的（不属于任何预设），切走后可用「恢复上一份」找回',
+      personaStickersNow: '贴图目录：',
+      personaRestore: '恢复上一份',
+      personaRestoreHint: '把内核与贴图恢复成最近一次切换前的那一份',
+      personaRestoreConfirm: '把人格内核恢复成最近一次切换前的那一份？',
+      personaRestoreDone: '已恢复，下一轮对话生效',
       stickerAdd: '添加',
       stickerAddFile: '图片',
       stickerAddFileHint: 'PNG / JPEG / WebP / GIF，单张不超过 5 MiB',
@@ -514,6 +530,21 @@ window.__ModuleLoader__.load({
       personaStickerLimit: 'Max per reply',
       personaStickerMissing: 'missing',
       personaStickerNone: 'No stickers.json in that directory (images are not shipped).',
+      personaPreset: 'Preset',
+      personaPresetActive: 'active',
+      personaPresetSwitch: 'Switch',
+      personaPresetConfirm: 'Replace the persona core with',
+      personaPresetConfirmStickers: 'Stickers switch too.',
+      personaPresetStickers: 'Switch stickers',
+      personaPresetStickersHint: 'Also point stickers.dir at the matching pack (existing images are kept)',
+      personaPresetDone: 'Switched, takes effect next turn',
+      personaPresetNow: 'Active: ',
+      personaPresetCustom: 'Current core was hand-edited (matches no preset); use "Restore previous" to get it back',
+      personaStickersNow: 'Sticker dir: ',
+      personaRestore: 'Restore previous',
+      personaRestoreHint: 'Restore the core and stickers from before the last switch',
+      personaRestoreConfirm: 'Restore the persona core from before the last switch?',
+      personaRestoreDone: 'Restored, takes effect next turn',
       stickerAdd: 'Add',
       stickerAddFile: 'Image',
       stickerAddFileHint: 'PNG / JPEG / WebP / GIF, up to 5 MiB each',
@@ -3354,7 +3385,7 @@ window.__ModuleLoader__.load({
      *   表情包 / 日记     = 折叠（这是"证据与足迹"，需要时再翻）
      * 标题行常驻，看一眼就知道有多少条，不用展开去数。
      */
-    function Persona({ t }) {
+    function Persona({ t, caps }) {
       const [persona, setPersona] = React.useState({ loading: true, data: null, error: '' })
       const [stickers, setStickers] = React.useState(null)
       const [diary, setDiary] = React.useState({ loading: true, rows: [], journals: [], error: '' })
@@ -3364,6 +3395,12 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState('')
       const [saving, setSaving] = React.useState(false)
       const [saveMsg, setSaveMsg] = React.useState('')
+      // 阶段 34：预设切换（列表 + 选中项 + 忙碌态）。presets 为空 = 包内没有预设，整条不渲染
+      const [presets, setPresets] = React.useState({ items: [], custom: false, prev: [], stickerDir: '' })
+      const [switchName, setSwitchName] = React.useState('')
+      const [switching, setSwitching] = React.useState(false)
+      const [switchMsg, setSwitchMsg] = React.useState('')
+      const [withStickers, setWithStickers] = React.useState(true)
       // 折叠状态：默认只收起表情包与日记
       const [openKeys, setOpenKeys] = React.useState({ stickers: false, diary: false })
       const toggle = (key) => setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -3378,6 +3415,20 @@ window.__ModuleLoader__.load({
         apiGet('/persona')
           .then((value) => setPersona({ loading: false, data: value, error: '' }))
           .catch((error) => setPersona({ loading: false, data: null, error: String(error.message ?? error) }))
+        // 预设列表：读不到就整条不显示（旧宿主没有这个接口时页面照常可用）
+        apiGet('/persona/presets')
+          .then((value) => {
+            const items = Array.isArray(value.items) ? value.items : []
+            setPresets({
+              items,
+              custom: Boolean(value.custom),
+              prev: Array.isArray(value.prev) ? value.prev : [],
+              stickerDir: typeof value.stickerDir === 'string' ? value.stickerDir : '',
+            })
+            const activeItem = items.find((item) => item.active)
+            setSwitchName((prev) => prev || (activeItem ? activeItem.name : items[0]?.name ?? ''))
+          })
+          .catch(() => setPresets({ items: [], custom: false, prev: [], stickerDir: '' }))
         apiGet('/stickers')
           .then((value) => setStickers(value))
           .catch(() => setStickers(null))
@@ -3444,6 +3495,44 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => setSaveMsg(`${t('error')}: ${String(error.message ?? error)}`))
           .finally(() => setSaving(false))
+      }
+
+      /**
+       * 阶段 34：切预设 = 一次写 seed + stickers.dir。
+       * 覆盖前必须问：当前内核若不是任何预设（custom），切走就只能靠恢复栈找回。
+       */
+      const switchPreset = () => {
+        const target = presets.items.find((item) => item.name === switchName)
+        if (!target) return
+        const ask = `${t('personaPresetConfirm')}「${target.label}」？${withStickers ? t('personaPresetConfirmStickers') : ''}`
+        if (typeof window !== 'undefined' && !window.confirm(ask)) return
+        setSwitching(true)
+        setSwitchMsg('')
+        apiPost('/persona/switch', { name: target.name, confirm: true, withStickers })
+          .then((value) => {
+            setSwitchMsg(
+              value?.warn
+                ? `${t('personaPresetDone')} · ${value.warn}`
+                : `${t('personaPresetDone')}（${target.label}${withStickers ? ` · ${t('personaPresetStickers')} ${target.stickers}` : ''}）`,
+            )
+            load()
+          })
+          .catch((error) => setSwitchMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setSwitching(false))
+      }
+
+      /** 恢复上一份：恢复栈里第 0 条（最近一次切换前的那份） */
+      const restorePrev = (index = 0) => {
+        if (typeof window !== 'undefined' && !window.confirm(t('personaRestoreConfirm'))) return
+        setSwitching(true)
+        setSwitchMsg('')
+        apiPost('/persona/restore', { index, confirm: true })
+          .then((value) => {
+            setSwitchMsg(value?.warn ? `${t('personaRestoreDone')} · ${value.warn}` : t('personaRestoreDone'))
+            load()
+          })
+          .catch((error) => setSwitchMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setSwitching(false))
       }
 
       /** 卡片外壳。expandable=true 时标题行可点，正文按 openKeys 收起。 */
@@ -3553,10 +3642,83 @@ window.__ModuleLoader__.load({
               children: seed,
             })
 
+      // ── 阶段 34：预设切换条（仅管理员 + 仅非编辑态）────────────────────
+      // 放正文顶部而不是标题行右侧：下拉 + 按钮 + 复选框 + 生效提示挤不进标题行
+      const activePreset = presets.items.find((item) => item.active) ?? null
+      const presetRow = caps?.canAdmin && !editing && presets.items.length > 0
+        ? h('div', null,
+            h('div', {
+              style: {
+                display: 'flex',
+                gap: 8,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                padding: '8px 10px',
+                marginBottom: 8,
+                borderRadius: 8,
+                background: 'var(--dsw-alias-bg-l2)',
+              },
+            },
+              h('span', { style: { ...S.muted, fontSize: 12 } }, t('personaPreset')),
+              h('select', {
+                value: switchName,
+                disabled: switching,
+                onChange: (event) => setSwitchName(event.target.value),
+                style: {
+                  padding: '3px 6px',
+                  borderRadius: 6,
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  background: 'var(--dsw-alias-bg-l1)',
+                  color: 'var(--dsw-alias-label-primary)',
+                  fontSize: 12,
+                },
+              }, presets.items.map((item) =>
+                h('option', { key: item.name, value: item.name },
+                  // 只报图数：预设字数（去空白）与标题里的 seed 字数（含换行）口径不同，
+                  // 两个数字并排会让人以为切换没成功（1366 vs 1504 那种）
+                  `${item.label}${item.active ? ` · ${t('personaPresetActive')}` : ''}（${item.stickers} 图）`))),
+              h('button', {
+                type: 'button',
+                style: { ...S.btn, flexShrink: 0 },
+                disabled: switching,
+                onClick: switchPreset,
+              }, switching ? '…' : t('personaPresetSwitch')),
+              h('label', {
+                style: { display: 'flex', gap: 4, alignItems: 'center', fontSize: 12, cursor: 'pointer' },
+                title: t('personaPresetStickersHint'),
+              },
+                h('input', {
+                  type: 'checkbox',
+                  checked: withStickers,
+                  disabled: switching,
+                  onChange: (event) => setWithStickers(event.target.checked),
+                }),
+                t('personaPresetStickers')),
+              presets.prev.length > 0
+                ? h('button', {
+                    type: 'button',
+                    style: { ...S.btn, flexShrink: 0 },
+                    disabled: switching,
+                    title: t('personaRestoreHint'),
+                    onClick: () => restorePrev(0),
+                  }, t('personaRestore'))
+                : null,
+            ),
+            h('div', { style: { ...S.muted, fontSize: 11.5, marginBottom: 8 } },
+              activePreset
+                ? `${t('personaPresetNow')}${activePreset.label}`
+                : (presets.custom ? t('personaPresetCustom') : ''),
+              presets.stickerDir === '' ? '' : ` · ${t('personaStickersNow')}${presets.stickerDir}`),
+            switchMsg === ''
+              ? null
+              : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: switchMsg }))
+        : null
+
       const kernelCard = card(
         t('personaKernel'),
         seed.trim() === '' ? t('personaKernelHint') : `${data.seedLength || seed.length} 字 · ${seedLines} 行 · ${data.enabled === false ? '已关闭' : '已启用'}`,
         h('div', null,
+          presetRow,
           saveMsg === ''
             ? null
             : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: saveMsg }),
@@ -5115,7 +5277,7 @@ window.__ModuleLoader__.load({
           : tab === 'identity'
           ? h(Identity, { t })
           : tab === 'persona'
-          ? h(Persona, { t })
+          ? h(Persona, { t, caps })
           : tab === 'searchlog'
           ? h(SearchLog, { t })
           : tab === 'inject'
