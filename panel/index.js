@@ -383,7 +383,13 @@ function requireAdmin(ctx, res) {
     return null
   }
   if (!canReviewTeam(configRow.value.identity)) {
-    json(res, 403, { ok: false, error: '只有团队管理员可以使用维护功能（账号需要 mem_admin 角色）' })
+    // 文案要写真实判据：canReviewTeam 看的是 identity.teamWrite 或 consolidator 凭据，
+    // 与 mem_admin 这个角色名无关。写错会让人照错方向查（2026-11-12 实测踩过：
+    // 成员切不了人格，误以为是「没 mem_admin 角色」，真因是 teamWrite=false）。
+    json(res, 403, {
+      ok: false,
+      error: '只有团队管理员可以使用维护功能（判据：identity.teamWrite=true，或配 consolidatorUsername/Password）',
+    })
     return null
   }
   return configRow.value
