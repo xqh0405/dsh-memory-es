@@ -26,7 +26,7 @@ echo "==> 打包主插件"
 # 0.3.0 起插件与面板是一个包，cordis.patch.yml 里两条条目（主插件 + 面板宿主）：
 # 只推 lib 会让第二条解析不到 dsh-memory-es/panel，容器启动就报「1 entry did not activate」，
 # 所以 panel 必须一起带上（它只是几个 JS + locale，不增加依赖）。
-tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib panel package.json cordis.patch.yml
+tar -czf "$work/plugin.tgz" -C "$REPO_ROOT" lib panel persona package.json cordis.patch.yml
 
 echo "==> 打包表情包"
 if [ -d "$REPO_ROOT/stickers" ]; then
@@ -40,7 +40,7 @@ echo "==> 取人格内核（本机配置里的 seed 正文）"
 python3 - "$work/seed.txt" <<'PY'
 import os, re, sys
 src = open(os.path.expanduser('~/.dsh/profiles/web/cordis.patch.yml')).read()
-m = re.search(r'^      seed: [|>]\n((?:(?:        .*)?\n)+)', src, re.M)
+m = re.search(r'^      seed: [|>][+-]?\n((?:(?:        .*)?\n)+)', src, re.M)
 if not m:
     sys.exit('本机配置里没有 persona.seed，先确认本机的人格内核')
 out = '\n'.join(l[8:] if l.startswith('        ') else '' for l in m.group(1).rstrip('\n').split('\n'))
@@ -71,6 +71,11 @@ for c in "${targets[@]}"; do
       [ -d "$d" ] || { echo "  跳过（不存在）: $d"; continue; }
       rm -rf "$d/lib"
       cp -a /tmp/mem-plugin/lib "$d/lib"
+      # persona/ 是内置人格：容器里若删掉配置段就会回落到它，不同步等于回落旧口吻
+      if [ -d /tmp/mem-plugin/persona ]; then
+        rm -rf "$d/persona"
+        cp -a /tmp/mem-plugin/persona "$d/persona"
+      fi
       cp -f /tmp/mem-plugin/package.json "$d/package.json"
       chown -R node:node "$d"
     done
@@ -100,7 +105,7 @@ seed_block = '      seed: |\n' + seed_body + '\n'
 
 changed = []
 # ① seed 已存在 → 替换整块正文（吞掉 8 空格缩进行与空行，直到下一个 key）
-m = re.search(r'^      seed: [|>]\n(?:        .*\n|\n)*', body, re.M)
+m = re.search(r'^      seed: [|>][+-]?\n(?:        .*\n|\n)*', body, re.M)
 if m:
     body = body[:m.start()] + seed_block + body[m.end():]
     changed.append('替换 seed')
