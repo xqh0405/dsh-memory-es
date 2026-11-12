@@ -172,6 +172,17 @@ test('capabilities：普通账号 canReview=false、role=reader', async () => {
   assert.equal(body.value.role, 'reader')
 })
 
+test('capabilities：普通账号 canPersona=true（人格是本机偏好，前端靠它决定画不画切换条）', async () => {
+  // 2026-11-12 补：后端把人切换的守卫从 requireAdmin 降到 requireLocalWrite 之后，
+  // 前端仍用 caps.canAdmin 守整个切换条 → 成员看到「没有选择的地方」。
+  // 所以 canPersona 必须与 canAdmin 解耦，并且对普通账号也为 true。
+  const res = fakeRes()
+  await handleCapabilities(ctxWith(READER), res)
+  const body = JSON.parse(res.body)
+  assert.equal(body.value.canPersona, true, '普通账号也要能切人格')
+  assert.equal(body.value.canAdmin, false, '但维护页仍要挡住')
+})
+
 test('capabilities：配了整理身份 canReview=true、role=reviewer', async () => {
   const res = fakeRes()
   await handleCapabilities(ctxWith(ADMIN), res)

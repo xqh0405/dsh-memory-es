@@ -3218,6 +3218,11 @@ async function handleCapabilities(ctx, res) {
       canReview,
       // 管理员 = 维护页 + 跨用户查看（与 canReview 同源，单独命名让前端读起来更清楚）
       canAdmin: canReview,
+      // 人格切换 = 只写本机配置（persona.seed / stickers.dir），不碰团队数据，
+      // 与 requireLocalWrite 同条件：配置行可读即可。
+      // ⚠️ 不能复用 canAdmin：前端曾用 canAdmin 守整个切换条，成员因此连下拉框都看不到
+      // （2026-11-12 实测：后端放开后仍「没有选择的地方」，第二道门在前端）。
+      canPersona: configRow.ok,
       canMaintain: cliAvailable(),
       // 删除按钮的显示条件：个人库问本人，团队库额外要求 team_knowledge 的 delete
       canDeletePersonal: del.personal,

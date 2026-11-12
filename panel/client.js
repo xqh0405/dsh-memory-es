@@ -3645,7 +3645,7 @@ window.__ModuleLoader__.load({
       // ── 阶段 34：预设切换条（仅管理员 + 仅非编辑态）────────────────────
       // 放正文顶部而不是标题行右侧：下拉 + 按钮 + 复选框 + 生效提示挤不进标题行
       const activePreset = presets.items.find((item) => item.active) ?? null
-      const presetRow = caps?.canAdmin && !editing && presets.items.length > 0
+      const presetRow = caps?.canPersona && !editing && presets.items.length > 0
         ? h('div', null,
             h('div', {
               style: {
@@ -5189,7 +5189,7 @@ window.__ModuleLoader__.load({
       const statusRef = React.useRef(onStatus)
       statusRef.current = onStatus
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
-      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, userId: '' })
+      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, canPersona: false, userId: '' })
 
       React.useEffect(() => {
         apiGet('/capabilities')
@@ -5200,6 +5200,7 @@ window.__ModuleLoader__.load({
             role: value.role ?? '',
             // 管理员 = 维护页 + 跨用户查看；userId 用于"用户"下拉里标出"我"
             canAdmin: Boolean(value.canAdmin),
+            canPersona: Boolean(value.canPersona),
             userId: value.userId ?? '',
             // 删除权限由后端问 ES 的 _has_privileges 得出，不是看配置声明
             canDeletePersonal: Boolean(value.canDeletePersonal),
