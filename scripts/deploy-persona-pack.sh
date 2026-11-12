@@ -77,7 +77,10 @@ for c in "${targets[@]}"; do
     rm -rf /tmp/plugin.tgz /tmp/mem-plugin
   '
 
-  # 2) 配置：补 persona/stickers（已有就跳过，不碰 es/identity）
+  # 2) 配置：persona.seed **总是替换**、stickers 只补缺（不碰 es/identity）
+  #
+  # 为什么 seed 不能"已有就跳过"：人格内核会随版本更新，跳过等于把每个容器永远
+  # 钉在第一次部署的那一版（2026-11-12 踩过：11 个容器全是旧口吻，脚本却报"跳过"）。
   docker exec "$c" cat /data/dsh/profiles/web/cordis.patch.yml > "/tmp/$c.yml"
   python3 - "/tmp/$c.yml" <<'PY'
 import re, sys
@@ -90,22 +93,34 @@ if start is None:
 # 该条目范围的结束：下一个顶层 '- ' 行
 stop = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('- ')), len(lines))
 body = '\n'.join(lines[start:stop])
-if re.search(r'^    persona:', body, re.M) and re.search(r'^    stickers:', body, re.M):
-    print('  = persona/stickers 已存在，跳过')
-    sys.exit(0)
-# 插到该条目末尾（最后一个非空行之后）
-insert_at = stop
-while insert_at > start and lines[insert_at - 1].strip() == '':
-    insert_at -= 1
-block = []
-if not re.search(r'^    persona:', body, re.M):
-    block += ['    persona:', '      enabled: true', '      seed: |']
-    block += [('        ' + l) if l.strip() else '' for l in seed.rstrip('\n').split('\n')]
+
+# 字面块 |（保换行）；空行必须完全空，否则 YAML 会当成内容的一部分
+seed_body = '\n'.join(('        ' + l) if l.strip() else '' for l in seed.rstrip('\n').split('\n'))
+seed_block = '      seed: |\n' + seed_body + '\n'
+
+changed = []
+# ① seed 已存在 → 替换整块正文（吞掉 8 空格缩进行与空行，直到下一个 key）
+m = re.search(r'^      seed: [|>]\n(?:        .*\n|\n)*', body, re.M)
+if m:
+    body = body[:m.start()] + seed_block + body[m.end():]
+    changed.append('替换 seed')
+elif re.search(r'^    persona:', body, re.M):
+    # persona 段在但没写 seed（手改过）→ 紧跟 persona: 行插入
+    body = re.sub(r'^(    persona:\n)', r'\1      enabled: true\n' + seed_block.replace('\\', r'\\'),
+                  body, count=1, flags=re.M)
+    changed.append('补 seed')
+else:
+    body = body.rstrip('\n') + '\n    persona:\n      enabled: true\n' + seed_block
+    changed.append('加 persona 段')
+
+# ② stickers 只补缺：容器里可能改过 dir/maxPerTurn，不覆盖
 if not re.search(r'^    stickers:', body, re.M):
-    block += ['    stickers:', '      enabled: true', '      dir: /data/dsh/stickers', '      maxPerTurn: 1']
-lines[insert_at:insert_at] = block
-open(path, 'w').write('\n'.join(lines))
-print('  + 已补 persona/stickers')
+    body = body.rstrip('\n') + '\n    stickers:\n      enabled: true\n      dir: /data/dsh/stickers\n      maxPerTurn: 1\n'
+    changed.append('补 stickers')
+
+out = lines[:start] + body.split('\n') + lines[stop:]
+open(path, 'w').write('\n'.join(out))
+print('  ~ %s（seed %d 字）' % ('/'.join(changed) or '无需改动', len(seed.strip())))
 PY
 
   docker exec "$c" cp /data/dsh/profiles/web/cordis.patch.yml \
