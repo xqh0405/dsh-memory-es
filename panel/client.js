@@ -369,6 +369,9 @@ window.__ModuleLoader__.load({
       readOnlyOther: '只读，不能删除',
       maintTargetUser: '目标用户',
       maintStatScope: '统计对象',
+      maintDocCapacity: '文档库容量',
+      maintNoLimit: '不限',
+      maintDocCapOver: '已超限：先归档旧文档再写入（归档后可用「深读」找回）',
       maintOtherWarn: '整理别人的记忆会改写对方的 promote_state（标记已处理），不影响其检索与使用',
       maintExport: 'Markdown 镜像',
       maintExportNow: '立即导出',
@@ -784,6 +787,9 @@ window.__ModuleLoader__.load({
       readOnlyOther: 'read-only, delete disabled',
       maintTargetUser: 'Target user',
       maintStatScope: 'Stats for',
+      maintDocCapacity: 'Doc capacity',
+      maintNoLimit: 'unlimited',
+      maintDocCapOver: 'Over the limit — archive old docs before writing (archive is recoverable via deep search)',
       maintOtherWarn: 'Consolidating another user’s memory rewrites their promote_state (marked as processed); search and usage are unaffected',
       maintExport: 'Markdown mirror',
     }
@@ -2998,6 +3004,17 @@ window.__ModuleLoader__.load({
           h('span', { style: S.mono }, String(value ?? '-')),
         )
 
+      // 21b：容量按「已用 X / 上限 Y（Z%）」显示。接口没给就 '-'，不能落成 0。
+      // 上限 0 = 配置里显式关闭了限制（config.doc.limitBytes=0），显示「不限」。
+      const formatDocCapacity = (cap) => {
+        if (!cap || typeof cap.usedBytes !== 'number') return '-'
+        const used = `${(cap.usedBytes / 1024 / 1024).toFixed(2)} MiB`
+        if (!cap.limitBytes) return `${used} / ${t('maintNoLimit')}`
+        const limit = `${(cap.limitBytes / 1024 / 1024).toFixed(0)} MiB`
+        const pct = Math.round((cap.usedBytes / cap.limitBytes) * 100)
+        return `${used} / ${limit}（${pct}%${cap.activeChunks ? ` · ${cap.activeChunks} ${t('cardDocChunks')}` : ''}）`
+      }
+
       return h('div', null,
         data.cli.available ? null : h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, t('maintCliMissing')),
 
@@ -3031,6 +3048,19 @@ window.__ModuleLoader__.load({
             line(t('labelPersonal'), data.counts.personal),
             line(t('labelTeam'), data.counts.team),
             line(t('labelDocs'), data.counts.docs),
+            // 21b：容量闸的「看得见」部分。接口没给（ES 聚合失败/旧版后端）就显示 '-'，
+            // 不能用 0 —— 0 会被读成「文档库是空的」。
+            line(t('maintDocCapacity'), formatDocCapacity(data.docCapacity)),
+            data.docCapacity?.overLimit
+              ? h('div', {
+                  style: {
+                    margin: '2px 0 6px 118px',
+                    fontSize: 11.5,
+                    lineHeight: 1.6,
+                    color: 'var(--dsw-alias-state-danger-primary)',
+                  },
+                }, t('maintDocCapOver'))
+              : null,
             line(t('labelPending'), data.counts.pending),
           ),
           [

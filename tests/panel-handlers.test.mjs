@@ -333,6 +333,8 @@ async function startFakeEs({
   sliceColdRef = null,
   failUpdateFor = null,
   coldRefFail = false,
+  /** 21b：文档库容量聚合里的字符总数（×3 折算字节）；改它就能构造「超限」 */
+  docChars = 1000,
 } = {}) {
   const calls = []
   const server = createServer((req, res) => {
@@ -389,7 +391,8 @@ async function startFakeEs({
         return send(200, {
           hits: { total: { value: 0 }, hits: [] },
           // docs: 维护页"文档数"的 cardinality 聚合（固定 42，方便断言它不再是占位）
-          aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 } },
+          // chars: 21b 容量聚合（×3 = usedBytes）；默认 1000 → 3000 B，不触发超限
+          aggregations: { by_user: { buckets: indexBuckets }, docs: { value: 42 }, chars: { value: docChars } },
         })
       }
 
@@ -982,6 +985,43 @@ test('维护概览：带 user 时统计那个人的个人库', async () => {
     // 文档数不再是 '-'：接口要真的返回这个字段，且落到目标用户的文档索引
     assert.equal(body.value.counts.docs, 42)
     assert.ok(es.calls.some((c) => c.url.startsWith('/personal_doc_laoliu/_search')))
+  } finally {
+    await es.close()
+  }
+})
+
+test('21b 维护概览：返回文档库容量（已用 / 上限，超限有标记）', async () => {
+  const es = await startFakeEs({ docChars: 1000 })
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(SINGLE, es.url), res, new URL('http://x/maintenance'))
+    assert.equal(res.statusCode, 200)
+    const cap = JSON.parse(res.body).value.docCapacity
+    // 口径：chars ×3（UTF-8 上界）；1000 → 3000 B
+    assert.equal(cap.usedBytes, 3000)
+    // SINGLE 配置里没写 doc 段 → 取默认 10 MiB（面板拿到的是「显式写了什么」）
+    assert.equal(cap.limitBytes, 10 * 1024 * 1024)
+    assert.equal(cap.overLimit, false)
+    // 容量统计必须落到文档索引、且只算 active（否则归档过的文档会一直占着上限）。
+    // 注意维护页对同一个索引有两次 _search（篇数 / 容量），要挑带 status 的那次。
+    const call = es.calls.find(
+      (c) => c.url === '/personal_doc_xqh/_search' && c.body.includes('"status":"active"'),
+    )
+    assert.ok(call, '容量聚合要打到文档索引，且按 status=active 过滤')
+    assert.match(call.body, /"chars"/, '容量要带 chars 聚合（_source.content.length 求和）')
+  } finally {
+    await es.close()
+  }
+})
+
+test('21b 维护概览：超过上限时 overLimit=true（前端据此显示红字）', async () => {
+  // 4 Mi 字符 ×3 = 12 MiB 上界 > 默认 10 MiB
+  const es = await startFakeEs({ docChars: 4 * 1024 * 1024 })
+  try {
+    const res = fakeRes()
+    await handleMaintenanceGet(ctxWithEs(SINGLE, es.url), res, new URL('http://x/maintenance'))
+    const cap = JSON.parse(res.body).value.docCapacity
+    assert.equal(cap.overLimit, true)
   } finally {
     await es.close()
   }

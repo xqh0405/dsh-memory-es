@@ -98,3 +98,48 @@ emit(m.split_sections("# 一\\n正文1\\n## 一.一\\n正文2\\n# 二\\n正文3"
     assert.equal(out[1][1], '正文2')
   })
 })
+
+/**
+ * 21b：迁移脚本的容量闸。
+ *
+ * 不测「真的超限就 return 2」——那需要跑完整 main()（要 ES、Ollama、文档目录），
+ * 成本远大于它保护的东西；测的是**口径与失败降级**：折算公式、超限判定、
+ * 查询失败返回 None（不能当成「已用 0」而放行）。
+ * 三处实现（TS / 面板 JS / 本脚本）口径必须一致，任何一处漂移都会让闸说谎。
+ */
+describe('migrate-docs 容量闸（21b）', { skip }, () => {
+  const fakeHttp = (chars, chunks = 7) => `
+import json
+def _fake(url, *, method="GET", body=None, headers=None, ctx=None, timeout=60):
+    return 200, {"hits": {"total": {"value": ${chunks}}}, "aggregations": {"docs": {"value": 3}, "chars": {"value": ${chars}}}}
+m.http_json = _fake
+`
+
+  test('按 chars ×3 折算已用字节（与 TS / 面板同口径）', () => {
+    const out = runPy(fakeHttp(1000) + 'emit(m.read_capacity("http://x", "personal_doc_xqh", "Basic x", None, 10*1024*1024))')
+    assert.equal(out.usedBytes, 3000)
+    assert.equal(out.limitBytes, 10 * 1024 * 1024)
+    assert.equal(out.overLimit, false)
+    assert.equal(out.activeChunks, 7)
+    assert.equal(out.activeDocs, 3)
+  })
+
+  test('超限被标记；limit=0 表示不限、不误报', () => {
+    // 4 Mi 字符 ×3 = 12 MiB > 10 MiB
+    const over = runPy(fakeHttp(4 * 1024 * 1024) + 'emit(m.read_capacity("http://x", "i", "Basic x", None, 10*1024*1024))')
+    assert.equal(over.overLimit, true)
+    const unlimited = runPy(fakeHttp(4 * 1024 * 1024) + 'emit(m.read_capacity("http://x", "i", "Basic x", None, 0))')
+    assert.equal(unlimited.overLimit, false, 'limit=0 是不限，永远不超限')
+  })
+
+  test('查询失败返回 None —— 不能当成「已用 0」放行', () => {
+    const out = runPy(`
+import urllib.error
+def _boom(*a, **k):
+    raise urllib.error.URLError("down")
+m.http_json = _boom
+emit(m.read_capacity("http://x", "i", "Basic x", None, 10*1024*1024))
+`)
+    assert.equal(out, null)
+  })
+})

@@ -250,6 +250,59 @@ def fetch_existing(es: str, index: str, auth: str, ctx) -> dict:
     return out
 
 
+def read_capacity(es: str, index: str, auth: str, ctx, limit_bytes: int) -> dict | None:
+    """
+    21b：文档库容量（已用 / 上限）。口径必须与 `src/memory/doc-archive.ts` 的
+    `readDocCapacity` 逐字一致：只计 status=active、按 `_source.content.length()`
+    求和、再 ×3 折算 UTF-8 上界（宁可早拦）。
+
+    这是**第三份实现**（TS 主插件 / 面板 JS / 本脚本）——改口径三处一起改，
+    否则「面板说没超、脚本说超了」会让人以为闸坏了。
+    `limit_bytes=0` 表示不限。返回 None 表示查询失败（调用方按「不知道」处理，
+    不能当成 0 已用）。
+    """
+    body = {
+        "size": 0,
+        "track_total_hits": True,
+        "query": {"term": {"status": "active"}},
+        "aggs": {
+            "docs": {"cardinality": {"field": "doc_id"}},
+            "chars": {
+                "sum": {
+                    "script": {
+                        "source": (
+                            "(params._source != null && params._source.content != null)"
+                            " ? params._source.content.length() : 0"
+                        )
+                    }
+                }
+            },
+        },
+    }
+    try:
+        status, r = http_json(f"{es}/{index}/_search", method="POST", body=body,
+                              headers={"authorization": auth}, ctx=ctx)
+    except Exception:  # noqa: BLE001
+        return None
+    if status != 200 or r is None:
+        return None
+    aggs = r.get("aggregations") or {}
+    chars = int((aggs.get("chars") or {}).get("value") or 0)
+    used = round(chars * 3)
+    total = (r.get("hits") or {}).get("total") or {}
+    return {
+        "usedBytes": used,
+        "limitBytes": limit_bytes,
+        "overLimit": limit_bytes > 0 and used > limit_bytes,
+        "activeChunks": int((total.get("value") if isinstance(total, dict) else total) or 0),
+        "activeDocs": int((aggs.get("docs") or {}).get("value") or 0),
+    }
+
+
+def fmt_mib(n: int) -> str:
+    return f"{n / 1024 / 1024:.2f} MiB"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--index-json", required=True)
@@ -267,6 +320,10 @@ def main() -> int:
     ap.add_argument("--prune", action="store_true", help="写前先按 doc_id 删除旧 chunk")
     ap.add_argument("--incremental", action="store_true",
                     help="阶段 30：只灌新增/变更（按 doc_id + content_sha256 比对），并输出差集报告")
+    ap.add_argument("--limit-mib", type=float, default=10.0,
+                    help="文档库容量上限（MiB，0=不限）。默认 10，与 config.doc.limitBytes 一致")
+    ap.add_argument("--allow-over-limit", action="store_true",
+                    help="已超限也继续写（默认拒绝：超限应先归档旧文档）")
     args = ap.parse_args()
 
     password = os.environ.get(args.password_env, "")
@@ -284,6 +341,21 @@ def main() -> int:
     if args.limit > 0:
         docs = docs[: args.limit]
     print(f"文档 {len(docs)} 篇 → {index}" + ("（dry-run）" if args.dry_run else ""))
+
+    # 21b：写入前看容量。超限拒绝写入（归档才是释放容量的动作，不是继续灌）。
+    # dry-run 只报告不拦——dry-run 的用途就是「先看要发生什么」。
+    limit_bytes = int(max(0.0, args.limit_mib) * 1024 * 1024)
+    cap = read_capacity(es, index, auth, ctx, limit_bytes)
+    if cap is None:
+        print("⚠ 读不到文档库容量（聚合失败或无读权限），本次不做容量闸", file=sys.stderr)
+    else:
+        limit_text = fmt_mib(cap["limitBytes"]) if cap["limitBytes"] else "不限"
+        print(f"文档库已用：{fmt_mib(cap['usedBytes'])} / {limit_text}"
+              f"（active {cap['activeDocs']} 篇 / {cap['activeChunks']} 块）")
+        if cap["overLimit"] and not args.dry_run and not args.allow_over_limit:
+            print(f"拒绝写入：文档库已超限（{fmt_mib(cap['usedBytes'])} > {limit_text}）"
+                  "——先归档旧文档，或用 --allow-over-limit 强制继续", file=sys.stderr)
+            return 2
 
     # 阶段 30：增量模式的基线（ES 现有的 doc_id → chunk 指纹）
     existing = {}

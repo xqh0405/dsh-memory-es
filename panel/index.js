@@ -3000,6 +3000,44 @@ async function handleMaintenanceGet(ctx, res, url) {
       .then((r) => num(r.aggregations?.docs?.value)).catch(() => -1),
   ])
 
+  // 21b：文档库容量（已用 / 上限）。口径与 `src/memory/doc-archive.ts` 的
+  // `readDocCapacity` **逐字一致**：只计 `status=active`，按 `_source.content.length()`
+  // 求和、再 ×3 折算 UTF-8 上界（宁可早拦）。
+  // 面板刻意不 import 主插件产物（CA 路径、冷引用都各自实现过），所以这里是**第二份实现**
+  // ——改口径必须两处一起改；`tests/ca-path.test.ts` 的「同序断言」是同类做法。
+  // ⚠️ 面板拿到的是「配置行里显式写了什么」：没写 doc 段时 `config.doc` 是 undefined。
+  const docLimitBytes = (() => {
+    const raw = config.doc?.limitBytes
+    return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : 10 * 1024 * 1024
+  })()
+  const docCapacity = await client.search(docsIndex, {
+    size: 0,
+    track_total_hits: true,
+    query: { term: { status: 'active' } },
+    aggs: {
+      docs: { cardinality: { field: 'doc_id' } },
+      chars: {
+        sum: {
+          script: {
+            source:
+              '(params._source != null && params._source.content != null)'
+              + ' ? params._source.content.length() : 0',
+          },
+        },
+      },
+    },
+  }).then((r) => {
+    const usedBytes = Math.round(num(r.aggregations?.chars?.value) * 3)
+    return {
+      usedBytes,
+      activeChunks: num(r.hits?.total?.value),
+      activeDocs: num(r.aggregations?.docs?.value),
+      limitBytes: docLimitBytes,
+      // limitBytes=0 表示不限，永远不超限
+      overLimit: docLimitBytes > 0 && usedBytes > docLimitBytes,
+    }
+  }).catch(() => null)
+
   // 上次整理时间（CLI 的状态文件）
   let lastRunAt = ''
   let pendingCount = null
@@ -3059,6 +3097,8 @@ async function handleMaintenanceGet(ctx, res, url) {
     ok: true,
     value: {
       counts: { personal: counts[0], team: counts[1], pending: counts[2], docs: counts[3] },
+      // 21b：文档库容量（null = 聚合失败，前端显示 '-' 而不是 0，免得误读成"空的"）
+      docCapacity,
       // 统计对应的用户（前端用来确认"这些数字是谁的"）
       userId: targetUser,
       viewingOther: targetUser !== config.identity.userId,
