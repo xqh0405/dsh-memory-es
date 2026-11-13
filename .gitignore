@@ -233,3 +233,6 @@ scratch-recall/
 
 # 改动前的本机配置备份（人格 / 配置类改动，只留本机，不入库）
 scratch-backup/
+
+# 127 推理机的运维文档快照（含 llama-swap API key、Open WebUI 密码，绝不能入库）
+scratch-127/
