@@ -59,6 +59,15 @@ export interface ConfigType {
     model: string
     dims: number
   }
+  /**
+   * 本地推理网关（共享连接块，见 docs/本地模型扩展.md）。
+   * `baseUrl` 留空 = rerank / 本地蒸馏 / 视觉全部视为未配置，零请求。
+   */
+  localModels: {
+    baseUrl: string
+    /** DSH credential-ref 名（从 `$DSH_HOME/.credentials.yaml` 读），不是 OS 环境变量 */
+    apiKeyEnv: string
+  }
   prompt: {
     /** 阶段 12：引用格式要求（默认关） */
     citation: boolean
@@ -73,6 +82,17 @@ export interface ConfigType {
     defaultDetail: string
     /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
     synonyms?: Record<string, string>
+    /** 本地网关重排（默认关；关时检索路径一行不动） */
+    rerank: {
+      enabled: boolean
+      model: string
+      candidates: number
+      docChars: number
+      timeoutMs: number
+      failureThreshold: number
+      scoreWeight: number
+      logPath: string
+    }
   }
   /** 排序乘子（阶段 2） */
   ranking: {
@@ -126,6 +146,12 @@ export interface ConfigType {
   distill: {
     /** 保存后是否后台蒸馏（不阻塞入库） */
     enabled: boolean
+    /** 本地蒸馏（阶段 D）；默认关 */
+    local: {
+      enabled: boolean
+      model: string
+      timeoutMs: number
+    }
     /** 模型路由；留空 = 用宿主第一个可用模型 */
     provider: string
     model: string
@@ -320,6 +346,18 @@ export const Config: z<ConfigType> = z.object({
     dims: z.number().step(1).default(1024)
       .description('向量维度，必须与索引 mapping 一致。'),
   }),
+  /**
+   * 本地推理网关（docs/本地模型扩展.md 的共享连接块）。
+   *
+   * **默认留空 = 全部本地能力视为未配置**：没配的人必须零感知、零延迟、零行为变更。
+   * 配了 `baseUrl` 也不会自动开任何能力——各能力的 `enabled` 仍各自默认 false。
+   */
+  localModels: z.object({
+    baseUrl: z.string().default('')
+      .description('内网推理网关（OpenAI 兼容），例 http://192.168.50.127:8080/v1；留空 = 全部能力未配置。'),
+    apiKeyEnv: z.string().default('')
+      .description('凭据引用名（DSH credential-ref，从 $DSH_HOME/.credentials.yaml 读，不读 OS 环境变量）；留空 = 网关不鉴权。'),
+  }).default({}),
   prompt: z.object({
     citation: z.boolean().default(false)
       .description('阶段 12「命中后供给」：要求模型引用记忆时标明出处（默认关；会改变回答风格，未做生成侧 A/B 前不默认开）。'),
@@ -339,6 +377,30 @@ export const Config: z<ConfigType> = z.object({
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})
       .description('查询扩展表（口语/中文 → 书面/英文），BM25 与向量两路都用。默认空；A/B 实测单独开 should 失败 10 → 8，与拒答同开 10 → 1。'),
+    /**
+     * 本地网关重排（阶段 B）。**默认关**：它改变「谁排在前面」，
+     * 属于改检索行为的开关，按本项目护栏默认关；要开先看 eval 的对比数字。
+     *
+     * 关闭时检索路径**一行不动**：候选不扩容、不发请求、不读凭据。
+     */
+    rerank: z.object({
+      enabled: z.boolean().default(false)
+        .description('本地网关重排（默认关）。开启后在跨库合并与后验乘子之间插一次重排请求。'),
+      model: z.string().default('reranker')
+        .description('网关上的重排模型 id 或别名（llama-swap 的 bge-reranker 别名是 reranker/rerank）。'),
+      candidates: z.number().step(1).min(2).max(100).default(20)
+        .description('送进重排的候选数；只在 enabled 时用于把每路候选池扩到这么大。'),
+      docChars: z.number().step(1).min(50).max(2_000).default(300)
+        .description('每条候选送进模型的正文上限（字符）。实测 600 字 × 20 条约 420ms，300 字约 200ms；越长越准但越慢。'),
+      timeoutMs: z.number().step(1).min(50).max(3_000).default(600)
+        .description('读超时（毫秒）。必须远小于 recall 的 3000ms 总预算；实测 20 条候选热态 81ms / 首次 154ms。'),
+      failureThreshold: z.number().step(1).min(1).max(20).default(3)
+        .description('连续失败 N 次 → 本进程内熔断，记一次 warn，之后不再发请求（直到重启）。'),
+      scoreWeight: z.number().min(0).max(5).default(1)
+        .description('名次并入 RRF 的权重：只用重排名次构造 weight × 1/(rrfK + rank)，不混入 logit 尺度。0 = 只记录不改变排序。'),
+      logPath: z.string().default('')
+        .description('JSONL 记账路径；留空 = $DSH_HOME/memory-es/local-models.jsonl。'),
+    }).default({}),
   }),
   /**
    * 置信判定（阶段 0.5）：分层规则，替代原来单一的 marginFloor。
@@ -453,6 +515,20 @@ export const Config: z<ConfigType> = z.object({
     provider: z.string().default(''),
     model: z.string().default(''),
     timeoutMs: z.number().default(30_000),
+    /**
+     * 阶段 D：蒸馏改走本地网关。**默认关**，关时走原来的 `ctx.llm` 路由。
+     * 本地返回空正文或失败 → **回落云端**（D2），不会把空串当结果写库。
+     */
+    local: z.object({
+      enabled: z.boolean().default(false)
+        .description('蒸馏优先走本地网关（复用 localModels.baseUrl）；失败/空正文自动回落 ctx.llm。'),
+      model: z.string().default('qwen3-4b')
+        .description('本地的蒸馏模型 id/别名；网关侧需已关思考（enable_thinking），否则会拿不到正文。'
+          + '默认 4b：它是 127 的 aux 常驻模型，不参与大模型互斥（不会把用户正在用的大模型踢掉），'
+          + '30 条真实记忆实测解析失败率 0%；30b 是 3.3% 且会占 big 组。'),
+      timeoutMs: z.number().step(1).min(1_000).max(600_000).default(60_000)
+        .description('本地蒸馏的读超时（毫秒）。后台任务，比 rerank 宽松得多。'),
+    }).default({}),
   }),
   /**
    * 阶段 9：写入准入屏障。

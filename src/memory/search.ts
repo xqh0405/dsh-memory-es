@@ -22,7 +22,8 @@ import { bm25Body, extractIdentifiers, knnBody, parseTimeRangeDays, type MetaFil
 import type { EsClient } from '../es/http.ts'
 import { formatEsError } from '../es/http.ts'
 import type { Fused, Hit, Projected, Scope } from '../fragment.ts'
-import { applyRanking, buildHitReceipts, DETAIL_LEVELS, diversifyByDomain, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type DetailLevel, type HitReceipt, type RankingConfig, type ReceiptSource } from '../fragment.ts'
+import { applyRanking, blendRerankScores, buildHitReceipts, DETAIL_LEVELS, diversifyByDomain, DEFAULT_RANKING, mergeScopes, projectHit, renderText, rrfFuse, scoreMargin, spreadActivation, type DetailLevel, type HitReceipt, type RankingConfig, type ReceiptSource, type ScopedHit } from '../fragment.ts'
+import type { Reranker } from '../local-models.ts'
 import { NON_FACT_MEMORY_TYPES } from './common.ts'
 import { DEFAULT_TIMEZONE, zonedDayStart } from '../timezone.ts'
 import type { RecallCache } from './recallCache.ts'
@@ -203,6 +204,86 @@ export interface RetrievalConfig {
   synonyms?: Record<string, string>
 }
 
+/**
+ * 重排输入：一条记忆的正文（截断 600 字）。
+ *
+ * 网关的 rerank 模型上下文 8192，20 条候选实测 557 tokens；截 600 字足够表达
+ * 「这条在讲什么」，又不会因为某条 10KB 的巡检记录把整批撑爆。
+ * 没有 content 时退回摘要/关键词——空串送进模型只会得到一个无关分数。
+ */
+function rerankDocumentOf(hit: ScopedHit, maxChars: number): string {
+  const src = hit.source
+  const content = typeof src.content === 'string' ? src.content.trim() : ''
+  if (content !== '') return content.slice(0, maxChars)
+  const summary = typeof src.summary === 'string' ? src.summary.trim() : ''
+  if (summary !== '') return summary.slice(0, maxChars)
+  const keywords = typeof src.semantic_keywords === 'string' ? src.semantic_keywords.trim() : ''
+  return keywords.slice(0, maxChars)
+}
+
+/**
+ * 跑一次重排，把名次并入融合分。
+ *
+ * 三条硬约束（文档 B2/B3）：
+ *  · 位置在 `mergeScopes` 之后、`spreadActivation` 之前：跨库只发一次请求，
+ *    且「相关性」必须排在后验乘子之前；
+ *  · 失败 / 超时 / 条数不符 → **原样返回**（不抛、不留半套顺序）；
+ *  · `scoreWeight=0` 只记账不改排序（评测的对照组）。
+ */
+async function applyRerankToMerged(
+  merged: ScopedHit[],
+  query: string,
+  reranker: Reranker,
+  options: {
+    rrfK: number
+    signal?: AbortSignal
+    log: (event: Record<string, unknown>) => void
+    onRecord?: (record: RerankRecord) => void
+  },
+): Promise<ScopedHit[]> {
+  if (merged.length < 2) return merged
+  // 只送前 N 条：候选外的条目保持原分（重排的上下文与延迟都随条数线性增长）
+  const picks = merged.slice(0, reranker.candidates)
+  const attempts = picks.map((hit) => rerankDocumentOf(hit, reranker.docChars))
+  // 全是空正文时重排没有信息量，直接跳过（也不记账成 error）
+  if (attempts.every((text) => text === '')) return merged
+
+  const topBefore = merged[0]?.id
+  const attempt = await reranker.rerank(query, attempts, { signal: options.signal })
+
+  if (attempt.scores === null) {
+    options.log({ event: 'rerank_fallback', outcome: attempt.outcome, ms: attempt.ms, candidates: attempts.length })
+    options.onRecord?.({
+      on: true,
+      ms: attempt.ms,
+      candidates: attempts.length,
+      changedTop1: false,
+      outcome: attempt.outcome,
+    })
+    return merged
+  }
+
+  const blended = blendRerankScores(merged, attempt.scores, {
+    weight: reranker.scoreWeight,
+    rrfK: options.rrfK,
+  })
+  options.log({
+    event: 'rerank_ok',
+    ms: attempt.ms,
+    candidates: attempts.length,
+    changedTop1: blended[0]?.id !== topBefore,
+    weight: reranker.scoreWeight,
+  })
+  options.onRecord?.({
+    on: true,
+    ms: attempt.ms,
+    candidates: attempts.length,
+    changedTop1: blended[0]?.id !== topBefore,
+    outcome: attempt.outcome,
+  })
+  return blended
+}
+
 export interface SearchDeps {
   /** 取消信号（来自 exec.signal） */
   signal?: AbortSignal
@@ -253,6 +334,27 @@ export interface SearchDeps {
    * 缺省 = 不记（脚本与测试不需要这个联动）。
    */
   recallCache?: RecallCache | null
+  /**
+   * 本地网关重排（docs/本地模型扩展.md 阶段 B）。缺省 = 完全跳过。
+   *
+   * **只由显式检索路径传**：注入/影子的总预算是 500ms，而重排读超时默认 600ms，
+   * 两条叠在一起只会让「注入」先超时、白烧一次重排。等拿到评测数字再决定要不要放进去。
+   */
+  rerank?: Reranker | null
+  /**
+   * 重排记账（JSONL）。**失败只记日志**——观测通道不能影响检索。
+   * 只在 `rerank` 真的启用时才会被调用。
+   */
+  onRerank?: (record: RerankRecord) => void
+}
+
+/** 一次重排的记账行（F1）：只回答「开没开、多慢、改没改第一名、落到哪个分支」 */
+export interface RerankRecord {
+  on: boolean
+  ms: number
+  candidates: number
+  changedTop1: boolean
+  outcome: string
 }
 
 /**
@@ -434,7 +536,11 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     degraded = true
   }
 
-  const topK = deps.retrieval.topK
+  // 阶段 B：只有重排真的启用时才扩候选池；`enabled=false` 时与原路径完全一致
+  const reranker = deps.rerank ?? null
+  const topK = reranker?.enabled === true
+    ? Math.max(deps.retrieval.topK, reranker.candidates)
+    : deps.retrieval.topK
   // 标识符（lot.bd_write_sync / class 名 / 主机名）单独走 content_exact 精确匹配加分；
   // IK 会把它们切碎，纯 BM25 分数压不住噪声（实测 13.9）。
   const identifiers = extractIdentifiers(query)
@@ -587,10 +693,25 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
   }
 
   const mergedRaw = mergeScopes(groups, { weights: { personal: PERSONAL_WEIGHT } })
+  /**
+   * 阶段 B：本地网关重排。
+   *
+   * 位置是**硬约束**：跨库合并之后（一次请求，不是每库一次）、后验乘子之前
+   * （重排属于相关性）。失败一律回落原序——重排是增益，不是依赖。
+   */
+  const reranked =
+    reranker?.enabled === true
+      ? await applyRerankToMerged(mergedRaw, query, reranker, {
+          rrfK: deps.retrieval.rrfK,
+          signal: deps.signal,
+          log,
+          ...(deps.onRerank === undefined ? {} : { onRecord: deps.onRerank }),
+        })
+      : mergedRaw
   // 阶段 5.3：扩散激活（默认 alpha=0，原样返回）。放在乘子之前——
   // 它属于「相关性」，乘子是后验信号。
   const rankingCfg = deps.ranking ?? DEFAULT_RANKING
-  const spread = spreadActivation(mergedRaw, rankingCfg.activationAlpha, { now })
+  const spread = spreadActivation(reranked, rankingCfg.activationAlpha, { now })
   // 排序乘子作用在跨库合并之后：importance / 命中次数 / 新鲜度。
   // 系数默认温和（±10% 量级），归零即完全关闭。
   const ranked = applyRanking(spread, rankingCfg, now, deps.mood?.() ?? null)

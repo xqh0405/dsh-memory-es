@@ -3315,6 +3315,48 @@ const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const STATE_DIR = process.env.MEMORY_ES_STATE_DIR || join(DSH_HOME, 'memory-es-state')
 const MIRROR_DIR = process.env.MEMORY_ES_MIRROR_DIR || join(DSH_HOME, 'memory-mirror')
 
+
+/**
+ * 阶段 F2：本地模型状态（只读）。
+ *
+ * 面板不 import 主插件产物，所以这里**只读配置 + JSONL 记账**，看不到进程内的
+ * 熔断标志位——`last.outcome` 连续非 ok 才是熔断的间接证据，文案不要写成「已熔断」。
+ * 数据源与 recall-inject 页同口径：$DSH_HOME/memory-es/local-models.jsonl。
+ */
+function localModelsSummary(config) {
+  const rerank = config.retrieval && config.retrieval.rerank ? config.retrieval.rerank : {}
+  const local = config.localModels ? config.localModels : {}
+  const distillLocal = config.distill && config.distill.local ? config.distill.local : {}
+  const baseUrl = typeof local.baseUrl === 'string' ? local.baseUrl.trim() : ''
+  const file = join(DSH_HOME, 'memory-es', 'local-models.jsonl')
+  let last = null
+  let records = 0
+  try {
+    const lines = readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '')
+    records = lines.length
+    const tail = lines[lines.length - 1]
+    if (tail !== undefined) last = JSON.parse(tail)
+  } catch {
+    // 没有文件 = 从没启用过，不是错误
+  }
+  return {
+    configured: baseUrl !== '',
+    baseUrl,
+    rerank: {
+      enabled: rerank.enabled === true,
+      model: typeof rerank.model === 'string' ? rerank.model : 'reranker',
+      candidates: typeof rerank.candidates === 'number' ? rerank.candidates : 20,
+      docChars: typeof rerank.docChars === 'number' ? rerank.docChars : 300,
+    },
+    distill: {
+      enabled: distillLocal.enabled === true,
+      model: typeof distillLocal.model === 'string' ? distillLocal.model : 'qwen3-4b',
+    },
+    last,
+    records,
+  }
+}
+
 async function handleMaintenanceGet(ctx, res, url) {
   // 维护页整体收拢到管理员：普通成员的维护 tab 也不再显示（前端），接口同样拦住
   const config = requireAdmin(ctx, res)
@@ -3452,6 +3494,8 @@ async function handleMaintenanceGet(ctx, res, url) {
       viewingOther: targetUser !== config.identity.userId,
       lastRunAt,
       pendingCount,
+      // 阶段 F2：本地模型（docs/本地模型扩展.md）。只读配置 + JSONL 末条
+      localModels: localModelsSummary(config),
       update: updateInfo,
       mirror,
       cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },
