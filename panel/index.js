@@ -2605,8 +2605,8 @@ const EDITABLE = [
     path: ['traits', 'dedupMinScore'],
     label: '判重阈值',
     type: 'number',
-    default: 0.88,
-    hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.88',
+    default: 0.85,
+    hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.85；实测同义改写约 0.87，调到 0.88 以上等于不判重',
   },
   {
     path: ['traits', 'dedupMinScoreAnchored'],

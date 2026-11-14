@@ -590,8 +590,8 @@ export const Config: z<ConfigType> = z.object({
       .description('待审自述候选的存量上限；pending 达到它就不再提炼。默认 20。'),
     maxOutput: z.number().step(1).min(1).max(20).default(5)
       .description('单次模型返回的候选上限，超出部分丢弃。默认 5。'),
-    dedupMinScore: z.number().min(0.7).max(0.99).default(0.88)
-      .description('同义判定阈值（kNN 余弦），越高越严。默认 0.88。'),
+    dedupMinScore: z.number().min(0.7).max(0.99).default(0.85)
+      .description('同义判定阈值（kNN 余弦），越高越严。默认 0.85（2026-11-14 由 0.88 下调：实测真同义改写落在 0.8688~0.8730，0.88 放过了全部重复）。'),
     dedupMinScoreAnchored: z.number().min(0.6).max(0.99).default(0.82)
       .description('锚定条目的判重阈值（更严，锚点=已定稿）。默认 0.82。'),
   }),
