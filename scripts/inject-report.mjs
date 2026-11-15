@@ -61,7 +61,12 @@ const byOutcome = {}
 for (const row of rows) byOutcome[row.outcome] = (byOutcome[row.outcome] ?? 0) + 1
 
 const injected = rows.filter((row) => row.outcome === 'injected')
-const searched = rows.filter((row) => row.outcome !== 'timeout' && row.outcome !== 'error')
+// 短指令短路（2026-11-15）：这类回合**没有发生检索**，不能进「有效检索」分母，
+// 否则注入率会被无检索的回合稀释（口径与面板 /inject-log 一致）。
+const shortSkipped = rows.filter((row) => row.outcome === 'short_query')
+const searched = rows.filter(
+  (row) => row.outcome !== 'timeout' && row.outcome !== 'error' && row.outcome !== 'short_query',
+)
 const msAll = rows.map((row) => row.ms).filter((n) => typeof n === 'number')
 const charsInjected = injected.map((row) => row.chars).filter((n) => typeof n === 'number')
 
@@ -94,6 +99,7 @@ console.log(
   `真正注入         ${injected.length} 次（占有效检索 ${pct(report.injectRate)}，占全部尝试 ${pct(report.total === 0 ? 0 : injected.length / report.total)}）`,
 )
 console.log(`超时             ${byOutcome.timeout ?? 0} 次（${pct(report.timeoutRate)}）← 队列争用的直接指标`)
+console.log(`短指令跳过       ${shortSkipped.length} 次（不检索，只注常驻；不计入注入率分母）`)
 console.log(`检索延迟         p50 ${report.latencyMs.p50} ms / p90 ${report.latencyMs.p90} ms / max ${report.latencyMs.max} ms`)
 console.log(`注入体积         p50 ${report.injectedChars.p50} 字符 ≈ ${Math.round(report.injectedChars.p50 / 2)} token，平均 ${report.injectedChars.avgItems.toFixed(1)} 条`)
 console.log('')

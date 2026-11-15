@@ -36,7 +36,7 @@ import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
 import { createLocalModelWriter, createReranker, resolveLocalModelsLogPath } from './local-models.ts'
 import { createLocalChat } from './local-chat.ts'
-import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
 import type { Projected } from './fragment.ts'
@@ -1101,6 +1101,26 @@ export function apply(ctx: Context, config: ConfigType): void {
             chars: composed.text.length,
             dropped: composed.dropped,
           }
+        }
+
+        // 短指令短路（2026-11-15 巡检）：`继续`/`提交`/`ok` 这类消息不携带「要查什么」，
+        // 实测 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然 low_confidence。
+        // 跳过检索段只注 pinned：省一次 embed + 一次 ES 检索（zhongjinqi 一人 3 天 537 次）。
+        // 注意必须在 fetchPinned 之后：常驻段照常注入，这是短指令回合唯一有价值的部分。
+        if (inject.shortCommandSkip && isShortCommand(query)) {
+          const only = compose([])
+          writeRecord({
+            outcome: 'short_query',
+            hits: 0,
+            items: only.items,
+            pinnedItems: only.pinnedItems,
+            pinnedInjected: only.pinnedItems.length,
+            chars: only.chars,
+            ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
+            ...(only.pinnedItems.length > 0 ? { pinnedOnly: true } : {}),
+            note: '短指令：跳过检索段，只注常驻',
+          })
+          return only.text
         }
 
         try {

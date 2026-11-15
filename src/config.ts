@@ -227,6 +227,11 @@ export interface ConfigType {
     timeoutMs: number
     maxItems: number
     maxChars: number
+    /**
+     * 短指令短路（2026-11-15）：`继续`/`提交`/`ok` 这类消息跳过检索段、只注 pinned。
+     * 实测这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信。
+     */
+    shortCommandSkip: boolean
     sectionOrder: number
     cacheTtlMs: number
     /** top1 的向量相似度门槛；低于它不注入（note=ok 分不出闲聊与相关） */
@@ -660,6 +665,11 @@ export const Config: z<ConfigType> = z.object({
       .description('注入条数上限；与影子 recallShadow.maxItems 保持一致，这样影子数据可以直接预估真实体积。'),
     maxChars: z.number().step(1).min(100).default(600)
       .description('注入正文的字符预算（按检索顺序累加）。实测 3 条约 363 字符 ≈ 181 token。'),
+    shortCommandSkip: z.boolean().default(true)
+      .description('短指令短路：`继续`/`提交`/`ok` 这类不携带信息量的消息只注入 pinned 常驻段，跳过检索。'
+        + '2026-11-15 巡检实测：这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信，'
+        + '仍会完整跑 embed + ES 检索（zhongjinqi 一人 3 天 537/703 次）。'
+        + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
     cacheTtlMs: z.number().step(1_000).min(0).default(30_000)

@@ -956,9 +956,13 @@ function summarizeInjectRecords(records) {
   let legacyFolded = 0 // 旧版折叠记录：outcome=injected 且 pinnedOnly=true → 检索段结果不可知
   let since = ''
   let through = ''
+  // 短指令短路（2026-11-15）：这些回合没有发生检索，不能进注入率/超时率的分母，
+  // 否则「继续」这类高频短消息会把两个比率一起稀释（口径与 inject-report.mjs 一致）。
+  let shortSkipped = 0
 
   for (const r of records) {
     const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
+    if (outcome === 'short_query') shortSkipped += 1
     byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
     const ts = typeof r.ts === 'string' ? r.ts : ''
     if (ts !== '') {
@@ -1018,19 +1022,22 @@ function summarizeInjectRecords(records) {
   }
   const total = records.length
   const avg = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length)
+  // 真正发生检索的次数 = 全部 − 短指令短路（短指令只注常驻段、不检索）
+  const retrievalRuns = total - shortSkipped
   return {
     total,
     byOutcome,
+    shortSkipped,
     // 统计窗口：读文件按尾部 512KB 截断，超长后窗口会自己缩，必须显式告诉用户，
     // 否则同一个页面的「注入尝试」会随文件增长悄悄变少（2026-11-10 实测 901 → 739 且无提示）。
     since,
     through,
     // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
-    timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
+    timeoutRate: retrievalRuns === 0 ? 0 : (byOutcome.timeout ?? 0) / retrievalRuns,
     // 注入率 = **检索段**口径，与「注入了/超时/低分·低置信/无匹配」四态一致
-    injectedRate: total === 0 ? 0 : recallInjected / total,
+    injectedRate: retrievalRuns === 0 ? 0 : recallInjected / retrievalRuns,
     // 整段口径：检索段或常驻段任一进了上下文。pinned 关着时两者相等。
-    wholeInjectedRate: total === 0 ? 0 : wholeInjected / total,
+    wholeInjectedRate: retrievalRuns === 0 ? 0 : wholeInjected / retrievalRuns,
     // 旧版折叠记录数 > 0 时要提示：这部分检索段结果不可知，注入率按已知部分算（偏低）
     legacyFolded,
     newStyle,
