@@ -851,6 +851,9 @@ export function apply(ctx: Context, config: ConfigType): void {
    * 不需要定时器。
    */
   const mood: { state: MoodState } = { state: { ...NEUTRAL_MOOD } }
+  // 启动读取是异步的：若它晚于第一条情绪事件返回，会把刚写入的心情覆盖回旧值
+  // （CI 上事件链先跑完、读取后返回，2026-11-15 复现）。用代际号作废「发起时还没有事件」的结果。
+  let moodEpoch = 0
   const moodStore = {
     userId: config.identity.userId,
     personalPrefix: config.index.personalPrefix,
@@ -862,8 +865,11 @@ export function apply(ctx: Context, config: ConfigType): void {
   // 放到下一个 tick：加载阶段一律零 ES 请求（apply 的既有契约），也避免测试里
   // 「apply 期间不应发请求」的断言变脆。
   setTimeout(() => {
+    const epochAtRead = moodEpoch
     void readMood(moodStore)
       .then((state) => {
+        // 读发起后已经有过情绪事件：这次读的是旧值，丢弃，别覆盖新状态。
+        if (moodEpoch !== epochAtRead) return
         mood.state = state
       })
       .catch((err: unknown) => {
@@ -899,6 +905,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     moodChain = moodChain
       .then(async () => {
         const next = applyMoodEvent(mood.state, kind, new Date(), note)
+        moodEpoch += 1
         mood.state = next
         try {
           await writeMood(moodStore, next)

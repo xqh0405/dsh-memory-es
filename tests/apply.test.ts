@@ -41,6 +41,10 @@ function baseConfig(
     es: { url: 'http://127.0.0.1:9200', caCertPath: '', requestTimeoutMs: 1_000 },
     // 影子 JSONL 指到临时目录（放在 ...overrides 之前：需要显式覆盖的用例仍可改）
     recallShadow: { path: shadowLogPath },
+    // 给个占位路由：traits / journal 默认开启，缺 provider/model 时 apply 会打一行
+    // 「配置缺失」红字（那是给真实部署的预警），在测试里会随每个用例重复刷屏。
+    // 这里只填名字、不真调模型；需要验证「缺路由」行为的用例仍可显式覆盖成空串。
+    distill: { provider: 'test-provider', model: 'test-model' },
     ...overrides,
   } as never) as ConfigType
   return parsed
@@ -320,16 +324,23 @@ describe('Config schema 默认值', () => {
 
 describe('apply · 情绪事件', () => {
   /** 只伺候心情文档的假 ES：GET 404 → PUT 存下 → 之后 GET 回读到 */
-  async function startMoodFake() {
+  async function startMoodFake(getDelayMs = 0) {
     let stored: Record<string, unknown> | null = null
+    const replyGet = (res: Parameters<typeof sendJson>[0], snapshot: Record<string, unknown> | null): void => {
+      if (snapshot === null) {
+        sendEsError(res, 404, 'not_found', 'no mood yet')
+        return
+      }
+      sendJson(res, 200, { _id: '__mood__', _index: 'personal_memory_xqh', _source: snapshot })
+    }
     const fake = await startFakeEs((req, res) => {
       if (req.path.includes('/_doc/__mood__')) {
         if (req.method === 'GET') {
-          if (stored === null) {
-            sendEsError(res, 404, 'not_found', 'no mood yet')
-            return
-          }
-          sendJson(res, 200, { _id: '__mood__', _index: 'personal_memory_xqh', _source: stored })
+          // 延迟 GET 用来复现「启动读取晚于情绪事件返回」的时序（CI 上比本地慢）。
+          // 关键：快照必须在**请求到达时**取——真实 ES 的迟到响应带的也是请求那一刻的文档。
+          const snapshot = stored
+          if (getDelayMs > 0) setTimeout(() => replyGet(res, snapshot), getDelayMs)
+          else replyGet(res, snapshot)
           return
         }
         if (req.method === 'PUT' || req.method === 'POST') {
@@ -344,6 +355,14 @@ describe('apply · 情绪事件', () => {
   }
 
   const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+  /** 轮询等待条件成立：CI 比本地慢，固定 5ms 会偶发「事件还没写进缓存」。 */
+  async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!check() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
 
   function moodText(harness: FakeCtx): string {
     const section = harness.sections.find((s) => s.name === 'dsh-memory-es-mood')!
@@ -360,11 +379,31 @@ describe('apply · 情绪事件', () => {
 
       const listener = harness.listeners.find((l) => l.event === 'agent/inbox/inserted')!
       listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '太棒了！' }] } } as never)
-      await tick()
+      await waitFor(() => moodText(harness) !== '')
 
       const line = moodText(harness)
       assert.match(line, /心情/, '夸奖后应注入一行心情')
       assert.match(line, /不错|愉快/)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('启动读取晚于情绪事件返回时，不覆盖新心情', async () => {
+    // 回归：apply 的 readMood 挂在下一个 tick，CI 上可能晚于第一条情绪事件返回。
+    // 旧版直接 mood.state = state，会把「愉快」覆盖回中性（2026-11-15 CI 报红）。
+    const { fake } = await startMoodFake(200)
+    try {
+      const harness = fakeCtx()
+      apply(harness.ctx as never, baseConfig({ es: { url: fake.url, caCertPath: '', requestTimeoutMs: 1000 } }))
+      await tick()
+      const listener = harness.listeners.find((l) => l.event === 'agent/inbox/inserted')!
+      listener.handler({ agent: { id: 'a1' }, message: { content: [{ type: 'text', text: '太棒了！' }] } } as never)
+      await waitFor(() => moodText(harness) !== '')
+
+      // 等那条迟到的 GET 回来（200ms），它读到的是中性文档，不得覆盖。
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.match(moodText(harness), /心情/, '迟到的启动读取不应覆盖事件写入的心情')
     } finally {
       await fake.close()
     }
