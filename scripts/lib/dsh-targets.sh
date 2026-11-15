@@ -32,6 +32,7 @@ DSH_DENYLIST=(dsh-es dsh-market)
 DSH_WHITELIST=(
   dsh-xqh dsh-chencan dsh-hongzhihui dsh-laoliu dsh-liuxinling
   dsh-molijin dsh-tanxu dsh-test dsh-zhaoguichun dsh-zhongjinqi dsh-zhongyuhang
+  dsh-yuanweiqiang
 )
 
 # 打印「现取到的、要部署的」容器名（每行一个）；异常时返回非 0，原因写 stderr。
