@@ -271,6 +271,17 @@ export interface EsClient {
     doc: Record<string, unknown>,
     options?: WriteOptions & CallOptions,
   ): Promise<EsWriteResult>
+  /**
+   * 删除一条文档（阶段 38 的并发去重补偿用）。
+   *
+   * 只服务一个场景：写入后按 `content_sha256` 复核，发现自己不是最早那条 → 删自己。
+   * 404 走 `kind: 'not_found'`，由调用方决定是否算作「已经删过」。
+   */
+  delete(
+    indexName: string,
+    id: string,
+    options?: WriteOptions & CallOptions,
+  ): Promise<EsWriteResult>
   /** 检索；body 由 `es/dsl.ts` 组装，这里只负责收发 */
   search(indexName: string, body: Record<string, unknown>, call?: CallOptions): Promise<EsSearchResult>
   /**
@@ -616,6 +627,20 @@ export function createEsClient(config: EsClientConfig): EsClient {
       return {
         id: typeof raw._id === 'string' ? raw._id : id,
         result: typeof raw.result === 'string' ? raw.result : 'updated',
+        status: 200,
+      }
+    },
+
+    async delete(indexName, id, options = {}) {
+      const raw = await request<{ _id?: unknown; result?: unknown }>(
+        'DELETE',
+        `/${enc(indexName)}/_doc/${enc(id)}${refreshQuery(options.refresh)}`,
+        undefined,
+        options.signal,
+      )
+      return {
+        id: typeof raw._id === 'string' ? raw._id : id,
+        result: typeof raw.result === 'string' ? raw.result : 'deleted',
         status: 200,
       }
     },

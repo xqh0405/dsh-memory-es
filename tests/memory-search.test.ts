@@ -314,6 +314,7 @@ describe('searchMemories 编排', () => {
       })
       const result = await searchMemories(deps, { query: 'q', scope: 'personal' })
       assert.equal(result.degraded, true)
+      assert.match(result.text, /向量服务不可用，本次仅关键词检索/, '降级必须写在正文里，模型才看得见')
       assert.equal(h.requests.length, 1, '只应有 BM25 一次请求')
       assert.equal('knn' in (JSON.parse(h.requests[0].body) as object), false)
       assert.equal(result.hits.length, 1)
@@ -530,6 +531,9 @@ describe('searchMemories 编排', () => {
       const result = await searchMemories(h.deps({ log: (event) => events.push(event) }), { query: '北单' })
 
       assert.equal(result.degraded, true, '团队库被跳过必须标 degraded —— 模型要知道自己看的不是全量')
+      // 阶段 38：403 与「向量不可用」是两种降级，正文不能说错原因
+      assert.match(result.text, /团队库不可读/)
+      assert.doesNotMatch(result.text, /向量服务不可用/)
       assert.ok(
         result.hits.some((item) => item.memory_id.includes('p1')),
         `个人库的命中必须还在，实际 ${JSON.stringify(result.hits.map((i) => i.memory_id))}`,

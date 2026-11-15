@@ -672,9 +672,11 @@ export const Config: z<ConfigType> = z.object({
         + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
-    cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+    cacheTtlMs: z.number().step(1_000).min(0).default(600_000)
       .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
-        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
+        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'
+        + '阶段 38 起默认 10 分钟（原来是 30 秒），并同时作为开关：设 0 = 关闭。'
+        + 'save 成功会清空该缓存，避免「刚记住却查不到」。'),
     minScore: z.number().min(0).max(1).default(0.76)
       .description('注入的绝对分数门槛：top1 的向量相似度低于它就不注入。'
         + '默认 0.76 —— 2026-11-05 实测（团队库 326 条）：闲聊 query 的 top1_knn 在 0.7227~0.7430，'

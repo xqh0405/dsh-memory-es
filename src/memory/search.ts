@@ -915,6 +915,16 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     }
   }
 
+  // 阶段 38：降级必须让模型看见。此前只回结构化 `degraded=true`，正文一个字都不提，
+  // 模型会把「只走了关键词」当成完整检索结果，进而相信「没记过」。
+  // 两种降级原因分开说：向量不可用 ≠ 团队库 403（后者个人库照常跑了 kNN）。
+  const degradedHint =
+    teamUnavailable
+      ? '（团队库不可读，本次结果只含个人记忆）'
+      : degraded
+        ? '（向量服务不可用，本次仅关键词检索）'
+        : ''
+
   // 低置信不再丢弃结果：返回 + 标注，让模型自己判断。
   // 丢信息的代价更高——模型会以为「没记过」，转而凭印象编。
   if (verdict.low) {
@@ -937,7 +947,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       degraded,
       filtered,
       ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
-      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${explainText}`,
+      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${degradedHint}${explainText}`,
     }
   }
   log({
@@ -957,7 +967,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     degraded,
     filtered,
     ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
-    text: `${renderText(hits)}${explainText}`,
+    text: `${renderText(hits)}${degradedHint}${explainText}`,
   }
 }
 

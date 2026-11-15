@@ -27,7 +27,7 @@ import type { Embedder } from '../embedding.ts'
 import { EmbeddingError } from '../embedding.ts'
 import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
-import { formatEsError } from '../es/http.ts'
+import { EsError, formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { assertDocOwner, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor, type WriteMode } from './common.ts'
 import { mergeEdges, mergeEdgesSegmented, pickNeighbors, readEdges, type Edge } from '../edges.ts'
@@ -203,8 +203,11 @@ export interface SaveDeps {
   defaultDomain: string
   /** 去重检索用只读身份；`get` 缺失时不建边（老调用点与测试不受影响） */
   reader: Pick<EsClient, 'search'> & Partial<Pick<EsClient, 'get'>>
-  /** 写入用 writer 身份；`update` 缺失时不建边（老调用点与测试不受影响） */
-  writer: Pick<EsClient, 'index'> & Partial<Pick<EsClient, 'update'>>
+  /**
+   * 写入用 writer 身份；`update` 缺失时不建边、`delete` 缺失时不做并发去重补偿
+   * （老调用点与测试不受影响）。
+   */
+  writer: Pick<EsClient, 'index'> & Partial<Pick<EsClient, 'update' | 'delete'>>
   /**
    * 阶段 5.2 建边配置。缺省 = 不建边。
    * 建边是 best-effort：失败只记日志，绝不影响「已保存」的结论。
@@ -548,6 +551,46 @@ function pinnedFullText(verdict: { used: number; max: number; incomingChars: num
 }
 
 /**
+ * 阶段 38：并发写入的幂等补偿。
+ *
+ * 为什么不能只靠「写入前查一次」：`check-then-act` 的窗口关不掉——两个实例同时查，
+ * 都查不到，然后各写一条。ES 没有「content_sha256 唯一」约束（唯一的只有 `_id`），
+ * 而把 `_id` 改成 sha 会推翻现有 id 语义（`memory_id` 与 `_id` 必须相等，get/update/history
+ * 全按它走）。所以这里用**写入后复核**：同 sha 的 active 文档里若有 id 更小的，说明别处
+ * 先写了，删掉自己并把 id 让给它。规则是确定性的（按 id 升序），并发双方会得到同一个结论，
+ * 只有 id 较大的那一条会删自己。
+ *
+ * 返回 `undefined` = 自己就是最早那条（或没有并发重复）。
+ */
+async function dedupeAfterWrite(
+  deps: SaveDeps,
+  index: string,
+  doc: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (deps.writer.delete === undefined) return undefined
+  const sha = doc.content_sha256
+  if (typeof sha !== 'string' || sha === '') return undefined
+  const selfId = String(doc.memory_id)
+  const dup = await deps.reader.search(
+    index,
+    // size 必须 >1：dedupeBody 默认只取一条，看不出「有第二条」
+    { ...dedupeBody(sha), size: 10, _source: ['memory_id'] },
+    { signal: deps.signal },
+  )
+  const ids = dup.hits.map((hit) => String(hit.source.memory_id ?? hit.id)).filter((id) => id !== '')
+  if (ids.length <= 1) return undefined
+  const earliest = [...ids].sort()[0]
+  if (earliest === undefined || earliest === selfId) return undefined
+  try {
+    await deps.writer.delete(index, selfId, { refresh: 'wait_for', signal: deps.signal })
+  } catch (err) {
+    // 并发双方可能都判断自己该删；已经不存在就是已经合并过了
+    if (!(err instanceof EsError && err.kind === 'not_found')) throw err
+  }
+  return earliest
+}
+
+/**
  * 编排：去重 → embedding（可降级）→ F3 → 写（refresh=wait_for，写完立刻可搜）。
  * 失败一律抛（不吞）：ES 不可用时记忆操作必须**明确失败**，不能装作已保存（§6.5）。
  */
@@ -737,6 +780,42 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
     throw err
   }
 
+  // 阶段 38：并发幂等补偿。失败不改变「已写入」的结论，只留痕——
+  // 补偿是「让重试不产生第二条」，不是写成功的前提。
+  let mergedInto: string | undefined
+  try {
+    mergedInto = await dedupeAfterWrite(deps, built.index, built.doc)
+  } catch (err) {
+    log({
+      tool: 'save',
+      user: deps.userId,
+      ms: Date.now() - startedAt,
+      event: 'post_write_dedupe_failed',
+      error: formatEsError(err),
+    })
+  }
+  if (mergedInto !== undefined) {
+    log({
+      tool: 'save',
+      user: deps.userId,
+      ms: Date.now() - startedAt,
+      deduped: true,
+      concurrent_merge: true,
+      kept: mergedInto,
+    })
+    return {
+      status: 'merged',
+      memory_id: mergedInto,
+      deduped: true,
+      degraded,
+      quarantined: false,
+      try_instead:
+        `要看原文用 memory_get(memory_ids=[${mergedInto}])；要修正内容请先 save 新内容，`
+        + `再 memory_update_status(supersede, memory_id=${mergedInto}, replacement_memory_id=<新 id>)。`,
+      text: `并发写入同一内容：已合并到最早那条（memory_id=${mergedInto}），本次重复写入已撤销。`,
+    }
+  }
+
   // 阶段 5.2 建边 + 阶段 9 近似去重（共用一次 kNN；异常已在内部吞掉并记日志）
   let similarTo: string[] = []
   if (embedding !== null && embedding.length > 0) {
@@ -794,6 +873,7 @@ const DESCRIPTION = [
   '一次一条：content 写一句能独立成立的事实，不要贴整段对话。',
   '—— pinned 只给「用户明确要求长期生效」的规则与偏好；普通事实、进度、背景一律默认 false（置顶是每轮的固定成本）。',
   '凭据（口令、令牌、私钥、带密码的连接串）命中 → quarantined=true；换个说法重试仍然会被隔离，不要试。',
+  '准入的「刚才搜到的原文又写回来」判定只在单进程内有效（多实例部署下可能漏判）；同文重复仍由 sha 去重兜住。',
   '相同内容会命中去重（deduped=true）；内容相近会回 similar_to 提示。',
 ].join(' ')
 

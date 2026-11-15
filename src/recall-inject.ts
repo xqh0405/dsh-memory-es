@@ -409,6 +409,13 @@ export interface InjectRecord {
   pinnedOnly?: boolean
   /** 阶段 22：被预算挤掉的条目（空数组/缺省 = 没挤掉任何东西） */
   dropped?: DroppedItem[]
+  /**
+   * 阶段 38：true = 这条记录是**复用**上一次同 query 的结果（没有真的检索）。
+   *
+   * 面板的「注入尝试」仍然计入（那是一次真实的注入），但排查「为什么这么快」
+   * 与「结果为什么没变」时必须能区分真假检索。
+   */
+  cache_hit?: boolean
   /** top1 的向量相似度（向量不可用时缺省）——调 minScore 的依据 */
   top1Score?: number
   /**

@@ -290,7 +290,8 @@ describe('saveMemory 编排', () => {
         quarantined: false,
         text: '已保存',
       })
-      assert.equal(fake.requests.length, 2)
+      // 阶段 38：多了「写入后按 sha 复核」的一次搜索（并发幂等补偿），所以不再硬编码总数
+      assert.equal(fake.requests.filter((r) => r.path.includes('/_search')).length, 2, '去重查询 + 并发复核')
       assert.equal(fake.requests[0].path, '/personal_memory_xqh/_search')
       assert.equal(fake.requests[1].method, 'PUT')
       assert.equal(fake.requests[1].path, `/personal_memory_xqh/_doc/${FIXED_ID}?refresh=wait_for`)
@@ -613,6 +614,108 @@ describe('阶段 37：去重回执带 try_instead', () => {
       const result = await saveMemory(makeDeps(fake), { content: '一条事实', pinned: true })
       assert.equal(result.try_instead, undefined)
       assert.match(result.text, /已按本次要求置为常驻/)
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+describe('阶段 38：并发写入的幂等补偿', () => {
+  /** 有状态的假 ES：真的存文档、真的按 content_sha256 搜、真的删 */
+  async function startStateful() {
+    const docs = new Map<string, Record<string, unknown>>()
+    const deleted: string[] = []
+    const shas: string[] = []
+    const writes: string[] = []
+    const fake = await startFakeEs((req, res) => {
+      if (req.path.includes('/_search')) {
+        const body = JSON.parse(req.body || '{}') as {
+          query?: { bool?: { filter?: unknown[] } }
+          knn?: unknown
+        }
+        // kNN 一路返回空：本组用例只关心 sha 去重
+        if (body.knn !== undefined) {
+          sendJson(res, 200, { took: 1, hits: { total: { value: 0, relation: 'eq' }, hits: [] } })
+          return
+        }
+        const filters = JSON.stringify(body.query?.bool?.filter ?? [])
+        const sha = /"content_sha256":"([0-9a-f]{64})"/.exec(filters)?.[1]
+        shas.push(sha ?? 'NONE')
+        const hits = [...docs.entries()]
+          .filter(([, doc]) => sha === undefined || doc.content_sha256 === sha)
+          .map(([id, doc]) => ({ _id: id, _score: 1, _source: { memory_id: doc.memory_id ?? id } }))
+        sendJson(res, 200, { took: 1, hits: { total: { value: hits.length, relation: 'eq' }, hits } })
+        return
+      }
+      const match = /^\/[^/]+\/_doc\/([^/?]+)/.exec(req.path)
+      if (match !== null && req.method === 'DELETE') {
+        const id = decodeURIComponent(match[1] ?? '')
+        if (!docs.has(id)) {
+          sendJson(res, 404, { _index: 'x', _id: id, found: false, result: 'not_found' })
+          return
+        }
+        docs.delete(id)
+        deleted.push(id)
+        sendJson(res, 200, { _index: 'x', _id: id, result: 'deleted' })
+        return
+      }
+      if (match !== null && (req.method === 'PUT' || req.method === 'POST')) {
+        const id = decodeURIComponent(match[1] ?? '')
+        writes.push(`${req.method} ${req.path}`)
+        docs.set(id, JSON.parse(req.body || '{}') as Record<string, unknown>)
+        sendJson(res, 201, { _index: 'x', _id: id, result: 'created' })
+        return
+      }
+      sendJson(res, 400, { error: { type: 'bad_request', reason: `${req.method} ${req.path}` } })
+    })
+    return { fake, docs, deleted, shas, writes }
+  }
+
+  test('并发两次同内容：最终只留一条，两边返回同一个 id', async () => {
+    const { fake, docs, deleted } = await startStateful()
+    try {
+      // 必须用不同 id：makeDeps 默认 newId 固定，两次并发会覆盖同一文档（测不出重复）
+      let seq = 0
+      const deps = makeDeps(fake, { newId: () => `id-${++seq}` })
+      const [a, b] = await Promise.all([
+        saveMemory(deps, { content: '并发写同一条' }),
+        saveMemory(deps, { content: '并发写同一条' }),
+      ])
+      assert.equal(docs.size, 1, `只该留一条，实际 ${[...docs.keys()].join(',')}`)
+      assert.equal(a.memory_id, b.memory_id, '两边都应指向被保留的那条')
+      // 两种合法结局：要么一方在去重阶段就命中（删 0 次），要么双方都写了、一方撤销（删 1 次）
+      assert.ok(deleted.length <= 1, `最多撤销一次，实际 ${deleted.length}`)
+      assert.ok(
+        [a.status, b.status].includes('merged'),
+        `至少一边要如实说「合并了」，实际 ${a.status}/${b.status}`,
+      )
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('没有重复时不删自己', async () => {
+    const { fake, docs, deleted } = await startStateful()
+    try {
+      const result = await saveMemory(makeDeps(fake), { content: '一条独立内容' })
+      assert.equal(result.status, 'created')
+      assert.equal(docs.size, 1)
+      assert.deepEqual(deleted, [], '没有并发就不该有删除')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('并发写不同内容：两条都留（不能把异义内容当成重复）', async () => {
+    const { fake, docs, shas, writes } = await startStateful()
+    try {
+      let seq = 0
+      const deps = makeDeps(fake, { newId: () => `diff-${++seq}` })
+      await Promise.all([
+        saveMemory(deps, { content: '内容甲' }),
+        saveMemory(deps, { content: '内容乙' }),
+      ])
+      assert.equal(docs.size, 2, `shas=${shas.join(',')} docs=${[...docs.keys()].join(',')} writes=${writes.join(' | ')}`)
     } finally {
       await fake.close()
     }
