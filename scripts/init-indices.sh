@@ -202,6 +202,10 @@ put_index team_knowledge <<'JSON'
       "valid_until":       { "type": "date" },
       "revoked_by":        { "type": "keyword" },
       "revoke_reason":     { "type": "text" },
+      "trust_level":       { "type": "keyword" },
+      "untrusted":         { "type": "boolean" },
+      "merged_into":       { "type": "keyword" },
+      "merge_reason":      { "type": "keyword", "ignore_above": 256 },
       "updated_at":        { "type": "date" }
     }
   }

@@ -2454,7 +2454,7 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
   const reason = str(input.reason).trim()
-  if ((action === 'reject' || action === 'withdraw') && reason === '') {
+  if ((action === 'reject' || action === 'withdraw' || action === 'merge') && reason === '') {
     return json(res, 400, { ok: false, error: `${action} 必须填写原因` })
   }
   if (input.confirm !== true) {
@@ -2485,7 +2485,7 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   // 先读一次当前状态：只允许对 pending 做 approve/reject，避免重复点
   const current = await writeClient.search(names.team, {
     size: 1,
-    _source: ['doc_id', 'review_state', 'status', 'content'],
+    _source: ['doc_id', 'review_state', 'status', 'content', 'conflict_with'],
     query: { ids: { values: [docId] } },
   })
   const hit = current.hits?.hits?.[0]
@@ -2495,19 +2495,46 @@ async function handleReviewAction(ctx, res, docId, action, req) {
   if (currentStatus !== 'active') {
     return json(res, 409, { ok: false, error: `该条目当前 status=${currentStatus}，不是 active，不能${action}` })
   }
-  if ((action === 'approve' || action === 'reject') && currentState !== 'pending') {
+  if ((action === 'approve' || action === 'reject' || action === 'merge') && currentState !== 'pending') {
     return json(res, 409, { ok: false, error: `该条目当前 review_state=${currentState}，不是 pending` })
   }
 
   const now = new Date().toISOString()
   const patch = {}
   if (action === 'approve') {
-    Object.assign(patch, { review_state: 'approved', reviewed_at: now, reviewed_by: actor, updated_at: now })
+    // 阶段 40：人工审核通过 = 背书 → 可信度升到 medium、摘掉「外部内容」标记
+    Object.assign(patch, {
+      review_state: 'approved',
+      trust_level: 'medium',
+      untrusted: false,
+      reviewed_at: now,
+      reviewed_by: actor,
+      updated_at: now,
+    })
   } else if (action === 'reject') {
     Object.assign(patch, {
       review_state: 'rejected',
       status: 'rejected',
       reject_reason: reason,
+      reviewed_at: now,
+      reviewed_by: actor,
+      updated_at: now,
+    })
+  } else if (action === 'merge') {
+    // 阶段 40：冲突三选一的「合并」——把当前条并入它标记的冲突对象。
+    // 不删文档：status 置 superseded + merged_into 指向保留的那条，两条都还能查。
+    const target = str(input.into) || str(hit._source?.conflict_with)
+    if (target === '') {
+      return json(res, 400, { ok: false, error: 'merge 需要目标条目：该条没有 conflict_with，请在请求体里传 into' })
+    }
+    if (target === docId) {
+      return json(res, 400, { ok: false, error: 'merge 的目标不能是自己' })
+    }
+    Object.assign(patch, {
+      review_state: 'merged',
+      status: 'superseded',
+      merged_into: target,
+      merge_reason: reason,
       reviewed_at: now,
       reviewed_by: actor,
       updated_at: now,
@@ -2520,7 +2547,7 @@ async function handleReviewAction(ctx, res, docId, action, req) {
 
   // 审计：失败不影响主操作（与 CLI 一致），但要在响应里说明
   const auditDoc = {
-    event: action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'withdrawn',
+    event: action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : action === 'merge' ? 'merged' : 'withdrawn',
     actor,
     at: now,
     subject_type: 'team_doc',
@@ -2529,6 +2556,7 @@ async function handleReviewAction(ctx, res, docId, action, req) {
     ...(action === 'approve' ? { from_state: 'pending', to_state: 'approved' } : {}),
     ...(action === 'reject' ? { from_state: 'pending', to_state: 'rejected' } : {}),
     ...(action === 'withdraw' ? { to_state: 'superseded' } : {}),
+    ...(action === 'merge' ? { from_state: 'pending', to_state: 'merged' } : {}),
     ...(reason === '' ? {} : { reason }),
   }
   let auditWritten = true
@@ -3798,7 +3826,7 @@ async function handle(ctx, req, res) {
   // 注册 `/memory-es/api` 后，req.url 可能是 `/memory-es/api/overview` 或 `/overview`。
   const path = url.pathname.startsWith(ROUTE) ? url.pathname.slice(ROUTE.length) || '/' : url.pathname
   try {
-    const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw)$/.exec(path)
+    const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw|merge)$/.exec(path)
     if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
     if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
     // 阶段 29：文档归档 / 恢复（只改 status 位，不删数据）

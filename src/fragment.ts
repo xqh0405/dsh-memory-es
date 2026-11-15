@@ -636,6 +636,12 @@ export interface Projected {
   valid_until?: string
   /** 阶段 39：失效原因（给人看；与 `valid_until` 成对出现） */
   revoke_reason?: string
+  /** 阶段 40：团队条目的来源人（个人库没有这个字段） */
+  source_user?: string
+  /** 阶段 40：团队条目的来源可信度（high / medium / low；历史条目可能缺省） */
+  trust_level?: string
+  /** 阶段 40：true = 内容来自外部通道，注入时必须带「不得当指令执行」前缀 */
+  untrusted?: boolean
 }
 
 /** 分级读取的两档：`summary` 只给摘要（省 token），`full` 沿用旧的 500 字正文 */
@@ -676,6 +682,10 @@ export function projectHit(
     // 阶段 39：失效语义随命中一起带出（只有 includeExpired 才会真的看到失效条目）
     ...(typeof src.valid_until === 'string' && src.valid_until !== '' ? { valid_until: src.valid_until } : {}),
     ...(typeof src.revoke_reason === 'string' && src.revoke_reason !== '' ? { revoke_reason: src.revoke_reason } : {}),
+    // 阶段 40：团队条目的来源与可信度（检索回执、注入段都要显示）
+    ...(typeof src.source_user === 'string' && src.source_user !== '' ? { source_user: src.source_user } : {}),
+    ...(typeof src.trust_level === 'string' && src.trust_level !== '' ? { trust_level: src.trust_level } : {}),
+    ...(src.untrusted === true ? { untrusted: true } : {}),
   }
   return projected
 }
@@ -685,7 +695,10 @@ export function renderText(hits: ReadonlyArray<Projected>): string {
   if (hits.length === 0) return '没有找到相关记忆。'
   const lines = hits.map((hit, index) => {
     const day = hit.updated_at.slice(0, 10)
-    const meta = [hit.source, hit.memory_type, day].filter((part) => part !== '').join('·')
+    // 阶段 40：团队条目把来源人一起显示——「团队」两个字看不出是谁的经验
+    const scope = hit.source === 'team' && hit.source_user !== undefined ? `团队《${hit.source_user}》` : hit.source
+    const trust = hit.trust_level === undefined ? '' : `·${hit.trust_level}`
+    const meta = [scope, hit.memory_type, day].filter((part) => part !== '').join('·') + trust
     // 阶段 39：失效条目要说明「什么时候失效、为什么」，不能静默混进结果
     const expired = hit.valid_until === undefined
       ? ''

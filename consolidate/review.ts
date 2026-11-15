@@ -77,6 +77,9 @@ export async function approve(
       review_state: 'approved',
       reviewed_at: now.toISOString(),
       reviewed_by: reviewer,
+      // 阶段 40：人工审核通过 = 背书，可信度升到 medium 且不再算「外部内容」
+      trust_level: 'medium',
+      untrusted: false,
       updated_at: now.toISOString(),
     },
     { refresh: 'wait_for' },

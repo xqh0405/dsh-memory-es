@@ -367,6 +367,7 @@ window.__ModuleLoader__.load({
       reviewConflict: '冲突对象',
       reviewApprove: '批准',
       reviewReject: '驳回',
+      reviewMerge: '合并到冲突对象',
       reviewWithdraw: '撤回',
       reviewReason: '原因（驳回/撤回必填）',
       reviewConfirm: '确认',
@@ -736,6 +737,7 @@ window.__ModuleLoader__.load({
       reviewConflict: 'Conflicting entry',
       reviewApprove: 'Approve',
       reviewReject: 'Reject',
+      reviewMerge: 'Merge into conflict',
       reviewWithdraw: 'Withdraw',
       reviewReason: 'Reason (required for reject/withdraw)',
       reviewConfirm: 'Confirm',
@@ -4290,6 +4292,8 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
               actionBtn(row, 'approve', t('reviewApprove')),
               actionBtn(row, 'reject', t('reviewReject')),
+              // 阶段 40：只有标了冲突的条目才给「合并」（并到 conflict_with 那条）
+              row.conflictWith ? actionBtn(row, 'merge', t('reviewMerge')) : null,
               actionBtn(row, 'withdraw', t('reviewWithdraw')),
             ),
 
