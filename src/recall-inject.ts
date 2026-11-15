@@ -28,6 +28,42 @@ import { dshMemoryDataDir } from './sessions.ts'
 /** 注入块在 system prompt 里的段落名（与工具说明、情绪、引用约定并列） */
 export const RECALL_SECTION_NAME = 'dsh-memory-es-recall'
 
+/**
+ * 短指令白名单：这些消息**不携带「要查什么」**，检索必然低置信。
+ *
+ * 2026-11-15 巡检实测（近 3 天 1177 次注入检索）：
+ *  · zhongjinqi 的 query 76%（537/703）是 ≤6 字，样本 `继续` / `jixu` / `提交` / `+放这`；
+ *  · 这类 query 的 top1 全部落在 0.695~0.743，低于 `midBandFloor=0.76` → 必然 low_confidence；
+ *  · 它们仍会完整跑一次 embed（CPU 124ms / GPU 35ms）+ 一次 ES 检索，纯浪费。
+ *
+ * 所以这里用**白名单**而不是「长度 ≤ N」：长度门槛会误杀「北单接口」这类短但有信息量的查询，
+ * 而白名单里的词确定是推进/确认语义，跳过检索零损失（pinned 常驻段照常注入）。
+ */
+export const SHORT_COMMAND_WORDS: ReadonlySet<string> = new Set([
+  '继续', '继续吧', '继续写', '继续做', '继续推进', '接着', '接着来',
+  '开始', '开始吧', '开始执行', '执行', '下一步', '再来', '再试', '再试一次',
+  '提交', '提交吧', '提交一下', '改吧', '跑吧', '上吧',
+  '好', '好的', '好呀', '嗯', '嗯嗯', '可以', '行', '是的', '对的', '没问题',
+  'ok', 'okay', 'yes', 'go', 'next', 'jixu',
+])
+
+/** 白名单命中的最大字符数：超过这个长度就不当「短指令」（防止长句恰好以「继续」开头被误判） */
+export const SHORT_COMMAND_MAX_CHARS = 6
+
+/**
+ * 判断一条用户消息是否属于「短指令」：归一化（去空白/标点/小写）后命中白名单。
+ *
+ * 归一化必须做：实测同一个人在 `继续` / `继续吧` / `继续！` / `jixu` 之间混用。
+ */
+export function isShortCommand(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/[\s，。！？、,.!?~～…:：;；"'`]+/g, '')
+    .toLowerCase()
+  if (normalized === '' || normalized.length > SHORT_COMMAND_MAX_CHARS) return false
+  return SHORT_COMMAND_WORDS.has(normalized)
+}
+
 export interface RecallInjectConfig {
   enabled: boolean
   /** 单次检索的硬超时（毫秒）；超时 = 这轮不注入 */
@@ -307,7 +343,7 @@ export function composeInjection(input: ComposeInput): ComposeResult {
 }
 
 /** 可观测的一次注入尝试结果，供日志与测试断言 */
-export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'low_score' | 'timeout' | 'error' | 'disabled' | 'empty_query'
+export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'low_score' | 'timeout' | 'error' | 'disabled' | 'empty_query' | 'short_query'
 
 export interface InjectResult {
   outcome: InjectOutcome

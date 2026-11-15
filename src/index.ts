@@ -34,7 +34,9 @@ import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SE
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
-import { classifyInjectError, composeInjection, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
+import { createLocalModelWriter, createReranker, resolveLocalModelsLogPath } from './local-models.ts'
+import { createLocalChat } from './local-chat.ts'
+import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
 import type { Projected } from './fragment.ts'
@@ -131,6 +133,28 @@ export function apply(ctx: Context, config: ConfigType): void {
     timeoutMs: EMBEDDING_TIMEOUT_MS,
   })
 
+  /**
+   * 本地网关重排（docs/本地模型扩展.md 阶段 B）。
+   *
+   * **构造即零副作用**：不建连、不读凭据、不发请求。`enabled=false` 时
+   * `createReranker` 返回的桩连 `memory_search` 的候选扩容都不会触发，
+   * 检索路径与未装该能力时逐条一致。
+   *
+   * 只接显式 `memory_search`：注入/影子的总预算 500ms，比重排读超时还短，
+   * 叠在一起只会让注入先超时。
+   */
+  const rerankWriter = createLocalModelWriter(resolveLocalModelsLogPath(config.retrieval.rerank.logPath))
+  const reranker = createReranker(config.retrieval.rerank, config.localModels, {
+    log: (event) => logger.info('local-models %o', event),
+  })
+  /**
+   * 阶段 D：本地蒸馏客户端。默认 `enabled=false` —— 那时它连凭据都不读，
+   * `runDistillJob` 直接走原来的 ctx.llm 路由。
+   */
+  const localChat = createLocalChat(config.distill.local, config.localModels, {
+    log: (event) => logger.info('local-chat %o', event),
+  })
+
   const distillEnabled = config.distill.enabled
   // 运行时再取：llm 可能此刻还没就绪，也可能整套部署根本没配模型
   const getLlm = (): unknown => {
@@ -204,6 +228,7 @@ export function apply(ctx: Context, config: ConfigType): void {
                 provider: config.distill.provider,
                 model: config.distill.model,
                 timeoutMs: config.distill.timeoutMs,
+                localChat,
                 log: (event) => logger.info('distill-run %o', event),
               },
               { memoryId, content, domain, route },
@@ -245,6 +270,7 @@ export function apply(ctx: Context, config: ConfigType): void {
           provider: config.distill.provider,
           model: config.distill.model,
           timeoutMs: config.distill.timeoutMs,
+          localChat,
           attempts,
           log: (event) => logger.info('distill-sweep %o', event),
         })
@@ -303,6 +329,9 @@ export function apply(ctx: Context, config: ConfigType): void {
           searchLogIndex: `${config.index.searchLogPrefix}${userId}`,
           // 阶段 9：命中写进短期缓存，供写入侧识别「检索原文再摄取」
           recallCache,
+          // 本地网关重排：关闭时传 null，search.ts 的代码路径完全跳过
+          rerank: config.retrieval.rerank.enabled ? reranker : null,
+          onRerank: (record) => rerankWriter.write({ ts: new Date().toISOString(), ...record }),
           log: (event) => logger.info('search %o', event),
         }),
       ),
@@ -1072,6 +1101,26 @@ export function apply(ctx: Context, config: ConfigType): void {
             chars: composed.text.length,
             dropped: composed.dropped,
           }
+        }
+
+        // 短指令短路（2026-11-15 巡检）：`继续`/`提交`/`ok` 这类消息不携带「要查什么」，
+        // 实测 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然 low_confidence。
+        // 跳过检索段只注 pinned：省一次 embed + 一次 ES 检索（zhongjinqi 一人 3 天 537 次）。
+        // 注意必须在 fetchPinned 之后：常驻段照常注入，这是短指令回合唯一有价值的部分。
+        if (inject.shortCommandSkip && isShortCommand(query)) {
+          const only = compose([])
+          writeRecord({
+            outcome: 'short_query',
+            hits: 0,
+            items: only.items,
+            pinnedItems: only.pinnedItems,
+            pinnedInjected: only.pinnedItems.length,
+            chars: only.chars,
+            ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
+            ...(only.pinnedItems.length > 0 ? { pinnedOnly: true } : {}),
+            note: '短指令：跳过检索段，只注常驻',
+          })
+          return only.text
         }
 
         try {

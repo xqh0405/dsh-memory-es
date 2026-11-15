@@ -59,6 +59,15 @@ export interface ConfigType {
     model: string
     dims: number
   }
+  /**
+   * 本地推理网关（共享连接块，见 docs/本地模型扩展.md）。
+   * `baseUrl` 留空 = rerank / 本地蒸馏 / 视觉全部视为未配置，零请求。
+   */
+  localModels: {
+    baseUrl: string
+    /** DSH credential-ref 名（从 `$DSH_HOME/.credentials.yaml` 读），不是 OS 环境变量 */
+    apiKeyEnv: string
+  }
   prompt: {
     /** 阶段 12：引用格式要求（默认关） */
     citation: boolean
@@ -73,6 +82,17 @@ export interface ConfigType {
     defaultDetail: string
     /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
     synonyms?: Record<string, string>
+    /** 本地网关重排（默认关；关时检索路径一行不动） */
+    rerank: {
+      enabled: boolean
+      model: string
+      candidates: number
+      docChars: number
+      timeoutMs: number
+      failureThreshold: number
+      scoreWeight: number
+      logPath: string
+    }
   }
   /** 排序乘子（阶段 2） */
   ranking: {
@@ -126,6 +146,12 @@ export interface ConfigType {
   distill: {
     /** 保存后是否后台蒸馏（不阻塞入库） */
     enabled: boolean
+    /** 本地蒸馏（阶段 D）；默认关 */
+    local: {
+      enabled: boolean
+      model: string
+      timeoutMs: number
+    }
     /** 模型路由；留空 = 用宿主第一个可用模型 */
     provider: string
     model: string
@@ -201,6 +227,11 @@ export interface ConfigType {
     timeoutMs: number
     maxItems: number
     maxChars: number
+    /**
+     * 短指令短路（2026-11-15）：`继续`/`提交`/`ok` 这类消息跳过检索段、只注 pinned。
+     * 实测这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信。
+     */
+    shortCommandSkip: boolean
     sectionOrder: number
     cacheTtlMs: number
     /** top1 的向量相似度门槛；低于它不注入（note=ok 分不出闲聊与相关） */
@@ -320,6 +351,18 @@ export const Config: z<ConfigType> = z.object({
     dims: z.number().step(1).default(1024)
       .description('向量维度，必须与索引 mapping 一致。'),
   }),
+  /**
+   * 本地推理网关（docs/本地模型扩展.md 的共享连接块）。
+   *
+   * **默认留空 = 全部本地能力视为未配置**：没配的人必须零感知、零延迟、零行为变更。
+   * 配了 `baseUrl` 也不会自动开任何能力——各能力的 `enabled` 仍各自默认 false。
+   */
+  localModels: z.object({
+    baseUrl: z.string().default('')
+      .description('内网推理网关（OpenAI 兼容），例 http://192.168.50.127:8080/v1；留空 = 全部能力未配置。'),
+    apiKeyEnv: z.string().default('')
+      .description('凭据引用名（DSH credential-ref，从 $DSH_HOME/.credentials.yaml 读，不读 OS 环境变量）；留空 = 网关不鉴权。'),
+  }).default({}),
   prompt: z.object({
     citation: z.boolean().default(false)
       .description('阶段 12「命中后供给」：要求模型引用记忆时标明出处（默认关；会改变回答风格，未做生成侧 A/B 前不默认开）。'),
@@ -339,6 +382,30 @@ export const Config: z<ConfigType> = z.object({
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})
       .description('查询扩展表（口语/中文 → 书面/英文），BM25 与向量两路都用。默认空；A/B 实测单独开 should 失败 10 → 8，与拒答同开 10 → 1。'),
+    /**
+     * 本地网关重排（阶段 B）。**默认关**：它改变「谁排在前面」，
+     * 属于改检索行为的开关，按本项目护栏默认关；要开先看 eval 的对比数字。
+     *
+     * 关闭时检索路径**一行不动**：候选不扩容、不发请求、不读凭据。
+     */
+    rerank: z.object({
+      enabled: z.boolean().default(false)
+        .description('本地网关重排（默认关）。开启后在跨库合并与后验乘子之间插一次重排请求。'),
+      model: z.string().default('reranker')
+        .description('网关上的重排模型 id 或别名（llama-swap 的 bge-reranker 别名是 reranker/rerank）。'),
+      candidates: z.number().step(1).min(2).max(100).default(20)
+        .description('送进重排的候选数；只在 enabled 时用于把每路候选池扩到这么大。'),
+      docChars: z.number().step(1).min(50).max(2_000).default(300)
+        .description('每条候选送进模型的正文上限（字符）。实测 600 字 × 20 条约 420ms，300 字约 200ms；越长越准但越慢。'),
+      timeoutMs: z.number().step(1).min(50).max(3_000).default(600)
+        .description('读超时（毫秒）。必须远小于 recall 的 3000ms 总预算；实测 20 条候选热态 81ms / 首次 154ms。'),
+      failureThreshold: z.number().step(1).min(1).max(20).default(3)
+        .description('连续失败 N 次 → 本进程内熔断，记一次 warn，之后不再发请求（直到重启）。'),
+      scoreWeight: z.number().min(0).max(5).default(1)
+        .description('名次并入 RRF 的权重：只用重排名次构造 weight × 1/(rrfK + rank)，不混入 logit 尺度。0 = 只记录不改变排序。'),
+      logPath: z.string().default('')
+        .description('JSONL 记账路径；留空 = $DSH_HOME/memory-es/local-models.jsonl。'),
+    }).default({}),
   }),
   /**
    * 置信判定（阶段 0.5）：分层规则，替代原来单一的 marginFloor。
@@ -453,6 +520,20 @@ export const Config: z<ConfigType> = z.object({
     provider: z.string().default(''),
     model: z.string().default(''),
     timeoutMs: z.number().default(30_000),
+    /**
+     * 阶段 D：蒸馏改走本地网关。**默认关**，关时走原来的 `ctx.llm` 路由。
+     * 本地返回空正文或失败 → **回落云端**（D2），不会把空串当结果写库。
+     */
+    local: z.object({
+      enabled: z.boolean().default(false)
+        .description('蒸馏优先走本地网关（复用 localModels.baseUrl）；失败/空正文自动回落 ctx.llm。'),
+      model: z.string().default('qwen3-4b')
+        .description('本地的蒸馏模型 id/别名；网关侧需已关思考（enable_thinking），否则会拿不到正文。'
+          + '默认 4b：它是 127 的 aux 常驻模型，不参与大模型互斥（不会把用户正在用的大模型踢掉），'
+          + '30 条真实记忆实测解析失败率 0%；30b 是 3.3% 且会占 big 组。'),
+      timeoutMs: z.number().step(1).min(1_000).max(600_000).default(60_000)
+        .description('本地蒸馏的读超时（毫秒）。后台任务，比 rerank 宽松得多。'),
+    }).default({}),
   }),
   /**
    * 阶段 9：写入准入屏障。
@@ -514,8 +595,8 @@ export const Config: z<ConfigType> = z.object({
       .description('待审自述候选的存量上限；pending 达到它就不再提炼。默认 20。'),
     maxOutput: z.number().step(1).min(1).max(20).default(5)
       .description('单次模型返回的候选上限，超出部分丢弃。默认 5。'),
-    dedupMinScore: z.number().min(0.7).max(0.99).default(0.88)
-      .description('同义判定阈值（kNN 余弦），越高越严。默认 0.88。'),
+    dedupMinScore: z.number().min(0.7).max(0.99).default(0.85)
+      .description('同义判定阈值（kNN 余弦），越高越严。默认 0.85（2026-11-14 由 0.88 下调：实测真同义改写落在 0.8688~0.8730，0.88 放过了全部重复）。'),
     dedupMinScoreAnchored: z.number().min(0.6).max(0.99).default(0.82)
       .description('锚定条目的判重阈值（更严，锚点=已定稿）。默认 0.82。'),
   }),
@@ -584,6 +665,11 @@ export const Config: z<ConfigType> = z.object({
       .description('注入条数上限；与影子 recallShadow.maxItems 保持一致，这样影子数据可以直接预估真实体积。'),
     maxChars: z.number().step(1).min(100).default(600)
       .description('注入正文的字符预算（按检索顺序累加）。实测 3 条约 363 字符 ≈ 181 token。'),
+    shortCommandSkip: z.boolean().default(true)
+      .description('短指令短路：`继续`/`提交`/`ok` 这类不携带信息量的消息只注入 pinned 常驻段，跳过检索。'
+        + '2026-11-15 巡检实测：这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信，'
+        + '仍会完整跑 embed + ES 检索（zhongjinqi 一人 3 天 537/703 次）。'
+        + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
     cacheTtlMs: z.number().step(1_000).min(0).default(30_000)

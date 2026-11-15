@@ -189,7 +189,7 @@ describe('apply', () => {
       on.ctx as never,
       baseConfig({
         es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 },
-        distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000 },
+        distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000, local: { enabled: false, model: 'qwen3-30b', timeoutMs: 60_000 } },
       }),
     )
     assert.equal(on.disposers.length, off.disposers.length + 1, '开着蒸馏就该多注册一个清扫 effect')
@@ -234,7 +234,7 @@ describe('apply', () => {
         on.ctx as never,
         baseConfig({
           es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 },
-          distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000 },
+          distill: { enabled: true, provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 30_000, local: { enabled: false, model: 'qwen3-30b', timeoutMs: 60_000 } },
         }),
       )
       const started = timers.slice(baseline)

@@ -189,6 +189,19 @@ for j in range(ms, me):
     elif re.match(r"^      teamWrite:", l):
         lines[j] = "      teamWrite: false"; ident_changed.append("teamWrite")
 
+# ---- 补 recallInject 段（2026-11-15 巡检发现的系统性缺口）----
+# 为什么必须在模板层补：`recallInject.enabled` 的 schema 默认值是 false，
+# 所以配置里少这一段 = 自动召回完全不工作（连 pinned 常驻都不注入），
+# 而且日志里没有任何报错——实测 zhaoguichun / yuanweiqiang 两个容器就漏了这段。
+if not re.search(r"^    recallInject:", "\n".join(lines[ms:me]), re.M):
+    ins = next((j for j in range(ms, me) if re.match(r"^    embedding:", lines[j])), None)
+    if ins is None:
+        ins = me
+    block = ["    recallInject:", "      enabled: true", "      prewarm:", "        enabled: false", ""]
+    lines[ins:ins] = block
+    me += len(block)
+    print("  [add]      补 recallInject.enabled=true（缺这段 = 自动召回默认关）")
+
 # ---- 补 persona / stickers 段（从参照实例原样搬，保证与既有成员一致）----
 def extract_ref_section(path):
     t = open(path, encoding="utf-8").read().split("\n")

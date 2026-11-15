@@ -160,6 +160,70 @@ export function mergeScopes(
 }
 
 /**
+ * 把本地网关的重排名次并入融合分（阶段 B）。
+ *
+ * 为什么不能「只重排不改分」：`spreadActivation` 与 `applyRanking` 都按 `fusedScore`
+ * 重新排序（乘子默认非 0，所以一定重排），纯顺序会被它们抹平。
+ *
+ * 为什么不用 rerank 的原始分数：它返回的是 **logit**（实测相关 1.66 / 无关 −11.03），
+ * 与 RRF 的 1/(k+rank) 差一个数量级，直接混入会毁掉乘子语义。
+ *
+ * 实现：**在候选自身的分数区间内按名次重排**。
+ * 参与重排的 N 条，原分区间是 [minP, maxP]；重排后第 1 名拿 maxP、第 N 名拿 minP，
+ * 中间按名次线性插值（原分只留作同档 tie-break，量级 1e-6）。
+ *
+ * 三条理由：
+ *  · 用「替换」而不是「相加」：相加量得压过原分差（最坏 0.016，两路命中 vs 一路）
+ *    才生效，那需要权重 60+，乘子随即失效；
+ *  · **必须停在候选自己的区间内**：区间外（尤其小于 minP）会与「没送进重排的尾部候选」
+ *    的原始 RRF 分不可比——2026-11-13 评测实测过：重写成分数池后未参与候选插进中间，
+ *    30 条查询几乎全部 ✓→✗；
+ *  · 区间内等距分布让相邻档距约为区间跨度/N（默认 20 条时相对差 2~5%），
+ *    而后验乘子默认幅度约 10% —— 单个乘子能挪两三档、叠加几项才能翻盘，
+ *    正好是「重排定相关性主序、后验信号微调」的关系。
+ *
+ * `scores.length` 是**实际参与重排的条数**（调用方只送前 N 条）：
+ * 没送进重排的条目保持原分；它们本来就在参与候选之后（merged 已按分降序）。
+ */
+export function blendRerankScores(
+  hits: readonly ScopedHit[],
+  scores: readonly number[],
+  options: { weight: number; rrfK: number },
+): ScopedHit[] {
+  const participating = Math.min(hits.length, scores.length)
+  if (participating === 0) return [...hits]
+  // weight=0 是「只记账、不改排序」的显式关闭档；weight 其余取值只缩放区间跨度
+  if (!(options.weight > 0)) return [...hits]
+
+  // 名次：分数降序；同分保持原序（稳定排序，避免同一批候选每次抖）
+  const order = Array.from({ length: participating }, (_, i) => i)
+  order.sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a - b)
+  const rankOf = new Map<number, number>()
+  order.forEach((index, position) => rankOf.set(index, position + 1))
+
+  const originals = hits.slice(0, participating).map((hit) => hit.fusedScore)
+  const maxP = Math.max(...originals)
+  // 区间按 weight 缩放：weight=1 用原区间，>1 拉开档距（评测对照组用）
+  const span = Math.max(0, maxP - Math.min(...originals)) * options.weight
+  const low = maxP - span
+  const step = participating > 1 ? span / (participating - 1) : 0
+  // tie-break 用原分归一化，量级远小于档距（区间为 0 时它就是唯一的区分）
+  const tieBreakScale = Math.max(Math.abs(maxP), 1e-9) * 1e-6
+
+  const blended = hits.map((hit, index) => {
+    const rank = rankOf.get(index)
+    if (rank === undefined) return hit
+    const base = maxP - step * (rank - 1)
+    return { ...hit, fusedScore: base + (Math.abs(hit.fusedScore) / Math.max(Math.abs(maxP), 1e-9)) * tieBreakScale }
+  })
+  return blended.sort((a, b) => {
+    if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
+    if (a.origin !== b.origin) return a.origin === 'personal' ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
+}
+
+/**
  * 按 memory_type 的半衰期（天）。
  *
  * 为什么按类型分：统一的 30 天对 `task_progress`（两周就该过时）太慢，

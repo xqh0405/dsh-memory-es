@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createEmbedder } from '../src/embedding.ts'
 import { createEsClient } from '../src/es/http.ts'
+import { createReranker } from '../src/local-models.ts'
 import { searchMemories, type SearchDeps } from '../src/memory/search.ts'
 import { DEFAULT_RANKING } from '../src/fragment.ts'
 import { DEFAULT_CONFIG_PATH, parsePluginConfig } from './lib/plugin-config.ts'
@@ -70,6 +71,19 @@ function parseArgs(argv: string[]) {
     noGate: true,
     agreementBonus: undefined as number | undefined,
     updateBaseline: false,
+    /**
+     * 阶段 B/C：本地网关重排。默认关（与生产默认一致）；
+     * 评测时显式 --rerank 才是开启态。gateway/api-ref 走命令行、
+     * 不写进 profile —— 评测是「临时对照实验」，不该改生产配置。
+     */
+    rerank: false,
+    gateway: '',
+    apiRef: '',
+    rerankModel: 'reranker',
+    rerankCandidates: 20,
+    docChars: 300,
+    rerankWeight: 1,
+    rerankTimeoutMs: 600,
   }
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i]
@@ -81,6 +95,14 @@ function parseArgs(argv: string[]) {
     else if (a === '--agreement-bonus') opts.agreementBonus = Number(argv[++i])
     else if (a === '--no-gate') opts.noGate = true
     else if (a === '--gate') opts.noGate = false
+    else if (a === '--rerank') opts.rerank = true
+    else if (a === '--gateway') opts.gateway = argv[++i] ?? ''
+    else if (a === '--api-ref') opts.apiRef = argv[++i] ?? ''
+    else if (a === '--rerank-model') opts.rerankModel = argv[++i] ?? 'reranker'
+    else if (a === '--candidates') opts.rerankCandidates = Number(argv[++i])
+    else if (a === '--doc-chars') opts.docChars = Number(argv[++i])
+    else if (a === '--weight') opts.rerankWeight = Number(argv[++i])
+    else if (a === '--rerank-timeout') opts.rerankTimeoutMs = Number(argv[++i])
     else throw new Error(`未知参数：${a}`)
   }
   return opts
@@ -148,6 +170,33 @@ async function main() {
     password: cfg.password,
   })
   const embed = createEmbedder({ url: cfg.embedUrl, model: cfg.embedModel, dims: cfg.dims })
+  /**
+   * 阶段 B/C：开启态对照。
+   *
+   * `--rerank` 才构造真客户端；不开时 deps 里没有 rerank，
+   * search 的代码路径与生产默认态一模一样（这也是关闭态回归的保证）。
+   */
+  const rerankDurations: number[] = []
+  const reranker = opts.rerank
+    ? createReranker(
+        {
+          enabled: true,
+          model: opts.rerankModel,
+          candidates: opts.rerankCandidates,
+          docChars: opts.docChars,
+          timeoutMs: opts.rerankTimeoutMs,
+          failureThreshold: 3,
+          scoreWeight: opts.rerankWeight,
+          logPath: '',
+        },
+        { baseUrl: opts.gateway, apiKeyEnv: opts.apiRef },
+        { log: (event) => console.error(`[rerank] ${JSON.stringify(event)}`) },
+      )
+    : null
+  if (opts.rerank) {
+    if (!opts.gateway) throw new Error('--rerank 需要 --gateway（如 http://192.168.50.127:8080/v1）')
+    console.log(`重排：${opts.rerankModel} @ ${opts.gateway}（candidates=${opts.rerankCandidates}, docChars=${opts.docChars}, weight=${opts.rerankWeight}）\n`)
+  }
   const deps: SearchDeps = {
     userId: cfg.userId,
     personalPrefix: cfg.personalPrefix,
@@ -160,6 +209,7 @@ async function main() {
     // 关闭判空 = autoPassTop1 取 0（任何 top1 都直接放行）
     ...(opts.noGate ? { confidence: { floorTop1: 0, midBandFloor: 0, autoPassTop1: 0, minMargin: 0, minBm25: 0 } } : {}),
     ranking: { ...DEFAULT_RANKING, agreementBonus: opts.agreementBonus ?? DEFAULT_RANKING.agreementBonus },
+    ...(reranker === null ? {} : { rerank: reranker, onRerank: (record: { ms: number }) => rerankDurations.push(record.ms) }),
   }
 
   const rows: RowResult[] = []
@@ -176,6 +226,11 @@ async function main() {
   console.log('== 本轮结果 ==')
   for (const [kind, g] of groups) console.log(fmtGroup(kind, g))
   if (degradedCount > 0) console.log(`⚠️ ${degradedCount} 条走了降级（向量不可用，只走 BM25），本轮数字不可作基线`)
+  if (rerankDurations.length > 0) {
+    const sorted = [...rerankDurations].sort((a, b) => a - b)
+    const at = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0
+    console.log(`重排耗时：n=${sorted.length} P50=${at(0.5)}ms P95=${at(0.95)}ms max=${sorted[sorted.length - 1]}ms`)
+  }
 
   // 与基线逐条对比：只在名次变化时打印，避免刷屏
   if (existsSync(opts.baseline)) {

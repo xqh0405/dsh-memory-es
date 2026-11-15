@@ -383,7 +383,33 @@ function requireAdmin(ctx, res) {
     return null
   }
   if (!canReviewTeam(configRow.value.identity)) {
-    json(res, 403, { ok: false, error: '只有团队管理员可以使用维护功能（账号需要 mem_admin 角色）' })
+    // 文案要写真实判据：canReviewTeam 看的是 identity.teamWrite 或 consolidator 凭据，
+    // 与 mem_admin 这个角色名无关。写错会让人照错方向查（2026-11-12 实测踩过：
+    // 成员切不了人格，误以为是「没 mem_admin 角色」，真因是 teamWrite=false）。
+    json(res, 403, {
+      ok: false,
+      error: '只有团队管理员可以使用维护功能（判据：identity.teamWrite=true，或配 consolidatorUsername/Password）',
+    })
+    return null
+  }
+  return configRow.value
+}
+
+/**
+ * 「本人本机就能改」的那类操作（目前只有人格切换/恢复）的守卫。
+ *
+ * 人格**不是团队维护能力**：写入面被白名单锁死（persona.seed / persona.enabled /
+ * stickers.dir 三个键），目标只能是 persona/presets 里存在的预设，效果是这个容器
+ * 自己的提示词与贴图目录——碰不到任何人的记忆数据，也不改共享索引。
+ *
+ * 所以不要求 mem_admin。2026-11-12 实测：成员账号只有 mem_personal_rw_<uid>，
+ * 按 requireAdmin 守的结果是「人格页能打开、点切换恒 403」，成员完全用不了。
+ * 保留的最小前提只剩「配置行可读」——读不到就没有可写的目标。
+ */
+function requireLocalWrite(ctx, res) {
+  const configRow = findEntryRow(ctx)
+  if (!configRow.ok) {
+    json(res, 503, { ok: false, error: configRow.error })
     return null
   }
   return configRow.value
@@ -930,9 +956,13 @@ function summarizeInjectRecords(records) {
   let legacyFolded = 0 // 旧版折叠记录：outcome=injected 且 pinnedOnly=true → 检索段结果不可知
   let since = ''
   let through = ''
+  // 短指令短路（2026-11-15）：这些回合没有发生检索，不能进注入率/超时率的分母，
+  // 否则「继续」这类高频短消息会把两个比率一起稀释（口径与 inject-report.mjs 一致）。
+  let shortSkipped = 0
 
   for (const r of records) {
     const outcome = typeof r.outcome === 'string' ? r.outcome : 'unknown'
+    if (outcome === 'short_query') shortSkipped += 1
     byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1
     const ts = typeof r.ts === 'string' ? r.ts : ''
     if (ts !== '') {
@@ -992,19 +1022,22 @@ function summarizeInjectRecords(records) {
   }
   const total = records.length
   const avg = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length)
+  // 真正发生检索的次数 = 全部 − 短指令短路（短指令只注常驻段、不检索）
+  const retrievalRuns = total - shortSkipped
   return {
     total,
     byOutcome,
+    shortSkipped,
     // 统计窗口：读文件按尾部 512KB 截断，超长后窗口会自己缩，必须显式告诉用户，
     // 否则同一个页面的「注入尝试」会随文件增长悄悄变少（2026-11-10 实测 901 → 739 且无提示）。
     since,
     through,
     // 超时率是阶段 22 的核心验收指标：这几轮里有多少次「算了，这轮不注入」
-    timeoutRate: total === 0 ? 0 : (byOutcome.timeout ?? 0) / total,
+    timeoutRate: retrievalRuns === 0 ? 0 : (byOutcome.timeout ?? 0) / retrievalRuns,
     // 注入率 = **检索段**口径，与「注入了/超时/低分·低置信/无匹配」四态一致
-    injectedRate: total === 0 ? 0 : recallInjected / total,
+    injectedRate: retrievalRuns === 0 ? 0 : recallInjected / retrievalRuns,
     // 整段口径：检索段或常驻段任一进了上下文。pinned 关着时两者相等。
-    wholeInjectedRate: total === 0 ? 0 : wholeInjected / total,
+    wholeInjectedRate: retrievalRuns === 0 ? 0 : wholeInjected / retrievalRuns,
     // 旧版折叠记录数 > 0 时要提示：这部分检索段结果不可知，注入率按已知部分算（偏低）
     legacyFolded,
     newStyle,
@@ -2579,8 +2612,8 @@ const EDITABLE = [
     path: ['traits', 'dedupMinScore'],
     label: '判重阈值',
     type: 'number',
-    default: 0.88,
-    hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.88',
+    default: 0.85,
+    hint: '同义判定的 kNN 余弦阈值，越高越严（0.7~0.99），默认 0.85；实测同义改写约 0.87，调到 0.88 以上等于不判重',
   },
   {
     path: ['traits', 'dedupMinScoreAnchored'],
@@ -3038,7 +3071,7 @@ async function handlePersonaPresetsGet(ctx, res) {
 }
 
 async function handlePersonaSwitch(ctx, res, req) {
-  if (!requireAdmin(ctx, res)) return null
+  if (!requireLocalWrite(ctx, res)) return null
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
@@ -3105,7 +3138,7 @@ async function handlePersonaSwitch(ctx, res, req) {
 }
 
 async function handlePersonaRestore(ctx, res, req) {
-  if (!requireAdmin(ctx, res)) return null
+  if (!requireLocalWrite(ctx, res)) return null
   const body = await readJsonBody(req)
   if (!body.ok) return json(res, 400, { ok: false, error: body.error })
   const input = body.value ?? {}
@@ -3192,6 +3225,11 @@ async function handleCapabilities(ctx, res) {
       canReview,
       // 管理员 = 维护页 + 跨用户查看（与 canReview 同源，单独命名让前端读起来更清楚）
       canAdmin: canReview,
+      // 人格切换 = 只写本机配置（persona.seed / stickers.dir），不碰团队数据，
+      // 与 requireLocalWrite 同条件：配置行可读即可。
+      // ⚠️ 不能复用 canAdmin：前端曾用 canAdmin 守整个切换条，成员因此连下拉框都看不到
+      // （2026-11-12 实测：后端放开后仍「没有选择的地方」，第二道门在前端）。
+      canPersona: configRow.ok,
       canMaintain: cliAvailable(),
       // 删除按钮的显示条件：个人库问本人，团队库额外要求 team_knowledge 的 delete
       canDeletePersonal: del.personal,
@@ -3283,6 +3321,48 @@ async function handleMirrorFile(ctx, res, url) {
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const STATE_DIR = process.env.MEMORY_ES_STATE_DIR || join(DSH_HOME, 'memory-es-state')
 const MIRROR_DIR = process.env.MEMORY_ES_MIRROR_DIR || join(DSH_HOME, 'memory-mirror')
+
+
+/**
+ * 阶段 F2：本地模型状态（只读）。
+ *
+ * 面板不 import 主插件产物，所以这里**只读配置 + JSONL 记账**，看不到进程内的
+ * 熔断标志位——`last.outcome` 连续非 ok 才是熔断的间接证据，文案不要写成「已熔断」。
+ * 数据源与 recall-inject 页同口径：$DSH_HOME/memory-es/local-models.jsonl。
+ */
+function localModelsSummary(config) {
+  const rerank = config.retrieval && config.retrieval.rerank ? config.retrieval.rerank : {}
+  const local = config.localModels ? config.localModels : {}
+  const distillLocal = config.distill && config.distill.local ? config.distill.local : {}
+  const baseUrl = typeof local.baseUrl === 'string' ? local.baseUrl.trim() : ''
+  const file = join(DSH_HOME, 'memory-es', 'local-models.jsonl')
+  let last = null
+  let records = 0
+  try {
+    const lines = readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '')
+    records = lines.length
+    const tail = lines[lines.length - 1]
+    if (tail !== undefined) last = JSON.parse(tail)
+  } catch {
+    // 没有文件 = 从没启用过，不是错误
+  }
+  return {
+    configured: baseUrl !== '',
+    baseUrl,
+    rerank: {
+      enabled: rerank.enabled === true,
+      model: typeof rerank.model === 'string' ? rerank.model : 'reranker',
+      candidates: typeof rerank.candidates === 'number' ? rerank.candidates : 20,
+      docChars: typeof rerank.docChars === 'number' ? rerank.docChars : 300,
+    },
+    distill: {
+      enabled: distillLocal.enabled === true,
+      model: typeof distillLocal.model === 'string' ? distillLocal.model : 'qwen3-4b',
+    },
+    last,
+    records,
+  }
+}
 
 async function handleMaintenanceGet(ctx, res, url) {
   // 维护页整体收拢到管理员：普通成员的维护 tab 也不再显示（前端），接口同样拦住
@@ -3421,6 +3501,8 @@ async function handleMaintenanceGet(ctx, res, url) {
       viewingOther: targetUser !== config.identity.userId,
       lastRunAt,
       pendingCount,
+      // 阶段 F2：本地模型（docs/本地模型扩展.md）。只读配置 + JSONL 末条
+      localModels: localModelsSummary(config),
       update: updateInfo,
       mirror,
       cli: { available: cliAvailable(), stateDir: STATE_DIR, mirrorDir: MIRROR_DIR },

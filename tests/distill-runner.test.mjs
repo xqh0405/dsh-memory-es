@@ -194,3 +194,74 @@ test('content_fault：LLM 调用本身抛错（超时/断网）→ 不设（环�
   assert.equal(result.ok, false)
   assert.equal(result.content_fault, undefined, '环境失败不标 content_fault → sweep 不计次')
 })
+
+// ── 阶段 D：本地蒸馏优先、云端回落 ────────────────────────────────────────
+// 三条边界：本地空正文必须回落（D2）、只配本地也要能蒸、本地失败且无云端要留 pending。
+
+test('D：本地空正文 → 回落云端（不把空串写库）', async () => {
+  const logs = []
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: { get: async () => ({ id: 'm1', source: { memory_id: 'm1', user_id: 'xqh', content: 'x' } }) },
+      writer: { update: async () => ({ id: 'm1', result: 'updated', status: 200 }) },
+      localChat: {
+        enabled: true,
+        model: 'qwen3-30b',
+        complete: async () => ({ error: 'empty_content', ms: 12 }),
+      },
+      llm: {
+        prepareCall: async () => ({
+          config: {},
+          stream: async function* () {
+            yield { type: 'text-delta', text: '{"content":"云端改写"}' }
+          },
+        }),
+      },
+      provider: 'p',
+      model: 'm',
+      timeoutMs: 1000,
+      log: (event) => logs.push(event),
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, true)
+  assert.ok(logs.some((event) => event.event === 'local_fallback'))
+  assert.ok(logs.some((event) => event.ok === true && String(event.model).startsWith('p/m')))
+})
+
+test('D：只配本地、本地成功 → 不需要 ctx.llm', async () => {
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: { get: async () => ({ id: 'm1', source: { memory_id: 'm1', user_id: 'xqh', content: 'x' } }) },
+      writer: { update: async () => ({ id: 'm1', result: 'updated', status: 200 }) },
+      localChat: {
+        enabled: true,
+        model: 'qwen3-30b',
+        complete: async () => ({ text: '{"content":"本地改写"}', ms: 27 }),
+      },
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, true, '只有本地网关的实例也应该能蒸馏')
+})
+
+test('D：本地失败且没有云端 → local_failed_no_llm（留 pending）', async () => {
+  const result = await runDistillJob(
+    {
+      userId: 'xqh',
+      personalPrefix: 'personal_memory_',
+      reader: {},
+      writer: {},
+      localChat: { enabled: true, model: 'qwen3-30b', complete: async () => ({ error: 'http', ms: 5 }) },
+      timeoutMs: 1000,
+    },
+    { memoryId: 'm1', content: 'x', domain: 'general' },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'local_failed_no_llm')
+})

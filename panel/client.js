@@ -237,6 +237,7 @@ window.__ModuleLoader__.load({
       injColChars: '字符',
       injCached: '预热命中',
       injEmpty: '还没有注入记录 —— recallInject.enabled 关着，或者这一段还没发过消息。',
+      injShort: '短指令跳过',
       injOutcomeInjected: '已注入',
       injOutcomeTimeout: '超时',
       injOutcomeLow: '低置信',
@@ -244,6 +245,7 @@ window.__ModuleLoader__.load({
       injOutcomeNoMatch: '无匹配',
       injOutcomeError: '错误',
       injOutcomeDegraded: '降级',
+      injOutcomeShort: '短指令',
       slDays: '统计范围',
       slDays7: '近 7 天',
       slDays30: '近 30 天',
@@ -603,6 +605,7 @@ window.__ModuleLoader__.load({
       injColChars: 'chars',
       injCached: 'prewarm hit',
       injEmpty: 'No injection records yet — recallInject.enabled is off, or no messages in this period.',
+      injShort: 'short skipped',
       injOutcomeInjected: 'injected',
       injOutcomeTimeout: 'timeout',
       injOutcomeLow: 'low confidence',
@@ -610,6 +613,7 @@ window.__ModuleLoader__.load({
       injOutcomeNoMatch: 'no match',
       injOutcomeError: 'error',
       injOutcomeDegraded: 'degraded',
+      injOutcomeShort: 'short command',
       slDays: 'Range',
       slDays7: 'Last 7 days',
       slDays30: 'Last 30 days',
@@ -3645,7 +3649,7 @@ window.__ModuleLoader__.load({
       // ── 阶段 34：预设切换条（仅管理员 + 仅非编辑态）────────────────────
       // 放正文顶部而不是标题行右侧：下拉 + 按钮 + 复选框 + 生效提示挤不进标题行
       const activePreset = presets.items.find((item) => item.active) ?? null
-      const presetRow = caps?.canAdmin && !editing && presets.items.length > 0
+      const presetRow = caps?.canPersona && !editing && presets.items.length > 0
         ? h('div', null,
             h('div', {
               style: {
@@ -4369,6 +4373,7 @@ window.__ModuleLoader__.load({
           no_match: t('injOutcomeNoMatch'),
           error: t('injOutcomeError'),
           degraded: t('injOutcomeDegraded'),
+          short_query: t('injOutcomeShort'),
         })[outcome] ?? String(outcome)
       const outcomeTone = (outcome) =>
         outcome === 'injected' ? 'ok' : outcome === 'timeout' || outcome === 'error' ? 'warn' : 'muted'
@@ -4403,6 +4408,8 @@ window.__ModuleLoader__.load({
               metric(t('injAvgItems'), String(stats.avgItems)),
               metric(t('injAvgChars'), String(stats.avgChars)),
               metric(t('injDropped'), String(stats.droppedTotal)),
+              // 短指令跳过有数据才显示：它是「省下的检索」，不是故障，老记录里不会有
+              stats.shortSkipped > 0 ? metric(t('injShort'), String(stats.shortSkipped)) : null,
               // 阶段 32：pinned 段有数据才显示——关着的时候多出四个 0 只会让人以为配置错了
               stats.pinned && (stats.pinned.runs > 0 || stats.pinned.droppedTotal > 0)
                 ? metric(t('injPinnedRuns'), String(stats.pinned.runs))
@@ -5189,7 +5196,7 @@ window.__ModuleLoader__.load({
       const statusRef = React.useRef(onStatus)
       statusRef.current = onStatus
       // 权限：没有整理身份的部署（普通账号）不显示审核台，避免"能点但点了报错"
-      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, userId: '' })
+      const [caps, setCaps] = React.useState({ loaded: false, canReview: false, canMaintain: false, role: 'reader', canDeletePersonal: false, canDeleteTeam: false, canAdmin: false, canPersona: false, userId: '' })
 
       React.useEffect(() => {
         apiGet('/capabilities')
@@ -5200,6 +5207,7 @@ window.__ModuleLoader__.load({
             role: value.role ?? '',
             // 管理员 = 维护页 + 跨用户查看；userId 用于"用户"下拉里标出"我"
             canAdmin: Boolean(value.canAdmin),
+            canPersona: Boolean(value.canPersona),
             userId: value.userId ?? '',
             // 删除权限由后端问 ES 的 _has_privileges 得出，不是看配置声明
             canDeletePersonal: Boolean(value.canDeletePersonal),

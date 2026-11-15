@@ -17,6 +17,7 @@
  * @module dsh-memory-es/memory/distillRunner
  */
 
+import type { LocalChat } from '../local-chat.ts'
 import { distillMemory } from './distill.ts'
 import { personalIndexFor } from './common.ts'
 import type { MemoryStoreDeps } from './common.ts'
@@ -36,6 +37,11 @@ export interface DistillRunnerDeps extends MemoryStoreDeps {
   provider?: string
   model?: string
   timeoutMs: number
+  /**
+   * 阶段 D：本地网关的 chat 客户端。`enabled=false`（缺省）时**完全不碰**，
+   * 走原来的 `ctx.llm` 路由，行为与改前一致。
+   */
+  localChat?: LocalChat | null
   log?: (event: Record<string, unknown>) => void
 }
 
@@ -198,31 +204,71 @@ export async function runDistillJob(
     return { ok: false, reason: 'write_gate' }
   }
   const llm = deps.llm
-  if (!llm || typeof llm.prepareCall !== 'function') {
+  const llmUsable = llm !== null && llm !== undefined && typeof llm.prepareCall === 'function'
+  const local = deps.localChat ?? null
+  // 两条路都没有才真的没模型；只配了本地网关的实例也应该能蒸馏
+  if (!llmUsable && local?.enabled !== true) {
     log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_llm_service' })
     return { ok: false, reason: 'no_llm_service' }
-  }
-  const route = await pickRoute(llm, deps.provider, deps.model, job.route)
-  if (!route) {
-    log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_model' })
-    return { ok: false, reason: 'no_model' }
   }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), deps.timeoutMs)
   try {
-    const call = await llm.prepareCall({ ...route, maxTokens: 1200 }, controller.signal)
-    const stream = call.stream({
-      ...call.config,
-      system: DISTILL_SYSTEM,
-      messages: [{ role: 'user', content: [{ type: 'text', text: buildDistillPrompt(job.content, job.domain) }] }],
-      purpose: 'memory-distill',
-      signal: controller.signal,
-    })
-    const text = await collectStream(stream)
+    /**
+     * 阶段 D：本地优先、云端回落。
+     *
+     * 空正文（thinking 未关 / 模型异常）**判失败并回落云端**，不能把空串
+     * 当蒸馏结果写库（D2）——`localChat` 已把空 content 映射成 empty_content。
+     */
+    let text: string | null = null
+    let modelLabel = ''
+    if (local?.enabled === true) {
+      // 本地给 2000：30 条实测里唯一那条不可解析是 JSON 被 1200 tokens 截断，
+      // 而本地没有按量计费，放宽上限没有成本。
+      const attempt = await local.complete({
+        system: DISTILL_SYSTEM,
+        user: buildDistillPrompt(job.content, job.domain),
+        maxTokens: 2000,
+        signal: controller.signal,
+      })
+      if ('text' in attempt) {
+        text = attempt.text
+        modelLabel = `local/${local.model}`
+      } else {
+        log({
+          tool: 'distill',
+          memory_id: job.memoryId,
+          event: 'local_fallback',
+          error: attempt.error,
+          ms: attempt.ms,
+        })
+      }
+    }
+    if (text === null) {
+      if (llm === null || llm === undefined || typeof llm.prepareCall !== 'function') {
+        log({ tool: 'distill', memory_id: job.memoryId, skipped: 'local_failed_no_llm' })
+        return { ok: false, reason: 'local_failed_no_llm' }
+      }
+      const route = await pickRoute(llm, deps.provider, deps.model, job.route)
+      if (!route) {
+        log({ tool: 'distill', memory_id: job.memoryId, skipped: 'no_model' })
+        return { ok: false, reason: 'no_model' }
+      }
+      const call = await llm.prepareCall({ ...route, maxTokens: 1200 }, controller.signal)
+      const stream = call.stream({
+        ...call.config,
+        system: DISTILL_SYSTEM,
+        messages: [{ role: 'user', content: [{ type: 'text', text: buildDistillPrompt(job.content, job.domain) }] }],
+        purpose: 'memory-distill',
+        signal: controller.signal,
+      })
+      text = await collectStream(stream)
+      modelLabel = `${route.provider}/${route.model}`
+    }
     const parsed = parseDistillOutput(text)
     if (parsed === null) {
-      log({ tool: 'distill', memory_id: job.memoryId, skipped: 'unparsable', chars: text.length })
+      log({ tool: 'distill', memory_id: job.memoryId, skipped: 'unparsable', chars: text.length, model: modelLabel })
       // 模型对这条内容连续产不出合法 JSON → 内容问题，重试大概率还是失败
       return { ok: false, reason: 'unparsable', content_fault: true }
     }
@@ -242,8 +288,7 @@ export async function runDistillJob(
         memory_id: job.memoryId,
         ok: true,
         ms: Date.now() - startedAt,
-        model: `${route.provider}/${route.model}`,
-        route_source: route.source,
+        model: modelLabel,
         changed: result.changed,
       })
       return { ok: true, changed: result.changed }

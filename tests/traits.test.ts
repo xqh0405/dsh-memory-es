@@ -713,10 +713,20 @@ function dupDeps(hit: { score: number; anchor: boolean }) {
   return deps
 }
 
-test('判重：普通条目 0.85 不算重复（阈值 0.88）', async () => {
+test('判重：普通条目 0.84 不算重复（阈值 0.85）', async () => {
   const { findTraitDuplicate } = await import('../src/memory/traits.ts')
-  const dup = await findTraitDuplicate(dupDeps({ score: 0.85, anchor: false }) as never, '你倾向于先给结论再解释')
+  const dup = await findTraitDuplicate(dupDeps({ score: 0.84, anchor: false }) as never, '你倾向于先给结论再解释')
   assert.equal(dup, null)
+})
+
+test('判重：0.8688 必须拦住——实测同义改写的下沿（2026-11-14 回归）', async () => {
+  // 为什么钉这个数：旧阈值 0.88 高于同义改写实测区间（0.8688~0.8730），
+  // 结果 112 条待审候选里 48 条是重复、24 条与已生效自述撞车。
+  // 这条用实测下沿当输入，阈值一调回 0.87 以上就立刻红。
+  const { findTraitDuplicate } = await import('../src/memory/traits.ts')
+  const dup = await findTraitDuplicate(dupDeps({ score: 0.8688, anchor: false }) as never, '你倾向于先给结论再解释')
+  assert.ok(dup !== null, '0.8688 是实测同义改写的下限，必须判重')
+  assert.equal(dup.threshold, 0.85)
 })
 
 test('判重：锚定条目 0.85 就算重复（阈值降到 0.82）', async () => {
