@@ -80,6 +80,11 @@ export interface ConfigType {
     maxPerDomain: number
     /** 阶段 12：缺省详略（full / summary） */
     defaultDetail: string
+    /**
+     * 阶段 39：是否排除已失效条目（`valid_until < now`）。默认 true。
+     * 回滚开关：设为 false 等于回到「只看 status」的旧行为。
+     */
+    excludeExpired?: boolean
     /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
     synonyms?: Record<string, string>
     /** 本地网关重排（默认关；关时检索路径一行不动） */
@@ -378,6 +383,9 @@ export const Config: z<ConfigType> = z.object({
       .description('RRF 融合常数。'),
     limit: z.number().step(1).default(8)
       .description('返回给模型的最大条数。'),
+    excludeExpired: z.boolean().default(true)
+      .description('阶段 39：默认不返回已失效（被 supersede / expire）的条目。'
+        + '设为 false 回到「只看 status」的旧行为——字段仍然会写，只是检索不再据此过滤。'),
     abstainOnLowConfidence: z.boolean().default(false)
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})

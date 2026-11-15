@@ -174,12 +174,21 @@ export interface SearchInput {
    * 近似语义：ES 没有版本历史，看到的是「那条目现在的内容」，不是当时的旧版本。
    */
   as_of?: string
+  /**
+   * 阶段 39：把已失效（`valid_until < now`）的条目也返回。默认 false。
+   *
+   * 只用于「这条到底什么时候失效的、为什么」这类排障/回看问题——
+   * 正常检索不该看到失效条目，否则「撤销」就形同虚设。
+   */
+  includeExpired?: boolean
 }
 
 export interface RetrievalConfig {
   topK: number
   rrfK: number
   limit: number
+  /** 阶段 39：是否排除已失效条目（默认 true；false = 回滚到只看 status） */
+  excludeExpired?: boolean
   /** 阶段 12 结果多样化：同一 domain 最多几条（0 = 关闭，默认关） */
   maxPerDomain?: number
   /**
@@ -450,6 +459,7 @@ function parseAsOf(raw?: string): Date | undefined {
 function buildMeta(
   input: SearchInput,
   now: Date,
+  retrieval?: RetrievalConfig,
 ): { meta: MetaFilterOptions; filtered: boolean; asOf: Date | undefined } {
   // 阶段 7.1 / 9.3 / 9.5：identity / persona / journal 默认不进普通检索。
   // 它们分别是「我是谁」「我的人格」「某一天的回顾」，混在事实里只会挤占召回
@@ -457,8 +467,15 @@ function buildMeta(
   // 用户显式在 memory_type 里点了某几类时，只放行被点的那几类。
   const selectedTypes = Array.isArray(input.memory_type) ? input.memory_type : []
   const excludedTypes = NON_FACT_MEMORY_TYPES.filter((type) => !selectedTypes.includes(type))
+  // 阶段 39 的两个入口语义不同，别混：
+  //  · includeExpired=true —— **排障/回看**：状态放开到 active/superseded/expired，
+  //    并跳过 superseded_by / expires_at / valid_until 全部兜底过滤；
+  //  · retrieval.excludeExpired=false —— **全局回滚**：只关 valid_until 这一条，回到旧行为。
+  const includeInvalid = input.includeExpired === true
   const meta: MetaFilterOptions = {
-    status: 'active',
+    status: includeInvalid ? ['active', 'superseded', 'expired'] : 'active',
+    ...(includeInvalid ? { includeInvalid: true } : {}),
+    ...(!includeInvalid && retrieval?.excludeExpired === false ? { excludeExpired: false } : {}),
     memory_type: input.memory_type,
     excludeMemoryTypes: excludedTypes.length > 0 ? [...excludedTypes] : undefined,
     domain: input.domain,
@@ -497,7 +514,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     throw new Error(`memory_search: 未知 detail「${String(input.detail)}」（只支持 ${DETAIL_LEVELS.join(' / ')}）`)
   }
   const now = deps.now?.() ?? new Date()
-  const { meta, filtered, asOf } = buildMeta(input, now)
+  const { meta, filtered, asOf } = buildMeta(input, now, deps.retrieval)
 
   const personalIndex = `${deps.personalPrefix}${deps.userId}`
   // 团队库按 domain 分层：查某个域时只能看到「本域 + general（跨域通用）」，
@@ -1059,6 +1076,12 @@ export function defineSearchTool(deps: SearchDeps) {
         description:
           '返回详略：full（默认，正文最多 500 字）/ summary（摘要 + 正文 120 字，省 token；要全文用 memory_get 展开）。',
       },
+      includeExpired: {
+        type: 'boolean',
+        description:
+          '阶段 39：true 时把已失效（被 supersede / expire 过）的条目也返回，并在正文里标注「已于某日失效，原因」。'
+          + '默认 false——正常检索看不到失效条目。只在回答「这条什么时候失效的、为什么」时用。',
+      },
     },
     output: {
       schema: {
@@ -1081,6 +1104,8 @@ export function defineSearchTool(deps: SearchDeps) {
                 score: { type: 'number', required: true },
                 summary: { type: 'string' },
                 has_more: { type: 'boolean' },
+                valid_until: { type: 'string' },
+                revoke_reason: { type: 'string' },
               },
             },
           },

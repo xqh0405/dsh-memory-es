@@ -697,6 +697,8 @@ describe('defineSearchTool', () => {
         'domain',
         // 阶段 10：explain=true 才附回执（默认关，省 token）
         'explain',
+        // 阶段 39：显式要求把已失效条目也带出来
+        'includeExpired',
         'limit',
         'memory_type',
         'query',
@@ -1068,6 +1070,61 @@ describe('阶段 21：中间区绝对下限（midBandFloor）', () => {
     try {
       const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
       assert.equal(result.note, 'ok')
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+describe('阶段 39：失效条目的检索语义', () => {
+  test('默认在请求里带上 valid_until 过滤', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'q', scope: 'personal' })
+      const body = JSON.stringify(JSON.parse(h.requests[0].body))
+      assert.match(body, /valid_until/, '默认检索必须排除已失效条目')
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('includeExpired=true：不加该过滤，且正文标注失效时间与原因', async () => {
+    const h = await harness({
+      [PERSONAL_INDEX]: {
+        bm25: [hit('p1', 3, { valid_until: '2026-10-01T00:00:00.000Z', revoke_reason: '口径被新版本取代' })],
+      },
+    })
+    try {
+      const result = await searchMemories(h.deps(), { query: 'q', scope: 'personal', includeExpired: true })
+      assert.doesNotMatch(JSON.stringify(JSON.parse(h.requests[0].body)), /valid_until/)
+      assert.match(result.text, /已于 2026-10-01 失效/)
+      assert.match(result.text, /口径被新版本取代/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+
+  test('配置里关掉全局过滤（回滚开关）与 includeExpired 等效', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      const deps = h.deps({ retrieval: { topK: 20, rrfK: 60, limit: 8, excludeExpired: false } })
+      await searchMemories(deps, { query: 'q', scope: 'personal' })
+      assert.doesNotMatch(JSON.stringify(JSON.parse(h.requests[0].body)), /valid_until/)
+    } finally {
+      await h.fake.close()
+    }
+  })
+})
+
+describe('阶段 39：includeExpired 是排障模式（真机踩过的坑）', () => {
+  test('状态放开到 active/superseded/expired，且不再用 superseded_by 挡', async () => {
+    const h = await harness({ [PERSONAL_INDEX]: { bm25: [hit('p1', 3)] } })
+    try {
+      await searchMemories(h.deps(), { query: 'q', scope: 'personal', includeExpired: true })
+      const body = JSON.stringify(JSON.parse(h.requests[0].body))
+      // 只放开 valid_until 是不够的：supersede 同时也改了 status，旧条会被 status 挡掉
+      assert.match(body, /"terms":\{"status":\["active","superseded","expired"\]\}/)
+      assert.doesNotMatch(body, /superseded_by/, '排障模式不该再用 superseded_by 兜底过滤')
     } finally {
       await h.fake.close()
     }

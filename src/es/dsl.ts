@@ -45,8 +45,8 @@ export type EsFilter = EsTermFilter | EsTermsFilter | EsRangeFilter | EsExistsFi
 export type FilterValue = string | string[]
 
 export interface MetaFilterOptions {
-  /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用） */
-  status?: string | null
+  /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用），传数组走 terms */
+  status?: string | string[] | null
   /**
    * 阶段 13：时间点回看。只返回「该时间点之前创建」的记忆。
    *
@@ -75,6 +75,22 @@ export interface MetaFilterOptions {
    * 传 null/undefined = 不加这个条件（审核台、迁移排查时用）。
    */
   review_state?: FilterValue | null
+  /**
+   * 阶段 39：是否排除「已失效」的条目（`valid_until < now`）。默认 true。
+   *
+   * 注意它只关掉 `valid_until` 这一条过滤；`status=active` 与
+   * 「不得有 superseded_by」两道闸仍在。要做**排障/回看**（看完被撤销的条目），
+   * 用 `includeInvalid` 一次放开全部兜底过滤。
+   */
+  excludeExpired?: boolean
+  /**
+   * 阶段 39：排障模式——跳过 `freshOnlyFilters` 的全部兜底过滤
+   * （superseded_by / expires_at / valid_until）。
+   *
+   * 为什么需要它：Supersede 的条目 status 也变了，只放 `valid_until` 根本看不到它们
+   * （2026-11-16 真机验证第一版就踩了这个坑：includeExpired 的命中与默认完全一致）。
+   */
+  includeInvalid?: boolean
   /** 注入当前时间，便于测试断言（默认 new Date()） */
   now?: Date
 }
@@ -113,21 +129,34 @@ function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue 
  * 为什么抽成函数：测试要能原样引用这两条，否则每加一条过滤就得在 6 个用例里
  * 手抄一遍期望值，抄错一次就是假绿。
  */
-export function freshOnlyFilters(now: Date): EsFilter[] {
-  return [
+export function freshOnlyFilters(
+  now: Date,
+  options: { excludeExpired?: boolean; includeAll?: boolean } = {},
+): EsFilter[] {
+  // 排障模式：status 已经限定在允许的状态集合里，这里不再兜底挡
+  if (options.includeAll === true) return []
+  const filters: EsFilter[] = [
     // 用 `must_not exists` 而不是 `term: null`：字段缺失与字段为 null 是两回事，
     // 前者才是「没有值」的稳妥判据。
     { bool: { must_not: [{ exists: { field: 'superseded_by' } }] } },
     // 不存在的 expires_at 不会被 range 匹配，所以 must_not range 天然保留它们
     { bool: { must_not: [{ range: { expires_at: { lt: now.toISOString() } } }] } },
   ]
+  // 阶段 39：`valid_until < now` 的条目（已撤销/过期）默认不进了。
+  // 同样靠「不存在的字段不会被 range 匹配」保留老数据。
+  if (options.excludeExpired !== false) {
+    filters.push({ bool: { must_not: [{ range: { valid_until: { lt: now.toISOString() } } }] } })
+  }
+  return filters
 }
 
 export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   const filters: EsFilter[] = []
   const now = options.now ?? new Date()
   const status = options.status === undefined ? 'active' : options.status
-  if (status !== null) {
+  if (Array.isArray(status)) {
+    if (status.length > 0) filters.push({ terms: { status } })
+  } else if (status !== null) {
     filters.push({ term: { status } })
   }
   pushValueFilter(filters, 'memory_type', options.memory_type)
@@ -153,7 +182,7 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
     filters.push({ range: { updated_at: { gte } } })
   }
   // 时效过滤放最后：语义上它们是「兜底排除」，与业务维度（status/type/domain/时间窗）分开
-  filters.push(...freshOnlyFilters(now))
+  filters.push(...freshOnlyFilters(now, { excludeExpired: options.excludeExpired, includeAll: options.includeInvalid }))
   return filters
 }
 

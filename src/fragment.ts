@@ -629,6 +629,13 @@ export interface Projected {
   summary?: string
   /** 原文比返回的正文更长：要全文请用 `memory_get` 展开 */
   has_more?: boolean
+  /**
+   * 阶段 39：该条的失效时刻（ISO）。只有 `memory_search(includeExpired=true)`
+   * 才会带出已失效的条目——正常检索里这个字段不会出现。
+   */
+  valid_until?: string
+  /** 阶段 39：失效原因（给人看；与 `valid_until` 成对出现） */
+  revoke_reason?: string
 }
 
 /** 分级读取的两档：`summary` 只给摘要（省 token），`full` 沿用旧的 500 字正文 */
@@ -666,6 +673,9 @@ export function projectHit(
     ...(detail === 'summary' && storedSummary !== '' ? { summary: storedSummary } : {}),
     // 原文比返回的长 → 提示模型可以展开；没有这个标记，模型只能靠"看起来像被截断"去猜
     ...(rawContent.length > limit ? { has_more: true } : {}),
+    // 阶段 39：失效语义随命中一起带出（只有 includeExpired 才会真的看到失效条目）
+    ...(typeof src.valid_until === 'string' && src.valid_until !== '' ? { valid_until: src.valid_until } : {}),
+    ...(typeof src.revoke_reason === 'string' && src.revoke_reason !== '' ? { revoke_reason: src.revoke_reason } : {}),
   }
   return projected
 }
@@ -676,7 +686,11 @@ export function renderText(hits: ReadonlyArray<Projected>): string {
   const lines = hits.map((hit, index) => {
     const day = hit.updated_at.slice(0, 10)
     const meta = [hit.source, hit.memory_type, day].filter((part) => part !== '').join('·')
-    return `${index + 1}. [${meta}] ${hit.content}`
+    // 阶段 39：失效条目要说明「什么时候失效、为什么」，不能静默混进结果
+    const expired = hit.valid_until === undefined
+      ? ''
+      : `（已于 ${hit.valid_until.slice(0, 10)} 失效${hit.revoke_reason === undefined ? '' : `，原因：${hit.revoke_reason}`}）`
+    return `${index + 1}. [${meta}] ${hit.content}${expired}`
   })
   return lines.join('\n')
 }
