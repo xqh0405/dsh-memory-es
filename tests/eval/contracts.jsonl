@@ -41,3 +41,5 @@
 {"id": "cjk-alert-owner", "severity": "should", "kind": "recall", "query": "哪些告警归我发、哪些不要重复通知", "limit": 5, "expect_ids": ["a5e8b5a9-aceb-436f-8008-2952339d001c"], "expect_min_hits": 1}
 {"id": "cjk-btwaf-pid", "severity": "should", "kind": "recall", "query": "面板防火墙服务缺少 pid 文件导致重启出问题", "limit": 5, "expect_ids": ["a481f0e3-ca94-4c5b-b5fd-165bef9d6588"], "expect_min_hits": 1}
 {"id": "cjk-jenkins-builder", "severity": "should", "kind": "recall", "query": "流水线里构建镜像的那个方法是从哪来的", "limit": 5, "expect_ids": ["a6515414-507b-4c84-ae98-a29548a355c6"], "expect_min_hits": 1}
+{"id": "neg-expired-huoxin-updatetime", "severity": "must", "kind": "exclude", "query": "主源备用库切换后 update_time 窗口内历史行重复刷入", "limit": 5, "expect_min_hits": 1, "expect_not_ids": ["6457f7ee-34b3-464e-af43-d5057d797db3"]}
+{"id": "neg-expired-jizhang-decimal", "severity": "must", "kind": "exclude", "query": "jizhang 记账项目金额精度用什么类型", "limit": 5, "expect_min_hits": 1, "expect_not_ids": ["d6a32801-39b2-45fe-8bd6-1b2b18704924"]}

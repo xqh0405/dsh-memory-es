@@ -54,6 +54,19 @@ interface ContractBaseline {
   failedIds: string[]
 }
 
+/**
+ * 评测世界的「现在」（阶段 36）——冻结时钟。
+ *
+ * 为什么必须冻结：检索里有三处相对时间计算——团队库 365 天兜底窗口、
+ * `time_range` 的更新窗口、排序里的激活衰减（`spreadActivation` / `applyRanking`）。
+ * 不冻结时，同一份契约今天跑和明年跑可能给出不同结果，"复跑不一致"就无法归因到代码。
+ *
+ * 取值原则：必须**晚于**契约引用数据的写入时刻，否则相对窗口会把它们当成未来数据排除。
+ * 2026-11-16 是本轮评审日，当前契约引用的条目都在此之前。新增依赖更新数据的契约时，
+ * 调大这个常量（或命令行 `--now` 临时覆盖），不要让它悄悄变成"随机那天"。
+ */
+const DEFAULT_EVAL_NOW = '2026-11-16T00:00:00Z'
+
 function parseArgs(argv: string[]) {
   const opts = {
     contracts: join(ROOT, 'tests/eval/contracts.jsonl'),
@@ -61,6 +74,7 @@ function parseArgs(argv: string[]) {
     config: DEFAULT_CONFIG_PATH,
     gate: false,
     updateBaseline: false,
+    now: DEFAULT_EVAL_NOW,
   }
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i]
@@ -69,6 +83,7 @@ function parseArgs(argv: string[]) {
     else if (a === '--contracts') opts.contracts = resolve(argv[++i])
     else if (a === '--baseline') opts.baseline = resolve(argv[++i])
     else if (a === '--config') opts.config = resolve(argv[++i])
+    else if (a === '--now') opts.now = argv[++i]
     else throw new Error(`未知参数：${a}`)
   }
   return opts
@@ -86,8 +101,11 @@ async function main() {
   const opts = parseArgs(process.argv)
   const cfg = parsePluginConfig(opts.config)
   const cases = loadContracts(opts.contracts)
+  const frozenAt = Date.parse(opts.now)
+  if (!Number.isFinite(frozenAt)) throw new Error(`--now 不是合法时间：${opts.now}`)
   console.log(`配置：${opts.config}`)
   console.log(`ES  ：${cfg.esUrl}  索引：${cfg.personalPrefix}${cfg.userId}`)
+  console.log(`冻结时钟：${new Date(frozenAt).toISOString()}`)
   console.log(`契约：${cases.length} 条（must=${cases.filter((c) => c.severity === 'must').length}）\n`)
 
   const reader = createEsClient({
@@ -105,6 +123,8 @@ async function main() {
     reader,
     embed,
     dims: cfg.dims,
+    // 冻结时钟：让「相对现在」的计算（团队 365 天窗口 / 激活衰减）复跑一致
+    now: () => new Date(frozenAt),
     // 与运行时默认一致；改这里等于改评测口径
     retrieval: { topK: 20, rrfK: 60, limit: 8 },
     ranking: { ...DEFAULT_RANKING },

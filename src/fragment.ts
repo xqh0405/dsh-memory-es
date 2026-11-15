@@ -87,7 +87,13 @@ export function rrfFuse(routes: Hit[][], k = 60, options: RrfOptions = {}): Fuse
       item.fusedScore *= 1 + bonus * Math.max(0, 1 - gap / span)
     }
   }
-  return [...acc.values()].sort((a, b) => b.fusedScore - a.fusedScore)
+  // 同分按 id 升序兜底（阶段 36）：RRF 分只由名次决定，两路名次都相同的条目会拿到
+  // 完全一样的 fusedScore；没有这一步时顺序由 Map 插入序（= ES 返回顺序）决定，
+  // 同一份数据两次查询可能给出不同的 top-k，契约就永远无法「逐位复跑一致」。
+  // 用显式字符串比较而不是 localeCompare：UUID 只含 [0-9a-f-]，不依赖运行环境的 locale。
+  return [...acc.values()].sort(
+    (a, b) => b.fusedScore - a.fusedScore || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )
 }
 
 /**
