@@ -212,6 +212,8 @@ export function apply(ctx: Context, config: ConfigType): void {
             dims: config.embedding.dims,
           },
           recentRecalls: () => recallCache.recent(userId),
+          // 阶段 37：常驻段写入侧硬预算，与注入侧同一口径（见 save.ts 的 pinnedBudgetUsed）
+          pinnedBudget: { maxChars: config.recallInject.pinnedMaxChars },
           log: (event) => logger.info('save %o', event),
           // 入库后立刻返回，蒸馏在后台跑；失败只记日志，条目留在 distill_state=pending
           onSaved: ({ memoryId, content, domain, route }) => {

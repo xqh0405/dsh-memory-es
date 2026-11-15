@@ -589,3 +589,32 @@ describe('写开关（阶段 24）', () => {
     }
   })
 })
+
+describe('阶段 37：去重回执带 try_instead', () => {
+  test('给出 memory_get 与 supersede 两条可执行下一步，并带上现有 id', async () => {
+    const { fake } = await startSaveFake({ duplicate: { memoryId: 'existing-1' } })
+    try {
+      const result = await saveMemory(makeDeps(fake), { content: '一条事实' })
+      assert.equal(result.status, 'merged')
+      assert.ok(result.try_instead, '去重命中必须给下一步')
+      assert.match(result.try_instead, /memory_get/)
+      assert.match(result.try_instead, /memory_update_status/)
+      assert.match(result.try_instead, /existing-1/, '建议里要带能直接用的 id')
+      // 文本仍要自洽：先一句话说清「没重复写」
+      assert.match(result.text, /已存在相同内容/)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('置顶成功时不给 supersede 建议（没有需要修正的东西）', async () => {
+    const { fake } = await startSaveFake({ duplicate: { memoryId: 'existing-1' } })
+    try {
+      const result = await saveMemory(makeDeps(fake), { content: '一条事实', pinned: true })
+      assert.equal(result.try_instead, undefined)
+      assert.match(result.text, /已按本次要求置为常驻/)
+    } finally {
+      await fake.close()
+    }
+  })
+})

@@ -1057,7 +1057,38 @@ function summarizeInjectRecords(records) {
   }
 }
 
-async function handleInjectLog(_ctx, res, url) {
+/**
+ * 阶段 37：常驻段当前占用 / 上限。
+ *
+ * 口径必须与注入侧一致：每条按 PINNED_ITEM_MAX_CHARS（200）截断后累加，只算
+ * `pinned=true AND status=active`。配置行是「显式写了什么」，没写就没有默认值——
+ * pinnedMaxChars 缺失时按 schema 默认 800 兜底，不能拼出 undefined。
+ */
+async function readPinnedBudget(ctx) {
+  try {
+    const configRow = findEntryRow(ctx)
+    if (!configRow.ok) return null
+    const config = configRow.value
+    const max = Number.isFinite(config.recallInject?.pinnedMaxChars) ? config.recallInject.pinnedMaxChars : 800
+    const client = createReadClient(() => resolveClientConfig(ctx))
+    const res = await client.search(indexNames(config).personal, {
+      size: 64,
+      _source: ['summary', 'content'],
+      query: { bool: { filter: [{ term: { pinned: true } }, { term: { status: 'active' } }] } },
+    })
+    const rows = res.hits ?? []
+    const used = rows.reduce((sum, hit) => {
+      const text = String(hit.source?.summary ?? hit.source?.content ?? '').trim()
+      return sum + Math.min(text.length, 200)
+    }, 0)
+    return { used, max, items: rows.length, full: max > 0 && used >= max }
+  } catch {
+    // 读不到就只是没有这个卡片，绝不影响注入日志本身
+    return null
+  }
+}
+
+async function handleInjectLog(ctx, res, url) {
   const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '30', 10)
   const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 30))
   const file = join(DSH_HOME, 'memory-es', 'recall-inject.jsonl')
@@ -1067,7 +1098,13 @@ async function handleInjectLog(_ctx, res, url) {
   if (!existsSync(file)) {
     return json(res, 200, {
       ok: true,
-      value: { exists: false, path: file, records: [], stats: summarizeInjectRecords([]) },
+      value: {
+        exists: false,
+        path: file,
+        records: [],
+        stats: summarizeInjectRecords([]),
+        pinnedBudget: await readPinnedBudget(ctx),
+      },
     })
   }
   const records = []
@@ -1087,6 +1124,8 @@ async function handleInjectLog(_ctx, res, url) {
       // 统计按全部读到的记录算，明细只回尾部 limit 条（新的在前）
       stats: summarizeInjectRecords(records),
       records: records.slice(-limit).reverse(),
+      // 阶段 37：常驻段占用 / 上限（写入侧硬预算与它同口径）
+      pinnedBudget: await readPinnedBudget(ctx),
     },
   })
 }

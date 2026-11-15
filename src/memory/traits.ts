@@ -710,6 +710,8 @@ function isConflict(err: unknown): boolean {
 
 const TRAITS_DESCRIPTION = [
   '从近期记忆里归纳「关于你自己的稳定模式」候选（identity 类型），**只写候选不生效**。',
+  '—— 该用我：夜间提炼，或用户要求「总结我最近的习惯 / 偏好」。',
+  '—— 别用我：单条事实的存取（memory_save / memory_search）；归纳**我自己的**行为倾向（那是 memory_persona）。',
   '默认 dry_run=true，先看产出再决定是否落库；落库的条目 status=pending，不会进检索。',
   '需要模型服务：没有可用模型时直接返回 skipped，不报错。',
 ].join('')

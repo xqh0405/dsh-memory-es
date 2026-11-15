@@ -232,6 +232,8 @@ window.__ModuleLoader__.load({
       injPinnedRuns: '常驻注入',
       injPinnedItems: '常驻条均',
       injPinnedDropped: '常驻被挤掉',
+      injPinnedBudget: '常驻占用 / 上限',
+      injPinnedFull: '已满',
       injPinnedOnly: '仅常驻',
       injColItems: '注入条数',
       injColChars: '字符',
@@ -600,6 +602,8 @@ window.__ModuleLoader__.load({
       injPinnedRuns: 'Pinned runs',
       injPinnedItems: 'Pinned avg',
       injPinnedDropped: 'Pinned dropped',
+      injPinnedBudget: 'Pinned budget',
+      injPinnedFull: 'full',
       injPinnedOnly: 'Pinned only',
       injColItems: 'items',
       injColChars: 'chars',
@@ -4422,6 +4426,15 @@ window.__ModuleLoader__.load({
                 : null,
               stats.pinned && stats.pinned.droppedTotal > 0
                 ? metric(t('injPinnedDropped'), String(stats.pinned.droppedTotal))
+                : null,
+              // 阶段 37：常驻段的实时占用。满了要在写入侧被拒，这里让「为什么被拒」看得见。
+              data && data.pinnedBudget
+                ? metric(
+                    t('injPinnedBudget'),
+                    data.pinnedBudget.full
+                      ? `${data.pinnedBudget.used}/${data.pinnedBudget.max} ${t('injPinnedFull')}`
+                      : `${data.pinnedBudget.used}/${data.pinnedBudget.max}`,
+                  )
                 : null,
             )
           : null,

@@ -165,6 +165,8 @@ export async function rollbackTo(deps: HistoryDeps, targetId: string): Promise<R
 
 const HISTORY_DESCRIPTION = [
   '看一条记忆的版本链（前后各走几跳），或回滚到其中某一版。',
+  '—— 该用我：已知 memory_id，要确认它被谁取代、什么时候改的、回滚到某一版；怀疑某条被 supersede / 删除。',
+  '—— 别用我：不知道 id（先用 memory_search 找）；只要当前正文（用 memory_get，本工具不给全文）。',
   '回滚不会删除：新版置 archived，旧版恢复 active，历史随时能再查。',
 ].join('')
 

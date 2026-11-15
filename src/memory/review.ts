@@ -323,7 +323,9 @@ function isNotFound(err: unknown): boolean {
 }
 
 const REVIEW_DESCRIPTION = [
-  '审核提炼出的 identity 候选：list 看待采纳、approve 采纳生效、reject 拒绝（保留内容置 archived）。',
+  '审核提炼出的 identity / persona 候选：list 看待采纳、approve 采纳生效、reject 拒绝（保留内容置 archived）。',
+  '—— 该用我：处理审核台待采纳的候选；查自己的审核流水。',
+  '—— 别用我：普通记忆的存取（用 memory_save / memory_search）；采纳后想改正文（先 memory_save 新条再 supersede 旧条）。',
   '只有 status=pending 的 identity 条目能被采纳；重复采纳会如实告诉你当前状态而不是假装成功。',
 ].join('')
 

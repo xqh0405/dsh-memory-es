@@ -339,7 +339,10 @@ export async function updateStatus(
 
 const DESCRIPTION = [
   '把一条记忆标成「过时」或「私有」，不物理删除（历史仍可审计，检索只取 active）。',
-  'supersede：被新版本取代，必须给 replacement_memory_id，会在新旧两条之间双向连线。',
+  '—— 该用我：记忆过时了、被新决定覆盖了、用户说「这条别用了」；要置顶 / 取消置顶某条常驻规则。',
+  '—— 别用我：想改正文（本工具不动 content——先 memory_save 新条，再 supersede 旧条指向新 id）；'
+  + '想物理删除（没有这个能力，用 mark_private 让它退出整理与注入）。',
+  'supersede：被新版本取代，必须给 replacement_memory_id，会在新旧两条之间双向连线（先 memory_save 拿到新 id）。',
   'expire：直接作废。mark_private：涉及隐私、不再参与整理任务（状态不变）。',
   'pin：置为常驻，之后每一轮注入都会带上它（不看当前问题）；unpin：取消常驻。用户说「记住这条、以后都要」时用 pin。',
   '什么时候用：记忆过时了、被新决定覆盖了、或用户说「这条别用了」。不要靠重复写同内容来覆盖。',

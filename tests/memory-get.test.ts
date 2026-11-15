@@ -135,3 +135,28 @@ describe('getMemories', () => {
     }
   })
 })
+
+describe('阶段 37：missing 时给 try_instead', () => {
+  test('取不到时建议先 memory_search、再 memory_history', async () => {
+    const fake = await startGetFake({})
+    try {
+      const result = await getMemories(makeDeps(fake), { memory_ids: ['ghost'] })
+      assert.deepEqual(result.missing, ['ghost'])
+      assert.ok(result.try_instead, '取不到必须给下一步')
+      assert.match(result.try_instead, /memory_search/)
+      assert.match(result.try_instead, /memory_history/)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('全部取到时没有 try_instead（别给无用的建议）', async () => {
+    const fake = await startGetFake({ m1: { memory_id: 'm1', user_id: 'xqh', content: '一条事实' } })
+    try {
+      const result = await getMemories(makeDeps(fake), { memory_ids: ['m1'] })
+      assert.equal(result.try_instead, undefined)
+    } finally {
+      await fake.close()
+    }
+  })
+})
