@@ -33,7 +33,7 @@ describe('scanSensitive', () => {
     assert.equal(hits.some((hit) => hit.kind === 'private_key'), true)
   })
 
-  test('云厂商 AccessKey / API token / 手机号 / 身份证 / 密码赋值 都能命中', () => {
+  test('云厂商 AccessKey / API token / 手机号 / 身份证 / 邮箱 / 密码赋值 都能命中', () => {
     const cases: Array<[string, string]> = [
       ['key: LTAI5tAbCdEfGhIjKlMn', 'cloud_ak'],
       ['token: sk-abcdefghijklmnopqrst', 'api_token'],
@@ -41,6 +41,7 @@ describe('scanSensitive', () => {
       ['联系 13800138000 处理', 'phone'],
       ['身份证 110101199003078515', 'id_card'],
       ['mysql password=S3cretPass', 'password_assignment'],
+      ['邮箱：xqh@gmail.com', 'email'],
     ]
     for (const [text, kind] of cases) {
       const hits = scanSensitive(text)
@@ -331,6 +332,18 @@ describe('classifyValue（环境配置不进团队库，2026-10-29）', () => {
   test('带技术结论的进度复盘要留（有根因/机制就不拦）', () => {
     const r = classifyValue('已完成 member 扩到 3 实例，根因是单实例 Xmx=10g 时 GC 风暴拖垮 MyBatis 解析器')
     assert.equal(r.verdict, 'team_worthy')
+  })
+
+  test('个人身份/邮箱即使带知识词也判 personal_only（隐私优先，2026-11-16）', () => {
+    const r = classifyValue('用户身份:xqh(邮箱 xqh@gmail.com),已设为其全局 git 提交身份;推送必须先用该身份')
+    assert.equal(r.verdict, 'personal_only')
+    assert.match(r.reason, /个人身份/)
+  })
+
+  test('本机出口 IP/白名单类事实判 personal_only（只对这台机器成立，2026-11-16）', () => {
+    const r = classifyValue('[跨项目·运维] 端口探测判读铁律:本机出口 IP 已进各宝塔管理端口的白名单，所以本机探测可达只证明规则允许了我')
+    assert.equal(r.verdict, 'personal_only')
+    assert.match(r.reason, /本机环境/)
   })
 
   test('git 工作流规则不因提到私钥路径被误杀（2026-10-29 回归）', () => {

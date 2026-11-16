@@ -116,6 +116,20 @@ const ENV_ONLY_PATTERN =
   /(克隆在|已克隆|已装好|已经装好|装好了|已安装|已配好|配好了|已配置|软链|工作目录为|仓库在 \/home|缓存克隆在|装在 \/home|origin=(ssh|https):\/\/git@)/
 
 /**
+ * 个人身份/联系方式：邮箱、账号、绑定关系。这类内容对同事没有复用价值，且属于隐私，
+ * 一旦晋升就是「全员可读的索引里躺着某个人的邮箱」。**不受 KNOWLEDGE 豁免**——
+ * 隐私优先于「万一它也算条知识」。
+ * 2026-11-16：实测一条「用户身份：xqh（邮箱 …@gmail.com）」被判 team_worthy 写进团队库。
+ */
+const IDENTITY_ONLY_PATTERN = /(用户身份|邮箱|手机号|账号是|账户是|我的偏好|我的习惯|我习惯)/
+
+/**
+ * 本机环境事实：出口 IP、白名单、直连超时、本机探测。只在「这台机器 + 这个出口」成立，
+ * 别人照着做会得出相反结论。同样不受 KNOWLEDGE 豁免——带「本机/出口 IP」的结论天生绑定环境。
+ */
+const LOCAL_ENV_PATTERN = /(本机出口|出口 IP|出口IP|白名单|直连超时|本机探测)/
+
+/**
  * 进度快照的特征（「已落地 / 已扩到 / 已完成 / 进度复查」+ supersedes）。
  * 这类内容的价值随时间衰减，而且别人看到会当**当前状态**，按过期的状态干活比没有更糟。
  */
@@ -142,6 +156,18 @@ const KNOWLEDGE_PATTERN =
  */
 export function classifyValue(content: string): { verdict: 'team_worthy' | 'personal_only'; reason: string } {
   const isKnowledge = KNOWLEDGE_PATTERN.test(content)
+  if (IDENTITY_ONLY_PATTERN.test(content)) {
+    return {
+      verdict: 'personal_only',
+      reason: '个人身份/联系方式（邮箱/账号/偏好），不进团队库',
+    }
+  }
+  if (LOCAL_ENV_PATTERN.test(content)) {
+    return {
+      verdict: 'personal_only',
+      reason: '本机环境事实（出口 IP/白名单/直连超时），只对这台机器成立',
+    }
+  }
   if (ENV_ONLY_PATTERN.test(content) && !isKnowledge) {
     return {
       verdict: 'personal_only',

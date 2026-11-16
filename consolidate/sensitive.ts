@@ -24,6 +24,7 @@ export type SensitiveKind =
   | 'api_token'
   | 'id_card'
   | 'phone'
+  | 'email'
   | 'password_assignment'
 
 export interface SensitiveHit {
@@ -57,6 +58,14 @@ const RULES: Array<{ kind: SensitiveKind; pattern: RegExp; note: string }> = [
   })),
   { kind: 'id_card', pattern: /\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b/g, note: '身份证号' },
   { kind: 'phone', pattern: /(?<!\d)1[3-9]\d{9}(?!\d)/g, note: '手机号' },
+  // 邮箱：个人记忆里是正常内容，但晋升到全员可读的团队库就是隐私泄露
+  // （2026-11-16 实测「用户身份：xqh（邮箱 …@gmail.com）」被判 team_worthy 写了进去）。
+  // 与 phone/id_card 同理，留在本模块、不上提共享规则。
+  {
+    kind: 'email',
+    pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g,
+    note: '邮箱',
+  },
   {
     kind: 'password_assignment',
     // password=xxx / passwd: xxx / pwd = "xxx" / 密码=xxx（值至少 4 位、且不是占位符）
