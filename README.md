@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.6.65**
+**当前版本：0.6.65** · **DSH 版本：≥ 0.1.0**（`engines.dsh`；当前在 **0.2.2-rc.1** 上运行）
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -84,7 +84,7 @@ cd dsh-memory-es-<版本>
 ./install.sh --dsh-home /data/dsh   # dsh 跑在容器里时（root 执行再加 --owner node）
 ```
 
-前置条件：Linux + Docker（`docker compose` v2）、内存 ≥ 4 GB、Node.js ≥ 22 + dsh；向量检索还需要 Ollama 与 `bge-m3`（没有它只剩关键词检索）。首次起 ES 要出网拉镜像与中文分词插件。
+前置条件：Linux + Docker（`docker compose` v2）、内存 ≥ 4 GB、Node.js ≥ 22 + dsh ≥ 0.1.0（`engines.dsh`，当前实测版本 0.2.2-rc.1）；向量检索还需要 Ollama 与 `bge-m3`（没有它只剩关键词检索）。首次起 ES 要出网拉镜像与中文分词插件。
 
 **没有 ES 的机器**（第一次装）再跑一条，把库和账号一起备好：
 

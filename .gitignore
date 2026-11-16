@@ -237,3 +237,6 @@ scratch-backup/
 # 127 推理机的运维文档快照（含 llama-swap API key、Open WebUI 密码，绝不能入库）
 scratch-127/
 scratch-eval/
+
+# 2026-11-16 全员记忆晋升整理的工作产物（含各人个人记忆原文、改写稿与索引快照，绝不能入库）
+scratch-coarse/
