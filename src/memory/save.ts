@@ -27,10 +27,13 @@ import type { Embedder } from '../embedding.ts'
 import { EmbeddingError } from '../embedding.ts'
 import { dedupeBody, knnBody } from '../es/dsl.ts'
 import type { EsClient } from '../es/http.ts'
-import { formatEsError } from '../es/http.ts'
+import { EsError, formatEsError } from '../es/http.ts'
 import { normalizeContent, sha256Hex } from '../fragment.ts'
 import { assertDocOwner, NON_FACT_MEMORY_TYPES, nowIso, personalIndexFor, type WriteMode } from './common.ts'
 import { mergeEdges, mergeEdgesSegmented, pickNeighbors, readEdges, type Edge } from '../edges.ts'
+// 阶段 37：常驻段硬预算必须与注入侧同一口径（每条截断到 PINNED_ITEM_MAX_CHARS 再累加），
+// 否则写入侧放行的条数到注入侧仍会被裁掉，模型以为置顶成功、实际每轮少一条。
+import { normalizePinnedHits, PINNED_FETCH_SIZE, PINNED_ITEM_MAX_CHARS, pinnedSearchBody } from '../recall-inject.ts'
 import {
   checkAdmission,
   DEFAULT_ORIGIN,
@@ -113,6 +116,13 @@ export interface SaveResult {
   reason?: string
   /** 近似去重提示：库里已有内容相近的条目（cos ≥ 阈值），**没有阻塞写入** */
   similar_to?: string[]
+  /**
+   * 阶段 37：下一步该调什么工具（可执行建议，不是解释）。
+   *
+   * 为什么单独一个字段：模型只看 `text` 时容易「再存一遍试试」或直接放弃；
+   * 把建议做成机读字段，既能在文本里带出来，也能被测试断言。
+   */
+  try_instead?: string
   /** 给模型看的一句话 */
   text: string
 }
@@ -193,8 +203,11 @@ export interface SaveDeps {
   defaultDomain: string
   /** 去重检索用只读身份；`get` 缺失时不建边（老调用点与测试不受影响） */
   reader: Pick<EsClient, 'search'> & Partial<Pick<EsClient, 'get'>>
-  /** 写入用 writer 身份；`update` 缺失时不建边（老调用点与测试不受影响） */
-  writer: Pick<EsClient, 'index'> & Partial<Pick<EsClient, 'update'>>
+  /**
+   * 写入用 writer 身份；`update` 缺失时不建边、`delete` 缺失时不做并发去重补偿
+   * （老调用点与测试不受影响）。
+   */
+  writer: Pick<EsClient, 'index'> & Partial<Pick<EsClient, 'update' | 'delete'>>
   /**
    * 阶段 5.2 建边配置。缺省 = 不建边。
    * 建边是 best-effort：失败只记日志，绝不影响「已保存」的结论。
@@ -205,6 +218,15 @@ export interface SaveDeps {
    * 命中只回 `similar_to` 提示（不阻塞写入）——同义改写是值钱的，不能一刀切判重。
    */
   similar?: SimilarConfig
+  /**
+   * 阶段 37：常驻段的**写入侧**硬预算（字符）。
+   *
+   * 缺省或 `maxChars <= 0` = 不校验（回滚开关）。
+   * 口径与注入侧一致：每条按 `PINNED_ITEM_MAX_CHARS` 截断后累加。
+   * 为什么要在写入侧拦：注入侧超预算只能少放几条，模型与用户都不知道
+   * 有一条规则被静默丢掉；写入侧返回可执行错误，才能先腾空间再置顶。
+   */
+  pinnedBudget?: { maxChars: number }
   /**
    * 阶段 9：本会话最近的检索命中（用于识别「把刚搜到的原文又写回来」）。
    * 传函数而不是数组：每次保存都取最新的；缺省 = 不做该判据。
@@ -498,6 +520,77 @@ async function probeNeighbors(
 }
 
 /**
+ * 阶段 37：常驻段占用（字符）与本次置顶是否放得下。
+ *
+ * 口径必须与注入侧逐字一致：注入用 `normalizePinnedHits` 把每条截到
+ * `PINNED_ITEM_MAX_CHARS` 再按 `pinnedMaxChars` 计数，这里照抄同一套，
+ * 否则会出现「写入侧放行、注入侧裁掉」的静默丢失。
+ *
+ * 只在 `pinned=true` 时被调用：普通写入不该多付一次 ES 往返。
+ */
+async function pinnedBudgetUsed(
+  deps: SaveDeps,
+  index: string,
+  incoming: string,
+): Promise<{ ok: boolean; used: number; max: number; incomingChars: number }> {
+  const max = deps.pinnedBudget?.maxChars ?? 0
+  const incomingChars = Math.min(normalizeContent(incoming).length, PINNED_ITEM_MAX_CHARS)
+  // 0 = 不校验（回滚开关；配置里把 pinnedMaxChars 设 0 即恢复旧行为）
+  if (max <= 0) return { ok: true, used: 0, max, incomingChars }
+
+  const res = await deps.reader.search(index, pinnedSearchBody(PINNED_FETCH_SIZE), { signal: deps.signal })
+  const rows = normalizePinnedHits(res.hits)
+  const used = rows.reduce((sum, row) => sum + String(row.summary ?? '').length, 0)
+  return { ok: used + incomingChars <= max, used, max, incomingChars }
+}
+
+function pinnedFullText(verdict: { used: number; max: number; incomingChars: number }): string {
+  return `常驻段已占 ${verdict.used}/${verdict.max} 字符，这条还要 ${verdict.incomingChars}，放不下；没有写入。`
+    + '先腾空间：memory_update_status(action=unpin, memory_id=…) 取消某条置顶，'
+    + '或 action=expire 作废一条旧规则，再重试。'
+}
+
+/**
+ * 阶段 38：并发写入的幂等补偿。
+ *
+ * 为什么不能只靠「写入前查一次」：`check-then-act` 的窗口关不掉——两个实例同时查，
+ * 都查不到，然后各写一条。ES 没有「content_sha256 唯一」约束（唯一的只有 `_id`），
+ * 而把 `_id` 改成 sha 会推翻现有 id 语义（`memory_id` 与 `_id` 必须相等，get/update/history
+ * 全按它走）。所以这里用**写入后复核**：同 sha 的 active 文档里若有 id 更小的，说明别处
+ * 先写了，删掉自己并把 id 让给它。规则是确定性的（按 id 升序），并发双方会得到同一个结论，
+ * 只有 id 较大的那一条会删自己。
+ *
+ * 返回 `undefined` = 自己就是最早那条（或没有并发重复）。
+ */
+async function dedupeAfterWrite(
+  deps: SaveDeps,
+  index: string,
+  doc: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (deps.writer.delete === undefined) return undefined
+  const sha = doc.content_sha256
+  if (typeof sha !== 'string' || sha === '') return undefined
+  const selfId = String(doc.memory_id)
+  const dup = await deps.reader.search(
+    index,
+    // size 必须 >1：dedupeBody 默认只取一条，看不出「有第二条」
+    { ...dedupeBody(sha), size: 10, _source: ['memory_id'] },
+    { signal: deps.signal },
+  )
+  const ids = dup.hits.map((hit) => String(hit.source.memory_id ?? hit.id)).filter((id) => id !== '')
+  if (ids.length <= 1) return undefined
+  const earliest = [...ids].sort()[0]
+  if (earliest === undefined || earliest === selfId) return undefined
+  try {
+    await deps.writer.delete(index, selfId, { refresh: 'wait_for', signal: deps.signal })
+  } catch (err) {
+    // 并发双方可能都判断自己该删；已经不存在就是已经合并过了
+    if (!(err instanceof EsError && err.kind === 'not_found')) throw err
+  }
+  return earliest
+}
+
+/**
  * 编排：去重 → embedding（可降级）→ F3 → 写（refresh=wait_for，写完立刻可搜）。
  * 失败一律抛（不吞）：ES 不可用时记忆操作必须**明确失败**，不能装作已保存（§6.5）。
  */
@@ -543,10 +636,18 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
     // 而库里恰好已有同内容（未置顶）时，静默返回「未重复写入」会让置顶诉求凭空消失。
     // 这里补一次只改 pinned 的写；不置顶的重复写入仍然什么都不做。
     let pinnedUpgraded = false
+    let pinnedBlocked: { used: number; max: number; incomingChars: number } | null = null
     if (input.pinned === true && existing.source.pinned !== true && deps.writer.update !== undefined) {
-      await deps.writer.update(index, existingId, { pinned: true, updated_at: nowIso(now) }, { refresh: 'wait_for', signal: deps.signal })
-      pinnedUpgraded = true
-      log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, pinned_upgraded: true })
+      // 阶段 37：置顶也要过预算——内容已在库里，但「每轮注入」是另一笔成本
+      const verdict = await pinnedBudgetUsed(deps, index, input.content)
+      if (verdict.ok) {
+        await deps.writer.update(index, existingId, { pinned: true, updated_at: nowIso(now) }, { refresh: 'wait_for', signal: deps.signal })
+        pinnedUpgraded = true
+        log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, pinned_upgraded: true })
+      } else {
+        pinnedBlocked = verdict
+        log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, pinned_blocked: true, used: verdict.used, max: verdict.max })
+      }
     }
     if (!pinnedUpgraded) {
       log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, deduped: true, degraded: false })
@@ -557,9 +658,18 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
       deduped: true,
       degraded: false,
       quarantined: false,
+      ...(pinnedUpgraded
+        ? {}
+        : {
+            try_instead:
+              `要看原文用 memory_get(memory_ids=[${existingId}])；要补充/修正这条，先把新内容 save 成新条目拿到 id，`
+              + `再 memory_update_status(action=supersede, memory_id=${existingId}, replacement_memory_id=<新 id>) 让旧条失效。`,
+          }),
       text: pinnedUpgraded
         ? `已存在相同内容（memory_id=${existingId}），未重复写入；已按本次要求置为常驻（每轮注入）`
-        : `已存在相同内容（memory_id=${existingId}），未重复写入`,
+        : pinnedBlocked !== null
+          ? `已存在相同内容（memory_id=${existingId}），未重复写入。但${pinnedFullText(pinnedBlocked)}`
+          : `已存在相同内容（memory_id=${existingId}），未重复写入。`,
     }
   }
 
@@ -610,7 +720,37 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
       degraded: false,
       quarantined: true,
       reason: admission.reason,
-      text: `已隔离待审（${admission.reason ?? '命中准入规则'}），没有进入检索；可在面板「记忆库」里查看或恢复`,
+      // 阶段 37：给「下一步怎么做」，而不是只报一个状态
+      try_instead:
+        `命中准入规则（${admission.reason ?? '未给原因'}）。放行方式：在面板「记忆库」恢复该条，`
+        + '或去掉凭据/原样回灌的表述后重新 save。被隔离的条目不进检索、也不占常驻预算。',
+      text: `已隔离待审（${admission.reason ?? '命中准入规则'}），没有进入检索；可在面板「记忆库」里查看或恢复`
+        + `。放行条件：人工恢复，或换一种不含凭据的表述重新保存。`,
+    }
+  }
+
+  // 阶段 37：常驻段硬预算。放在 embedding 之前——预算不够时不该白花一次向量调用。
+  if (input.pinned === true) {
+    const verdict = await pinnedBudgetUsed(deps, index, input.content)
+    if (!verdict.ok) {
+      log({
+        tool: 'save',
+        user: deps.userId,
+        ms: Date.now() - startedAt,
+        rejected: 'pinned_budget',
+        used: verdict.used,
+        max: verdict.max,
+      })
+      return {
+        status: 'rejected',
+        memory_id: '',
+        deduped: false,
+        degraded: false,
+        quarantined: false,
+        reason: `常驻段已满（${verdict.used}/${verdict.max} 字符）`,
+        try_instead: 'memory_update_status(action=unpin, memory_id=…) 先腾空间，或这次不置顶（pinned=false）。',
+        text: pinnedFullText(verdict),
+      }
     }
   }
 
@@ -638,6 +778,42 @@ export async function saveMemory(deps: SaveDeps, input: SaveInput): Promise<Save
   } catch (err) {
     log({ tool: 'save', user: deps.userId, ms: Date.now() - startedAt, error: formatEsError(err) })
     throw err
+  }
+
+  // 阶段 38：并发幂等补偿。失败不改变「已写入」的结论，只留痕——
+  // 补偿是「让重试不产生第二条」，不是写成功的前提。
+  let mergedInto: string | undefined
+  try {
+    mergedInto = await dedupeAfterWrite(deps, built.index, built.doc)
+  } catch (err) {
+    log({
+      tool: 'save',
+      user: deps.userId,
+      ms: Date.now() - startedAt,
+      event: 'post_write_dedupe_failed',
+      error: formatEsError(err),
+    })
+  }
+  if (mergedInto !== undefined) {
+    log({
+      tool: 'save',
+      user: deps.userId,
+      ms: Date.now() - startedAt,
+      deduped: true,
+      concurrent_merge: true,
+      kept: mergedInto,
+    })
+    return {
+      status: 'merged',
+      memory_id: mergedInto,
+      deduped: true,
+      degraded,
+      quarantined: false,
+      try_instead:
+        `要看原文用 memory_get(memory_ids=[${mergedInto}])；要修正内容请先 save 新内容，`
+        + `再 memory_update_status(supersede, memory_id=${mergedInto}, replacement_memory_id=<新 id>)。`,
+      text: `并发写入同一内容：已合并到最早那条（memory_id=${mergedInto}），本次重复写入已撤销。`,
+    }
   }
 
   // 阶段 5.2 建边 + 阶段 9 近似去重（共用一次 kNN；异常已在内部吞掉并记日志）
@@ -697,6 +873,7 @@ const DESCRIPTION = [
   '一次一条：content 写一句能独立成立的事实，不要贴整段对话。',
   '—— pinned 只给「用户明确要求长期生效」的规则与偏好；普通事实、进度、背景一律默认 false（置顶是每轮的固定成本）。',
   '凭据（口令、令牌、私钥、带密码的连接串）命中 → quarantined=true；换个说法重试仍然会被隔离，不要试。',
+  '准入的「刚才搜到的原文又写回来」判定只在单进程内有效（多实例部署下可能漏判）；同文重复仍由 sha 去重兜住。',
   '相同内容会命中去重（deduped=true）；内容相近会回 similar_to 提示。',
 ].join(' ')
 
@@ -766,6 +943,7 @@ export function defineSaveTool(deps: SaveDeps) {
           quarantined: { type: 'boolean', required: true },
           reason: { type: 'string' },
           similar_to: { type: 'array', items: { type: 'string' } },
+          try_instead: { type: 'string' },
           text: { type: 'string', required: true },
         },
       },

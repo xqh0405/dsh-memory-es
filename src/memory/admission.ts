@@ -54,7 +54,16 @@ export interface RecallRecord {
 }
 
 export interface AdmissionContext {
-  /** 本会话最近一次检索命中的记忆（由 recallCache 提供；空 = 谈不上「原样再摄取」） */
+  /**
+   * 本会话最近一次检索命中的记忆（由 recallCache 提供；空 = 谈不上「原样再摄取」）。
+   *
+   * ⚠️ **只在单进程内有效**（阶段 38 评估后的取舍）：`recallCache` 是进程内 Map，
+   * 多实例共享同一个个人索引时，「A 实例检索 → B 实例保存同一段原文」不会被判成再摄取。
+   * 这是**已知弱化**，不是 bug：真正的强制放行来自 `status=active` 与审核台，
+   * 原样回灌最坏只是多一条重复（save 的 sha 去重仍会拦同文）。
+   * 要跨实例共享，得把 recent 落到 ES（新索引 + TTL 清理 + 迁移纪律），
+   * 收益是「更严的准入」、成本是一整套存储契约——本轮不做，见优化路线 38.5。
+   */
   recent?: readonly RecallRecord[]
 }
 

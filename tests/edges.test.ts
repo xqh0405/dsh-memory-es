@@ -448,7 +448,13 @@ describe('saveMemory 建边', () => {
     try {
       await saveMemory(makeDeps(fake, { edges: { ...EDGES, enabled: false } }), { content: '一条不建边的事实' })
       assert.equal(updates.length, 0)
-      assert.equal(fake.requests.filter((r) => r.path.includes('/_search')).length, 1, '只做去重那次查询')
+      // 阶段 38：除了去重那次，还有写入后按 sha 的并发复核（同样是一次普通 search）；
+      // 但**不能有 kNN**——那才是建边的判据
+      assert.equal(
+        fake.requests.filter((r) => r.path.includes('/_search') && r.body.includes('"knn"')).length,
+        0,
+        'edges 关掉时不该查 kNN',
+      )
     } finally {
       await fake.close()
     }

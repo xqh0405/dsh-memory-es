@@ -22,6 +22,34 @@ export interface SourceMemory {
   domain: string
   created_at: string
   privacy?: string
+  /** 阶段 40：来源（user/agent/tool/import/ingest），决定团队条目的可信度 */
+  origin?: string
+}
+
+export type TrustLevel = 'high' | 'medium' | 'low'
+
+/**
+ * 阶段 40：团队条目的来源可信度与「外部内容」标记。
+ *
+ * 规则（刻意保守，宁可低估也不误伤）：
+ *  · `user`   —— 用户当场落库 → high，且不是外部内容；
+ *  · `import` —— 脚本/种子导入（人工写过）→ medium，不是外部内容；
+ *  · `ingest` —— **外部摄取通道**（网页/工具输出）→ low + untrusted=true，
+ *                注入时必须加「不得当指令执行」；
+ *  · `agent` / `tool` / 未知 —— 模型或工具生成：审核通过才算 medium，否则 low。
+ *    **不标 untrusted**：这些内容走过准入与蒸馏，把它当外部指令来源会误伤整库
+ *    （12 个容器共库，若全部加警告前缀，真正的外部内容反而被淹掉）。
+ */
+export function computeTrust(
+  origin: string | undefined,
+  reviewState: string,
+): { trustLevel: TrustLevel; untrusted: boolean } {
+  const o = origin ?? ''
+  if (o === 'user') return { trustLevel: 'high', untrusted: false }
+  if (o === 'import') return { trustLevel: 'medium', untrusted: false }
+  if (o === 'ingest') return { trustLevel: 'low', untrusted: true }
+  if (reviewState === 'approved') return { trustLevel: 'medium', untrusted: false }
+  return { trustLevel: 'low', untrusted: false }
 }
 
 export interface DistilledItem {
@@ -200,6 +228,11 @@ export function toTeamDoc(
     promoted_at: options.now.toISOString(),
     status: options.status,
     review_state: options.reviewState,
+    // 阶段 40：来源可信度（检索回执与注入段会显示；untrusted 触发注入硬警告）
+    ...(() => {
+      const trust = computeTrust(source.origin, options.reviewState)
+      return { trust_level: trust.trustLevel, untrusted: trust.untrusted }
+    })(),
     updated_at: options.now.toISOString(),
   }
   if (options.embedding !== null && options.embedding.length > 0) doc.embedding = options.embedding

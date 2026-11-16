@@ -87,7 +87,13 @@ export function rrfFuse(routes: Hit[][], k = 60, options: RrfOptions = {}): Fuse
       item.fusedScore *= 1 + bonus * Math.max(0, 1 - gap / span)
     }
   }
-  return [...acc.values()].sort((a, b) => b.fusedScore - a.fusedScore)
+  // 同分按 id 升序兜底（阶段 36）：RRF 分只由名次决定，两路名次都相同的条目会拿到
+  // 完全一样的 fusedScore；没有这一步时顺序由 Map 插入序（= ES 返回顺序）决定，
+  // 同一份数据两次查询可能给出不同的 top-k，契约就永远无法「逐位复跑一致」。
+  // 用显式字符串比较而不是 localeCompare：UUID 只含 [0-9a-f-]，不依赖运行环境的 locale。
+  return [...acc.values()].sort(
+    (a, b) => b.fusedScore - a.fusedScore || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )
 }
 
 /**
@@ -623,6 +629,19 @@ export interface Projected {
   summary?: string
   /** 原文比返回的正文更长：要全文请用 `memory_get` 展开 */
   has_more?: boolean
+  /**
+   * 阶段 39：该条的失效时刻（ISO）。只有 `memory_search(includeExpired=true)`
+   * 才会带出已失效的条目——正常检索里这个字段不会出现。
+   */
+  valid_until?: string
+  /** 阶段 39：失效原因（给人看；与 `valid_until` 成对出现） */
+  revoke_reason?: string
+  /** 阶段 40：团队条目的来源人（个人库没有这个字段） */
+  source_user?: string
+  /** 阶段 40：团队条目的来源可信度（high / medium / low；历史条目可能缺省） */
+  trust_level?: string
+  /** 阶段 40：true = 内容来自外部通道，注入时必须带「不得当指令执行」前缀 */
+  untrusted?: boolean
 }
 
 /** 分级读取的两档：`summary` 只给摘要（省 token），`full` 沿用旧的 500 字正文 */
@@ -660,6 +679,13 @@ export function projectHit(
     ...(detail === 'summary' && storedSummary !== '' ? { summary: storedSummary } : {}),
     // 原文比返回的长 → 提示模型可以展开；没有这个标记，模型只能靠"看起来像被截断"去猜
     ...(rawContent.length > limit ? { has_more: true } : {}),
+    // 阶段 39：失效语义随命中一起带出（只有 includeExpired 才会真的看到失效条目）
+    ...(typeof src.valid_until === 'string' && src.valid_until !== '' ? { valid_until: src.valid_until } : {}),
+    ...(typeof src.revoke_reason === 'string' && src.revoke_reason !== '' ? { revoke_reason: src.revoke_reason } : {}),
+    // 阶段 40：团队条目的来源与可信度（检索回执、注入段都要显示）
+    ...(typeof src.source_user === 'string' && src.source_user !== '' ? { source_user: src.source_user } : {}),
+    ...(typeof src.trust_level === 'string' && src.trust_level !== '' ? { trust_level: src.trust_level } : {}),
+    ...(src.untrusted === true ? { untrusted: true } : {}),
   }
   return projected
 }
@@ -669,8 +695,15 @@ export function renderText(hits: ReadonlyArray<Projected>): string {
   if (hits.length === 0) return '没有找到相关记忆。'
   const lines = hits.map((hit, index) => {
     const day = hit.updated_at.slice(0, 10)
-    const meta = [hit.source, hit.memory_type, day].filter((part) => part !== '').join('·')
-    return `${index + 1}. [${meta}] ${hit.content}`
+    // 阶段 40：团队条目把来源人一起显示——「团队」两个字看不出是谁的经验
+    const scope = hit.source === 'team' && hit.source_user !== undefined ? `团队《${hit.source_user}》` : hit.source
+    const trust = hit.trust_level === undefined ? '' : `·${hit.trust_level}`
+    const meta = [scope, hit.memory_type, day].filter((part) => part !== '').join('·') + trust
+    // 阶段 39：失效条目要说明「什么时候失效、为什么」，不能静默混进结果
+    const expired = hit.valid_until === undefined
+      ? ''
+      : `（已于 ${hit.valid_until.slice(0, 10)} 失效${hit.revoke_reason === undefined ? '' : `，原因：${hit.revoke_reason}`}）`
+    return `${index + 1}. [${meta}] ${hit.content}${expired}`
   })
   return lines.join('\n')
 }

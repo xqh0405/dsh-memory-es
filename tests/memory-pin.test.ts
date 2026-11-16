@@ -32,11 +32,26 @@ interface Captured {
 
 async function startFake(
   docs: Record<string, Record<string, unknown>> = {},
-  opts: { duplicate?: string | null } = {},
+  opts: {
+    duplicate?: string | null
+    /** 阶段 37：模拟「库里已有这些常驻条目」，供写入侧预算查询使用 */
+    pinnedHits?: Array<{ id: string; summary: string }>
+  } = {},
 ) {
   const captured: Captured = { writes: [] }
   const fake = await startFakeEs((req, res) => {
     if (req.path.includes('/_search')) {
+      // 预算查询的特征是 filter 里带 pinned（去重查询带 content_sha256），据此分流
+      if (req.body.includes('"pinned"') && opts.pinnedHits !== undefined) {
+        sendJson(res, 200, {
+          took: 1,
+          hits: {
+            total: { value: opts.pinnedHits.length, relation: 'eq' },
+            hits: opts.pinnedHits.map((h) => ({ _id: h.id, _score: 1, _source: { memory_id: h.id, summary: h.summary } })),
+          },
+        })
+        return
+      }
       const dupId = opts.duplicate ?? null
       sendJson(res, 200, {
         took: 1,
@@ -333,5 +348,71 @@ describe('pinned 取数池（审查 #13）', () => {
     const pickedCritical = first.filter((id) => critical.has(id))
     assert.equal(pickedCritical.length, 6, `6 条 critical 必须全部入选，实际 ${JSON.stringify(first)}`)
     assert.equal(first.length - pickedCritical.length, 2, '剩 2 个名额给 normal')
+  })
+})
+
+describe('阶段 37：常驻段写入侧硬预算', () => {
+  const PINNED = Array.from({ length: 5 }, (_, i) => ({ id: `p${i}`, summary: '规'.repeat(200) }))
+
+  test('预算放得下时正常写入', async () => {
+    const { fake, docs } = await startFake({}, { pinnedHits: [{ id: 'p0', summary: '规'.repeat(100) }] })
+    try {
+      const result = await saveMemory(saveDeps(fake.url, { pinnedBudget: { maxChars: 800 } }), {
+        content: '新的一条常驻规则',
+        pinned: true,
+      })
+      assert.equal(result.status, 'created')
+      assert.equal(Object.values(docs)[0].pinned, true)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('打满时返回可执行错误且零写入（不白花一次向量调用）', async () => {
+    const { fake, captured } = await startFake({}, { pinnedHits: PINNED })
+    try {
+      const result = await saveMemory(saveDeps(fake.url, { pinnedBudget: { maxChars: 800 } }), {
+        content: '一条加不进去的常驻规则',
+        pinned: true,
+      })
+      assert.equal(result.status, 'rejected')
+      assert.match(result.text, /常驻段已占 1000\/800/)
+      assert.ok(result.try_instead?.includes('memory_update_status'), '要给腾空间的下一步')
+      assert.equal(captured.writes.length, 0, '被拒的写入必须是零写入')
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('maxChars=0 是回滚开关：不校验、照常写', async () => {
+    const { fake, docs } = await startFake({}, { pinnedHits: PINNED })
+    try {
+      const result = await saveMemory(saveDeps(fake.url, { pinnedBudget: { maxChars: 0 } }), {
+        content: '回滚后仍应写入',
+        pinned: true,
+      })
+      assert.equal(result.status, 'created')
+      assert.equal(Object.values(docs)[0].pinned, true)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test('去重命中且要置顶时，预算不够就不升级', async () => {
+    const { fake, captured } = await startFake(
+      { existing1: { memory_id: 'existing1', pinned: false } },
+      { duplicate: 'existing1', pinnedHits: PINNED },
+    )
+    try {
+      const result = await saveMemory(saveDeps(fake.url, { pinnedBudget: { maxChars: 800 } }), {
+        content: '重复内容',
+        pinned: true,
+      })
+      assert.equal(result.status, 'merged')
+      assert.match(result.text, /放不下/)
+      assert.ok(!captured.writes.some((w) => w.path.includes('/_update/')), '预算不够就不该补 pinned 写入')
+    } finally {
+      await fake.close()
+    }
   })
 })

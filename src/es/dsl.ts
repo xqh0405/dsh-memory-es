@@ -45,8 +45,8 @@ export type EsFilter = EsTermFilter | EsTermsFilter | EsRangeFilter | EsExistsFi
 export type FilterValue = string | string[]
 
 export interface MetaFilterOptions {
-  /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用） */
-  status?: string | null
+  /** 状态；默认 'active'，传 null 表示不加状态条件（排障/审计时用），传数组走 terms */
+  status?: string | string[] | null
   /**
    * 阶段 13：时间点回看。只返回「该时间点之前创建」的记忆。
    *
@@ -75,6 +75,22 @@ export interface MetaFilterOptions {
    * 传 null/undefined = 不加这个条件（审核台、迁移排查时用）。
    */
   review_state?: FilterValue | null
+  /**
+   * 阶段 39：是否排除「已失效」的条目（`valid_until < now`）。默认 true。
+   *
+   * 注意它只关掉 `valid_until` 这一条过滤；`status=active` 与
+   * 「不得有 superseded_by」两道闸仍在。要做**排障/回看**（看完被撤销的条目），
+   * 用 `includeInvalid` 一次放开全部兜底过滤。
+   */
+  excludeExpired?: boolean
+  /**
+   * 阶段 39：排障模式——跳过 `freshOnlyFilters` 的全部兜底过滤
+   * （superseded_by / expires_at / valid_until）。
+   *
+   * 为什么需要它：Supersede 的条目 status 也变了，只放 `valid_until` 根本看不到它们
+   * （2026-11-16 真机验证第一版就踩了这个坑：includeExpired 的命中与默认完全一致）。
+   */
+  includeInvalid?: boolean
   /** 注入当前时间，便于测试断言（默认 new Date()） */
   now?: Date
 }
@@ -113,21 +129,34 @@ function pushValueFilter(filters: EsFilter[], field: string, value: FilterValue 
  * 为什么抽成函数：测试要能原样引用这两条，否则每加一条过滤就得在 6 个用例里
  * 手抄一遍期望值，抄错一次就是假绿。
  */
-export function freshOnlyFilters(now: Date): EsFilter[] {
-  return [
+export function freshOnlyFilters(
+  now: Date,
+  options: { excludeExpired?: boolean; includeAll?: boolean } = {},
+): EsFilter[] {
+  // 排障模式：status 已经限定在允许的状态集合里，这里不再兜底挡
+  if (options.includeAll === true) return []
+  const filters: EsFilter[] = [
     // 用 `must_not exists` 而不是 `term: null`：字段缺失与字段为 null 是两回事，
     // 前者才是「没有值」的稳妥判据。
     { bool: { must_not: [{ exists: { field: 'superseded_by' } }] } },
     // 不存在的 expires_at 不会被 range 匹配，所以 must_not range 天然保留它们
     { bool: { must_not: [{ range: { expires_at: { lt: now.toISOString() } } }] } },
   ]
+  // 阶段 39：`valid_until < now` 的条目（已撤销/过期）默认不进了。
+  // 同样靠「不存在的字段不会被 range 匹配」保留老数据。
+  if (options.excludeExpired !== false) {
+    filters.push({ bool: { must_not: [{ range: { valid_until: { lt: now.toISOString() } } }] } })
+  }
+  return filters
 }
 
 export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
   const filters: EsFilter[] = []
   const now = options.now ?? new Date()
   const status = options.status === undefined ? 'active' : options.status
-  if (status !== null) {
+  if (Array.isArray(status)) {
+    if (status.length > 0) filters.push({ terms: { status } })
+  } else if (status !== null) {
     filters.push({ term: { status } })
   }
   pushValueFilter(filters, 'memory_type', options.memory_type)
@@ -153,7 +182,7 @@ export function buildFilters(options: MetaFilterOptions = {}): EsFilter[] {
     filters.push({ range: { updated_at: { gte } } })
   }
   // 时效过滤放最后：语义上它们是「兜底排除」，与业务维度（status/type/domain/时间窗）分开
-  filters.push(...freshOnlyFilters(now))
+  filters.push(...freshOnlyFilters(now, { excludeExpired: options.excludeExpired, includeAll: options.includeInvalid }))
   return filters
 }
 
@@ -201,21 +230,81 @@ export function extractIdentifiers(text: string, max = 5): string[] {
   return out
 }
 
+/**
+ * 阶段 41：查询侧去疑问词。
+ *
+ * 疑问词对 BM25 是纯噪声：它们几乎每条记忆里都有（「怎么」「为什么」），
+ * 却对区分度没有贡献。只在**关键词路**去掉；向量路仍用原句（语义完整对 embedding 有用）。
+ *
+ * 只在长句里按词剔除，不做语法分析——短查询（<6 字）原样返回，避免把「为什么」类查询
+ * 整句删空（删空后退回原句）。
+ */
+const QUESTION_WORDS = [
+  '为什么', '为什么', '怎么', '如何', '哪些', '哪个', '哪里', '什么', '多少',
+  '是不是', '有没有', '能不能', '要不要', '怎么弄', '怎么办', '请问', '一下',
+]
+
+export function stripQuestionWords(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length < 6) return trimmed
+  let out = trimmed
+  for (const word of QUESTION_WORDS) out = out.split(word).join(' ')
+  const cleaned = out.replace(/\s+/g, ' ').trim()
+  return cleaned === '' ? trimmed : cleaned
+}
+
+/**
+ * 阶段 41：英文整词（长度 ≥4），用于 `content_exact` 的整词匹配。
+ *
+ * 为什么需要：正文用 IK 分词，`pipe` 在 IK 下可能切出子串并命中 `pipeline`；
+ * `content_exact` 是 standard 分析器（按词边界），对整词做 `match_phrase` 就能区分
+ * 「pipe 命中 pipe」与「pipe 不该命中 pipeline」。命中的条目在 should 里加分，不命中也不影响召回。
+ */
+export function extractWholeWords(text: string, max = 5): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of text.match(/[A-Za-z][A-Za-z0-9_-]{3,}/g) ?? []) {
+    const token = raw.replace(/[-_]+$/, '')
+    if (token.length < 4 || seen.has(token)) continue
+    seen.add(token)
+    out.push(token)
+    if (out.length >= max) break
+  }
+  return out
+}
+
+/** 整词命中的加分：低于标识符（5），高于普通「一路 contributing」 */
+export const WHOLE_WORD_BOOST = 2
+/** 编辑距离兜底的分值：刻意低——它只该在「没有更好匹配」时起作用 */
+export const FUZZY_BOOST = 0.5
+
 /** BM25 一路：content 权重 2、semantic_keywords 权重 1.5（文档 §8.1 的字段权重） */
+export interface QueryRewrite {
+  /** 去疑问词（默认关：2026-11-16 实测会让中文 gold-set R@5 掉 2.7 点） */
+  strip?: boolean
+  /** 英文整词加分（content_exact 的 match_phrase） */
+  whole?: boolean
+  /** 编辑距离 1 兜底 */
+  fuzzy?: boolean
+}
+
 export function bm25Body(
   query: string,
   options: MetaFilterOptions = {},
   topK = 20,
   identifiers: readonly string[] = [],
+  rewrite: QueryRewrite = {},
 ): SearchBody {
   const q = query.trim()
   if (q === '') throw new Error('bm25Body: query 不能为空')
   assertPositiveInt(topK, 'topK')
+  // 阶段 41：查询改写默认全关（先量后开）。`rewrite.strip` 打开才去疑问词。
+  const keywordQuery = rewrite.strip === true ? stripQuestionWords(q) : q
   const bool: Record<string, unknown> = {
     must: [
       {
         multi_match: {
-          query: q,
+          query: keywordQuery,
           // summary 是蒸馏产出的一句话，检索时也要吃（否则辛苦蒸馏的摘要白存）
           fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
           type: 'best_fields',
@@ -224,13 +313,28 @@ export function bm25Body(
     ],
     filter: buildFilters(options),
   }
-  // 标识符精确匹配作为加分项：must 里已经有主查询，should 不命中也不影响召回，
-  // 命中则把「精确问到某个函数/任务名」的结果顶上来。
-  if (identifiers.length > 0) {
-    bool.should = identifiers.map((token) => ({
-      match_phrase: { [IDENTIFIER_FIELD]: { query: token, boost: IDENTIFIER_BOOST } },
-    }))
+  // 加分项（should）：不命中也不影响召回，命中则把「精确问到某个名字」的结果顶上来。
+  //  · 标识符（含分隔符/驼峰/字母数字）——已有
+  //  · 阶段 41：英文整词走 content_exact（standard 分析器）的 match_phrase，
+  //    这样 `pipe` 命中 `pipe`、**不会**命中 `pipeline`；
+  //  · 阶段 41：编辑距离 1 兜底（只对 ≥4 字符英文词），分值刻意低。
+  const should: unknown[] = identifiers.map((token) => ({
+    match_phrase: { [IDENTIFIER_FIELD]: { query: token, boost: IDENTIFIER_BOOST } },
+  }))
+  const wholeWords = extractWholeWords(q)
+  if (rewrite.whole === true) {
+    for (const word of wholeWords) {
+      should.push({ match_phrase: { [IDENTIFIER_FIELD]: { query: word, boost: WHOLE_WORD_BOOST } } })
+    }
   }
+  if (rewrite.fuzzy === true) {
+    for (const word of wholeWords) {
+      should.push({
+        fuzzy: { [IDENTIFIER_FIELD]: { value: word, fuzziness: 1, prefix_length: 1, boost: FUZZY_BOOST } },
+      })
+    }
+  }
+  if (should.length > 0) bool.should = should
   return {
     size: topK,
     _source: { excludes: [...DEFAULT_SOURCE_EXCLUDES] },

@@ -42,6 +42,13 @@ export interface GetResult {
   hits: GetItem[]
   /** 取不到的 id（不存在 / 不属于本用户）；不抛错，整批仍可用 */
   missing: string[]
+  /**
+   * 阶段 37：取不到时给下一步该调什么。
+   *
+   * 常见浪费是「id 记错了 → 反复 get 同一批 → 最后放弃」；一条建议就能把它变成
+   * 「先 memory_search 定位，再用新 id 展开」。
+   */
+  try_instead?: string
   text: string
 }
 
@@ -119,7 +126,18 @@ export async function getMemories(deps: GetDeps, input: GetInput): Promise<GetRe
       ? ''
       : `\n\n没找到：${missing.join(', ')}（可能不属于当前用户，或已被删除）`
 
-  return { hits, missing, text: `${body}${tail}` }
+  return {
+    hits,
+    missing,
+    ...(missing.length === 0
+      ? {}
+      : {
+          try_instead:
+            '先用 memory_search 用关键词把 id 找回来（结果里的 memory_id 就是可用的）；'
+            + '若怀疑是刚被 supersede/删除，用 memory_history(memory_id=…) 看版本链与状态。',
+        }),
+    text: `${body}${tail}`,
+  }
 }
 
 const DESCRIPTION = [
@@ -167,6 +185,7 @@ export function defineGetTool(deps: GetDeps) {
             },
           },
           missing: { type: 'array', required: true, items: { type: 'string' } },
+          try_instead: { type: 'string' },
           text: { type: 'string', required: true },
         },
       },

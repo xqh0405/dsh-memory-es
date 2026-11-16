@@ -232,6 +232,8 @@ window.__ModuleLoader__.load({
       injPinnedRuns: '常驻注入',
       injPinnedItems: '常驻条均',
       injPinnedDropped: '常驻被挤掉',
+      injPinnedBudget: '常驻占用 / 上限',
+      injPinnedFull: '已满',
       injPinnedOnly: '仅常驻',
       injColItems: '注入条数',
       injColChars: '字符',
@@ -365,6 +367,7 @@ window.__ModuleLoader__.load({
       reviewConflict: '冲突对象',
       reviewApprove: '批准',
       reviewReject: '驳回',
+      reviewMerge: '合并到冲突对象',
       reviewWithdraw: '撤回',
       reviewReason: '原因（驳回/撤回必填）',
       reviewConfirm: '确认',
@@ -600,6 +603,8 @@ window.__ModuleLoader__.load({
       injPinnedRuns: 'Pinned runs',
       injPinnedItems: 'Pinned avg',
       injPinnedDropped: 'Pinned dropped',
+      injPinnedBudget: 'Pinned budget',
+      injPinnedFull: 'full',
       injPinnedOnly: 'Pinned only',
       injColItems: 'items',
       injColChars: 'chars',
@@ -732,6 +737,7 @@ window.__ModuleLoader__.load({
       reviewConflict: 'Conflicting entry',
       reviewApprove: 'Approve',
       reviewReject: 'Reject',
+      reviewMerge: 'Merge into conflict',
       reviewWithdraw: 'Withdraw',
       reviewReason: 'Reason (required for reject/withdraw)',
       reviewConfirm: 'Confirm',
@@ -4286,6 +4292,8 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
               actionBtn(row, 'approve', t('reviewApprove')),
               actionBtn(row, 'reject', t('reviewReject')),
+              // 阶段 40：只有标了冲突的条目才给「合并」（并到 conflict_with 那条）
+              row.conflictWith ? actionBtn(row, 'merge', t('reviewMerge')) : null,
               actionBtn(row, 'withdraw', t('reviewWithdraw')),
             ),
 
@@ -4422,6 +4430,15 @@ window.__ModuleLoader__.load({
                 : null,
               stats.pinned && stats.pinned.droppedTotal > 0
                 ? metric(t('injPinnedDropped'), String(stats.pinned.droppedTotal))
+                : null,
+              // 阶段 37：常驻段的实时占用。满了要在写入侧被拒，这里让「为什么被拒」看得见。
+              data && data.pinnedBudget
+                ? metric(
+                    t('injPinnedBudget'),
+                    data.pinnedBudget.full
+                      ? `${data.pinnedBudget.used}/${data.pinnedBudget.max} ${t('injPinnedFull')}`
+                      : `${data.pinnedBudget.used}/${data.pinnedBudget.max}`,
+                  )
                 : null,
             )
           : null,

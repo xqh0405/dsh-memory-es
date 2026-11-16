@@ -153,6 +153,9 @@ export async function distillMemory(deps: DistillDeps, input: DistillInput): Pro
 
 const DESCRIPTION = [
   '把一条个人记忆改写成「信息更全、更好检索」的版本（后台蒸馏用，不要在对话里随手调）。',
+  '—— 该用我：后台蒸馏任务，或用户明确要求重写某条的摘要与关键词。',
+  '—— 别用我：对话里顺手改写（会打断回合，且改写不产生新的记忆）；要改事实本身请 memory_save 新条 + '
+  + 'memory_update_status(supersede)。',
   '改写要求：保留事实、条件、路径、数字、版本号、错误码；去掉口语、重复、无信息量的客套；',
   '并补 summary（一句话）、keywords（同义词/组件名/命令名）、可选 topic_key。',
   '只作用于自己的个人库；不会改 user_id/created_at/status/promote_state，也不会写团队库。',

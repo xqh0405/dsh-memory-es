@@ -80,6 +80,11 @@ export interface ConfigType {
     maxPerDomain: number
     /** 阶段 12：缺省详略（full / summary） */
     defaultDetail: string
+    /**
+     * 阶段 39：是否排除已失效条目（`valid_until < now`）。默认 true。
+     * 回滚开关：设为 false 等于回到「只看 status」的旧行为。
+     */
+    excludeExpired?: boolean
     /** 查询扩展表（schema 里一直有，interface 漏了；2026-11-06 预热要用到，补上） */
     synonyms?: Record<string, string>
     /** 本地网关重排（默认关；关时检索路径一行不动） */
@@ -378,6 +383,17 @@ export const Config: z<ConfigType> = z.object({
       .description('RRF 融合常数。'),
     limit: z.number().step(1).default(8)
       .description('返回给模型的最大条数。'),
+    excludeExpired: z.boolean().default(true)
+      .description('阶段 39：默认不返回已失效（被 supersede / expire）的条目。'
+        + '设为 false 回到「只看 status」的旧行为——字段仍然会写，只是检索不再据此过滤。'),
+    queryRewrite: z.object({
+      strip: z.boolean().default(false),
+      whole: z.boolean().default(false),
+      fuzzy: z.boolean().default(false),
+    }).default({})
+      .description('阶段 41 查询侧改写开关（默认全关）。2026-11-16 中文 gold-set 实测：'
+        + 'strip 无收益、whole 掉 2.7 点、fuzzy 掉 1.3 点，所以默认全关；'
+        + '留作以后有更大 gold-set 时的对照实验开关，不要凭「听起来合理」打开。'),
     abstainOnLowConfidence: z.boolean().default(false)
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})
@@ -672,9 +688,11 @@ export const Config: z<ConfigType> = z.object({
         + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
-    cacheTtlMs: z.number().step(1_000).min(0).default(30_000)
+    cacheTtlMs: z.number().step(1_000).min(0).default(600_000)
       .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
-        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'),
+        + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'
+        + '阶段 38 起默认 10 分钟（原来是 30 秒），并同时作为开关：设 0 = 关闭。'
+        + 'save 成功会清空该缓存，避免「刚记住却查不到」。'),
     minScore: z.number().min(0).max(1).default(0.76)
       .description('注入的绝对分数门槛：top1 的向量相似度低于它就不注入。'
         + '默认 0.76 —— 2026-11-05 实测（团队库 326 条）：闲聊 query 的 top1_knn 在 0.7227~0.7430，'

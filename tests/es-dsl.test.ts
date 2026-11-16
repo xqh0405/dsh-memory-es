@@ -13,7 +13,11 @@ const NOW = new Date('2026-10-25T12:00:00.000Z')
 describe('buildFilters / review_state（S9 审核闸）', () => {
   test('传数组 → terms；传 null/undefined → 不加条件', () => {
     const withFilter = buildFilters({ status: 'active', review_state: ['auto', 'approved'], now: NOW })
-    assert.deepEqual(withFilter.at(-3), { terms: { review_state: ['auto', 'approved'] } })
+    // 末尾多了阶段 39 的 valid_until 过滤，别再按「倒数第 N 条」定位
+    assert.ok(
+      withFilter.some((f) => JSON.stringify(f).includes('review_state')),
+      `review_state 条件不见了：${JSON.stringify(withFilter)}`,
+    )
     assert.deepEqual(buildFilters({ status: 'active', review_state: null, now: NOW }), [
       { term: { status: 'active' } },
       ...freshOnlyFilters(NOW),
@@ -73,6 +77,7 @@ describe('bm25Body', () => {
         must: [
           {
             multi_match: {
+              // 阶段 41 默认关：查询改写不生效时，BM25 仍用原句
               query: '比赛腰斩怎么结算',
               // summary 是蒸馏产出的一句话，必须参与 BM25（否则蒸馏白存）
               fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
@@ -129,7 +134,7 @@ describe('excludeMemoryTypes（阶段 7.1）', () => {
     const filters = buildFilters({ excludeMemoryTypes: ['identity'] })
     assert.deepEqual(filters[0], { term: { status: 'active' } })
     assert.ok(isExclude(filters[1]), '第二条就是排除条件')
-    assert.equal(filters.length, 4, 'status + 排除 + 两条时效过滤')
+    assert.equal(filters.length, 5, 'status + 排除 + 三条时效过滤（含阶段 39 的 valid_until）')
   })
 
   test('传字符串也接受；空串与空数组不生成条件', () => {
@@ -172,5 +177,31 @@ describe('阶段 13：as-of 过滤', () => {
       false,
       '指定了 asOfField 就不该再生成 created_at 过滤',
     )
+  })
+})
+
+describe('阶段 41：查询改写开关（默认全关）', () => {
+  test('strip 打开才去疑问词；默认保留原句', () => {
+    const off = bm25Body('比赛腰斩怎么结算', {}, 10)
+    assert.equal((off.query as { bool: { must: Array<{ multi_match: { query: string } }> } }).bool.must[0].multi_match.query, '比赛腰斩怎么结算')
+    const onQuery = bm25Body('比赛腰斩怎么结算', {}, 10, [], { strip: true })
+    assert.equal((onQuery.query as { bool: { must: Array<{ multi_match: { query: string } }> } }).bool.must[0].multi_match.query, '比赛腰斩 结算')
+  })
+
+  test('whole 打开才加英文整词的 match_phrase（默认不加）', () => {
+    const off = bm25Body('pipeline 的配置', {}, 10)
+    assert.equal('should' in (off.query as { bool: object }).bool, false)
+    const onQuery = bm25Body('pipeline 的配置', {}, 10, [], { whole: true })
+    const should = (onQuery.query as { bool: { should: Array<Record<string, unknown>> } }).bool.should
+    assert.ok(should.some((item) => JSON.stringify(item).includes('"content_exact"')))
+  })
+})
+
+describe('阶段 39：valid_until 失效过滤', () => {
+  test('默认排除已失效；excludeExpired=false 时不含这条过滤', () => {
+    const on = JSON.stringify(buildFilters({ now: NOW }))
+    assert.match(on, /valid_until/, '默认必须排除 valid_until 已过的条目')
+    const off = JSON.stringify(buildFilters({ now: NOW, excludeExpired: false }))
+    assert.doesNotMatch(off, /valid_until/, '关掉开关时回到只看 status 的旧行为')
   })
 })

@@ -11,7 +11,7 @@ import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
 import { EsError } from '../src/es/http.ts'
-import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, resolveInjectPath } from '../src/recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, pinnedSearchBody, resolveInjectPath } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
   return {
@@ -198,5 +198,23 @@ describe('阶段 22：被挤掉的条目也要记下来', () => {
     const { picked, dropped } = pickForInjectionDetailed([hit('a', '甲')], 3, 1000)
     assert.equal(picked.length, 1)
     assert.deepEqual(dropped, [])
+  })
+})
+
+describe('阶段 36：常驻段的取数条件（非 pinned 不得进常驻段）', () => {
+  test('只认 pinned=true AND status=active，排掉非事实三类', () => {
+    const body = pinnedSearchBody(64) as { query: { bool: { filter: unknown[]; must_not: unknown[] } }; sort: unknown[] }
+    const filters = JSON.stringify(body.query.bool.filter)
+    assert.match(filters, /"pinned":true/)
+    assert.match(filters, /"status":"active"/)
+    // 自述/人格/日记不能因为被 pin 了就每轮注入
+    assert.match(JSON.stringify(body.query.bool.must_not), /identity/)
+    // 没有排序时 size 截断选哪几条不确定，注入集合会抖
+    assert.ok(Array.isArray(body.sort) && body.sort.length > 0)
+  })
+
+  test('size 就是候选池大小，必须明显大于 PINNED_MAX_ITEMS', () => {
+    const body = pinnedSearchBody(64) as { size: number }
+    assert.equal(body.size, 64)
   })
 })

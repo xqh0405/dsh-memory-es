@@ -207,6 +207,22 @@ test('审核动作：驳回仍然要求填原因（先于权限返回 400）', a
   assert.match(JSON.parse(res.body).error, /原因/)
 })
 
+test('审核动作（阶段 40）：合并也要求填原因', async () => {
+  const res = fakeRes()
+  const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ confirm: true, reason: '' }))]), { method: 'POST' })
+  await handleReviewAction(ctxWith(ADMIN), res, 'doc-1', 'merge', req)
+  assert.equal(res.statusCode, 400)
+  assert.match(JSON.parse(res.body).error, /原因/)
+})
+
+test('审核动作（阶段 40）：合并缺 confirm 直接 400', async () => {
+  const res = fakeRes()
+  const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ reason: '并入目标条' }))]), { method: 'POST' })
+  await handleReviewAction(ctxWith(ADMIN), res, 'doc-1', 'merge', req)
+  assert.equal(res.statusCode, 400)
+  assert.match(JSON.parse(res.body).error, /confirm/)
+})
+
 // ── validateConfig：单账号与旧三账号两条路径 ──────────────────────────────
 // src/config.ts 是 TS：Node 22.18+ 可直接 strip 类型导入（这里只取纯函数 validateConfig）
 const { validateConfig } = await import('../src/config.ts').catch((error) => {

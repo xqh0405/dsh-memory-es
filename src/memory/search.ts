@@ -174,12 +174,28 @@ export interface SearchInput {
    * 近似语义：ES 没有版本历史，看到的是「那条目现在的内容」，不是当时的旧版本。
    */
   as_of?: string
+  /**
+   * 阶段 39：把已失效（`valid_until < now`）的条目也返回。默认 false。
+   *
+   * 只用于「这条到底什么时候失效的、为什么」这类排障/回看问题——
+   * 正常检索不该看到失效条目，否则「撤销」就形同虚设。
+   */
+  includeExpired?: boolean
 }
 
 export interface RetrievalConfig {
   topK: number
   rrfK: number
   limit: number
+  /** 阶段 39：是否排除已失效条目（默认 true；false = 回滚到只看 status） */
+  excludeExpired?: boolean
+  /**
+   * 阶段 41：查询侧改写开关（默认全关）。
+   *
+   * 实测（中文 gold-set 81 条）：三个子项一起开会让 R@5 从 93.2% 掉到 90.5%，
+   * 所以默认关；单项开关用于继续做对照实验，不要凭「听起来合理」就打开。
+   */
+  queryRewrite?: { strip?: boolean; whole?: boolean; fuzzy?: boolean }
   /** 阶段 12 结果多样化：同一 domain 最多几条（0 = 关闭，默认关） */
   maxPerDomain?: number
   /**
@@ -450,6 +466,7 @@ function parseAsOf(raw?: string): Date | undefined {
 function buildMeta(
   input: SearchInput,
   now: Date,
+  retrieval?: RetrievalConfig,
 ): { meta: MetaFilterOptions; filtered: boolean; asOf: Date | undefined } {
   // 阶段 7.1 / 9.3 / 9.5：identity / persona / journal 默认不进普通检索。
   // 它们分别是「我是谁」「我的人格」「某一天的回顾」，混在事实里只会挤占召回
@@ -457,8 +474,15 @@ function buildMeta(
   // 用户显式在 memory_type 里点了某几类时，只放行被点的那几类。
   const selectedTypes = Array.isArray(input.memory_type) ? input.memory_type : []
   const excludedTypes = NON_FACT_MEMORY_TYPES.filter((type) => !selectedTypes.includes(type))
+  // 阶段 39 的两个入口语义不同，别混：
+  //  · includeExpired=true —— **排障/回看**：状态放开到 active/superseded/expired，
+  //    并跳过 superseded_by / expires_at / valid_until 全部兜底过滤；
+  //  · retrieval.excludeExpired=false —— **全局回滚**：只关 valid_until 这一条，回到旧行为。
+  const includeInvalid = input.includeExpired === true
   const meta: MetaFilterOptions = {
-    status: 'active',
+    status: includeInvalid ? ['active', 'superseded', 'expired'] : 'active',
+    ...(includeInvalid ? { includeInvalid: true } : {}),
+    ...(!includeInvalid && retrieval?.excludeExpired === false ? { excludeExpired: false } : {}),
     memory_type: input.memory_type,
     excludeMemoryTypes: excludedTypes.length > 0 ? [...excludedTypes] : undefined,
     domain: input.domain,
@@ -497,7 +521,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     throw new Error(`memory_search: 未知 detail「${String(input.detail)}」（只支持 ${DETAIL_LEVELS.join(' / ')}）`)
   }
   const now = deps.now?.() ?? new Date()
-  const { meta, filtered, asOf } = buildMeta(input, now)
+  const { meta, filtered, asOf } = buildMeta(input, now, deps.retrieval)
 
   const personalIndex = `${deps.personalPrefix}${deps.userId}`
   // 团队库按 domain 分层：查某个域时只能看到「本域 + general（跨域通用）」，
@@ -552,7 +576,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       scope: target,
       route: 'bm25',
       index: indexName,
-      body: bm25Body(expandedQuery, targetMeta, topK, identifiers),
+      body: bm25Body(expandedQuery, targetMeta, topK, identifiers, deps.retrieval.queryRewrite),
     })
     if (vector) {
       queries.push({
@@ -915,6 +939,16 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     }
   }
 
+  // 阶段 38：降级必须让模型看见。此前只回结构化 `degraded=true`，正文一个字都不提，
+  // 模型会把「只走了关键词」当成完整检索结果，进而相信「没记过」。
+  // 两种降级原因分开说：向量不可用 ≠ 团队库 403（后者个人库照常跑了 kNN）。
+  const degradedHint =
+    teamUnavailable
+      ? '（团队库不可读，本次结果只含个人记忆）'
+      : degraded
+        ? '（向量服务不可用，本次仅关键词检索）'
+        : ''
+
   // 低置信不再丢弃结果：返回 + 标注，让模型自己判断。
   // 丢信息的代价更高——模型会以为「没记过」，转而凭印象编。
   if (verdict.low) {
@@ -937,7 +971,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       degraded,
       filtered,
       ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
-      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${explainText}`,
+      text: `${LOW_CONFIDENCE_HINT}\n${renderText(hits)}${degradedHint}${explainText}`,
     }
   }
   log({
@@ -957,7 +991,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
     degraded,
     filtered,
     ...(asOf === undefined ? {} : { as_of: asOf.toISOString() }),
-    text: `${renderText(hits)}${explainText}`,
+    text: `${renderText(hits)}${degradedHint}${explainText}`,
   }
 }
 
@@ -1049,6 +1083,12 @@ export function defineSearchTool(deps: SearchDeps) {
         description:
           '返回详略：full（默认，正文最多 500 字）/ summary（摘要 + 正文 120 字，省 token；要全文用 memory_get 展开）。',
       },
+      includeExpired: {
+        type: 'boolean',
+        description:
+          '阶段 39：true 时把已失效（被 supersede / expire 过）的条目也返回，并在正文里标注「已于某日失效，原因」。'
+          + '默认 false——正常检索看不到失效条目。只在回答「这条什么时候失效的、为什么」时用。',
+      },
     },
     output: {
       schema: {
@@ -1071,6 +1111,11 @@ export function defineSearchTool(deps: SearchDeps) {
                 score: { type: 'number', required: true },
                 summary: { type: 'string' },
                 has_more: { type: 'boolean' },
+                valid_until: { type: 'string' },
+                revoke_reason: { type: 'string' },
+                source_user: { type: 'string' },
+                trust_level: { type: 'string' },
+                untrusted: { type: 'boolean' },
               },
             },
           },

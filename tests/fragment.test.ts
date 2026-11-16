@@ -72,6 +72,19 @@ describe('rrfFuse', () => {
     assert.deepEqual(rrfFuse([], 60), [])
     assert.deepEqual(rrfFuse([[], []], 60), [])
   })
+
+  test('同分时按 id 升序，与插入顺序无关（阶段 36 复跑一致性）', () => {
+    // 两路交叉：z 先插入、a 后插入，但两者名次和完全相同 → 必须靠 id 决出顺序
+    const fused = rrfFuse(
+      [
+        [hit('z', 1), hit('a', 1)],
+        [hit('a', 1), hit('z', 1)],
+      ],
+      60,
+    )
+    assert.equal(fused[0].fusedScore, fused[1].fusedScore)
+    assert.deepEqual(fused.map((item) => item.id), ['a', 'z'])
+  })
 })
 
 describe('scoreMargin', () => {

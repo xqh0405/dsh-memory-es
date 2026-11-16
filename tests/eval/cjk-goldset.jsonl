@@ -1,0 +1,81 @@
+{"id":"cjk-c01","query":"dynamic-datasource 的 lazy 为什么改完配置没立刻生效","gold_ids":["ac862854-1a45-4d4e-b97a-ccdd9ae4cc61"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c02","query":"备用库的 update_time 和主源口径差在哪","gold_ids":["3c03bdba-f7a5-479a-8384-1e33754ce0cb"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c03","query":"Jenkins 共享库的 deployDocker 从哪读服务器配置","gold_ids":["a6515414-507b-4c84-ae98-a29548a355c6"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c04","query":"101 和 104 分别是什么环境","gold_ids":["07024c0d-4f4f-49f1-b400-5c705c1350de"],"tags":[],"source":"contract"}
+{"id":"cjk-c05","query":"IM 模块的 Redis 序列化器换成了什么","gold_ids":["10d1b799-7737-43f1-bd4f-4e6c841b179b"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c06","query":"长期归档空间允许放哪些内容","gold_ids":["22f25a77-9c2e-473a-99bd-a9259de47d7c"],"tags":[],"source":"contract"}
+{"id":"cjk-c07","query":"mnemon CLI 装在哪里、怎么装","gold_ids":["3d79089f-5832-4544-b7dd-49b730166fc1"],"tags":[],"source":"contract"}
+{"id":"cjk-c08","query":"传统足彩 zc_type 的 1、2、3 各代表什么","gold_ids":["b4457716-ac98-4325-a9e6-660e9592d434"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c09","query":"装 node 包一直连不上官方仓库怎么处理","gold_ids":["e3cd48e2-af7a-4b8c-88ab-4923885387a0"],"tags":[],"source":"contract"}
+{"id":"cjk-c10","query":"宝塔机器对外开放了哪些端口","gold_ids":["89a7f2c1-8bf6-4a6b-8685-29c48e6485a2"],"tags":[],"source":"contract"}
+{"id":"cjk-c11","query":"本机探测能通，能说明对方没做来源限制吗","gold_ids":["e8c08836-40f2-4d92-9bd4-0a7317853071"],"tags":[],"source":"contract"}
+{"id":"cjk-c12","query":"jbp 机群上到底有几套对象存储","gold_ids":["7ecd5cd5-5876-488e-8c40-536f756559b7"],"tags":[],"source":"contract"}
+{"id":"cjk-c13","query":"批量查很多台机器返回空列表，能直接当结论吗","gold_ids":["2195e044-b91e-450f-85c5-1a23c5c85027"],"tags":[],"source":"contract"}
+{"id":"cjk-c14","query":"视频直播的签名能自己生成吗","gold_ids":["bc773b79-68c1-44f4-b895-c0c3dabe4389"],"tags":[],"source":"contract"}
+{"id":"cjk-c15","query":"pip 装依赖超时该换什么源","gold_ids":["8749a43b-5518-4215-bd3a-635c53d0c3ce"],"tags":[],"source":"contract"}
+{"id":"cjk-c16","query":"本地备份服务的端口和容器名是什么","gold_ids":["4b3e3457-3b1a-419a-b2e0-8017ad64d33e"],"tags":[],"source":"contract"}
+{"id":"cjk-c17","query":"103 的 8443 被谁占用了","gold_ids":["04105149-ba53-45e4-9286-04e67717d671"],"tags":[],"source":"contract"}
+{"id":"cjk-c18","query":"fastjson 1.2.83 迁移涉及多少文件","gold_ids":["3a5bce4f-2049-4193-b094-d7ca8b02b3ba"],"tags":[],"source":"contract"}
+{"id":"cjk-c19","query":"lottery-framework 的 main 分支为什么缺 lottery-common","gold_ids":["c5b673d1-0bf5-4cb8-960e-85337e818765"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c20","query":"lot.bd_write_sync 已经做到哪一步","gold_ids":["9cd40b1a-72e3-4f5f-a1a0-5129760ae38e"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c21","query":"用 exec 前缀语句验证脚本有什么风险","gold_ids":["41ac2101-904c-4b0b-b38e-6b7bb48037e4"],"tags":[],"source":"contract"}
+{"id":"cjk-c22","query":"dsh-mcp-panel 改完之后 token 为什么丢了","gold_ids":["0975af03-8bba-4e37-8ea8-e74e8b9df9f5"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-c23","query":"侧边栏怎么切换 Git 分支","gold_ids":["8067de1b-0dca-4d4d-ab01-3cd1861d7a59"],"tags":[],"source":"contract"}
+{"id":"cjk-c24","query":"workspace-write 下跑 mvn 报 AccessDeniedException 怎么办","gold_ids":["519d16fc-413e-4655-86de-7a6123b3aec3"],"tags":["专名"],"source":"contract"}
+{"id":"cjk-n25","query":"ZooKeeper 集群选举的超时参数怎么调","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n26","query":"Kafka 消费组频繁 rebalance 怎么排查","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n27","query":"PostgreSQL 的 autovacuum 阈值怎么计算","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n28","query":"Ceph 的 OSD 失去权重怎么恢复","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n29","query":"RabbitMQ 死信队列怎么配置 TTL","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n30","query":"Kubernetes Ingress 的 TLS 证书怎么自动续期","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-n31","query":"量子纠缠与烤面包机的耦合系数","gold_ids":[],"tags":["弃答"],"source":"contract"}
+{"id":"cjk-c32","query":"老测试环境已经停用，核对账目时还要不要把它算进来","gold_ids":["07024c0d-4f4f-49f1-b400-5c705c1350de"],"tags":[],"source":"contract"}
+{"id":"cjk-c33","query":"数据源延迟加载为什么改完配置没有马上起作用","gold_ids":["ac862854-1a45-4d4e-b97a-ccdd9ae4cc61"],"tags":[],"source":"contract"}
+{"id":"cjk-c34","query":"两套库的更新时间字段默认规则为什么不一样","gold_ids":["3c03bdba-f7a5-479a-8384-1e33754ce0cb"],"tags":[],"source":"contract"}
+{"id":"cjk-c35","query":"后台启动的模型服务过一会儿进程就没了","gold_ids":["1791883f-f975-4fee-9572-767c2e105865"],"tags":[],"source":"contract"}
+{"id":"cjk-c36","query":"某台机器被装了挖矿程序，藏在哪个路径","gold_ids":["cfc659f3-068c-4c76-89a1-a1d3bd913e18"],"tags":[],"source":"contract"}
+{"id":"cjk-c37","query":"哪些告警归我发、哪些不要重复通知","gold_ids":["a5e8b5a9-aceb-436f-8008-2952339d001c"],"tags":[],"source":"contract"}
+{"id":"cjk-c38","query":"面板防火墙服务缺少 pid 文件导致重启出问题","gold_ids":["a481f0e3-ca94-4c5b-b5fd-165bef9d6588"],"tags":[],"source":"contract"}
+{"id":"cjk-c39","query":"流水线里构建镜像的那个方法是从哪来的","gold_ids":["a6515414-507b-4c84-ae98-a29548a355c6"],"tags":[],"source":"contract"}
+{"id": "cjk-m01", "query": "llama-swap 的 apiKeys 从 config.yaml 怎么提取", "gold_ids": ["1f38f9a1-83b1-451a-ad57-6680618f79b4"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m02", "query": "qwen3next-80b 加载一次要多久", "gold_ids": ["db9178e6-55c0-417d-bd15-5be47e579279"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m03", "query": "llama-swap 的接口地址和鉴权怎么配", "gold_ids": ["af59b109-fc0f-46d5-a284-fdd58fa8a17e"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m04", "query": "容器里怎么重启 dsh 进程", "gold_ids": ["c7a2c87c-2679-4e4d-8d99-eca84bdccf49"], "tags": [], "source": "manual"}
+{"id": "cjk-m05", "query": "selfcheck 7/7 通过时记忆库多少条", "gold_ids": ["e43940c0-68be-4560-a4a0-14f0372b0c12"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m06", "query": "2026-11-15 那次自检结果怎么样", "gold_ids": ["e43940c0-68be-4560-a4a0-14f0372b0c12"], "tags": ["时间"], "source": "manual"}
+{"id": "cjk-m07", "query": "embedding 服务端口改到哪了", "gold_ids": ["3cdbbe61-5631-4390-a858-8e2a572eb7c4"], "tags": [], "source": "manual"}
+{"id": "cjk-m08", "query": "上周把 embedding 端口改到哪了", "gold_ids": ["3cdbbe61-5631-4390-a858-8e2a572eb7c4"], "tags": ["时间"], "source": "manual"}
+{"id": "cjk-m09", "query": "/home/xqh/.dsh 为什么指向 /data/dsh", "gold_ids": ["3bbc2c34-ee90-4042-b2bc-f0f2ce468fd2"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m10", "query": "共享目录里有哪些 JDK 版本", "gold_ids": ["ec88d055-5b78-420b-82e4-394dd28c286e"], "tags": ["缩写"], "source": "manual"}
+{"id": "cjk-m11", "query": "容器里能不能 systemctl restart", "gold_ids": ["fb234833-f459-4c54-becb-a4fb634bad33"], "tags": [], "source": "manual"}
+{"id": "cjk-m12", "query": "127 和 125 上的 dsh-xqh 是同一个实例吗", "gold_ids": ["6ede22a2-efbf-4997-a43d-15e0050bab70"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m13", "query": "心情状态被覆盖的竞态怎么修", "gold_ids": ["43cd7eb9-365c-4894-b96f-caa49d02e9b8"], "tags": [], "source": "manual"}
+{"id": "cjk-m14", "query": "公开仓库提交前要脱敏吗", "gold_ids": ["rt-97780d9351e571d3297095884cfd59f7"], "tags": [], "source": "manual"}
+{"id": "cjk-m15", "query": "seps 目录里有多少 Final 的 SEP", "gold_ids": ["b750f689-14d7-4dd6-9465-35bc6edd7dc5"], "tags": ["缩写"], "source": "manual"}
+{"id": "cjk-m16", "query": "哪个版本开始支持人格预设切换", "gold_ids": ["bdf2b9ed-1024-46c3-b844-dd76cef55294"], "tags": [], "source": "manual"}
+{"id": "cjk-m17", "query": "125 上 3000 端口访问超时", "gold_ids": ["23d6caea-b19b-45c3-a8db-0e8a064a60fc"], "tags": [], "source": "manual"}
+{"id": "cjk-m18", "query": "py-huoxin-data-deploy 的分支参数有哪些", "gold_ids": ["f96c2084-8be1-4667-980a-97290a826cde"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m19", "query": "ES _update 的 refresh 参数放 body 里报什么错", "gold_ids": ["a7661487-15a1-453e-9126-4ee3f5ed2fc0"], "tags": ["缩写"], "source": "manual"}
+{"id": "cjk-m20", "query": "哪些记忆类型不进普通检索", "gold_ids": ["5ac35353-50fe-4dc1-97b9-8ae1243fba1a"], "tags": [], "source": "manual"}
+{"id": "cjk-m21", "query": "Open WebUI 的容器名和镜像", "gold_ids": ["112c0ad0-8628-4c83-a523-5332e7153fdd"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m22", "query": "127 上 mihomo 是什么版本", "gold_ids": ["rt-b7627aec889aaac097306904430d1713"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m23", "query": "0.6.63 什么时候重启生效的", "gold_ids": ["dec8a1b9-f39e-4ba7-b89f-37c4a0b3e5fa"], "tags": [], "source": "manual"}
+{"id": "cjk-m24", "query": "rerank 客户端写在哪个文件", "gold_ids": ["5847fd77-1373-4cda-a3bd-bb039a76191c"], "tags": [], "source": "manual"}
+{"id": "cjk-m25", "query": "llama-swap 上有哪些 Qwen3 模型", "gold_ids": ["rt-826f7c36d6261b5f3171de516da8230d"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m26", "query": "人格 seed 配置在哪生效", "gold_ids": ["rt-844cc016c678f0fcc2d380b6a17505ea"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m27", "query": "Netmaker 外网客户端创建前要先做什么", "gold_ids": ["83fce468-3593-494f-8a76-a4b23db562ee"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m28", "query": "内网 VPN 的网段和 MTU 是多少", "gold_ids": ["c1c9c952-e647-44a8-9111-ca728d899d5f"], "tags": ["缩写"], "source": "manual"}
+{"id": "cjk-m29", "query": "scheme_details 单式和复式结构差在哪", "gold_ids": ["9107e691-1b47-498d-b435-b04cd3662d4e"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m30", "query": "t_lottery_order.times 是投注倍数吗", "gold_ids": ["f8e4670a-e6a4-4917-9dbc-6a1c14488430"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m31", "query": "双色球派奖期六等奖奖金翻倍没实现", "gold_ids": ["c4ba617d-1c2f-4f3d-b571-1e5933f05385"], "tags": [], "source": "manual"}
+{"id": "cjk-m32", "query": "共用仓库能不能 git add -A", "gold_ids": ["40e7b0de-c107-4c5e-b711-d4d347fd8761"], "tags": [], "source": "manual"}
+{"id": "cjk-m33", "query": "后台脚本 setsid 能脱离 cgroup 吗", "gold_ids": ["a5be445a-1c24-41a8-9bdf-4763d0c55ec6"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m34", "query": "排程提醒延迟触发", "gold_ids": ["f19c4107-df1c-482e-91c3-0459040ed5db"], "tags": [], "source": "manual"}
+{"id": "cjk-m35", "query": "/host 下有哪些只读挂载点", "gold_ids": ["435f8d8a-323e-4be6-a68f-d77b54876f5a"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m36", "query": "docker.sock 怎么挂进容器", "gold_ids": ["bbfc10a8-5269-406f-8164-84800727ae57"], "tags": ["专名"], "source": "manual"}
+{"id": "cjk-m37", "query": "11 月 15 日晚上重启的是哪个版本", "gold_ids": ["dec8a1b9-f39e-4ba7-b89f-37c4a0b3e5fa"], "tags": ["时间"], "source": "manual"}
+{"id": "cjk-m38", "query": "最近一次 embedding 端口变更是什么时候", "gold_ids": ["3cdbbe61-5631-4390-a858-8e2a572eb7c4"], "tags": ["时间"], "source": "manual"}
+{"id": "cjk-m39", "query": "2026-11-15 做了哪些自检和部署", "gold_ids": ["e43940c0-68be-4560-a4a0-14f0372b0c12"], "tags": ["时间"], "source": "manual"}
+{"id": "cjk-m40", "query": "上周四的 MCP 记忆调研提到多少 SEP", "gold_ids": ["b750f689-14d7-4dd6-9465-35bc6edd7dc5"], "tags": ["时间", "缩写"], "source": "manual"}
+{"id": "cjk-m41", "query": "DSH 的 schedule 为什么会延迟", "gold_ids": ["f19c4107-df1c-482e-91c3-0459040ed5db"], "tags": ["缩写"], "source": "manual"}
+{"id": "cjk-m42", "query": "MCP 调研里 Final 状态的 SEP 有多少", "gold_ids": ["b750f689-14d7-4dd6-9465-35bc6edd7dc5"], "tags": ["缩写"], "source": "manual"}

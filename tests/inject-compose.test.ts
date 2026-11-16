@@ -208,3 +208,39 @@ describe('pinned 取数口径', () => {
     assert.equal(rows[0]?.summary, '一句话摘要')
   })
 })
+
+describe('阶段 37：常驻规则被挤掉时模型要能看见', () => {
+  test('pinned 段被预算挤掉 → 文本末尾提示条数', () => {
+    const pinned = [
+      hit('p1', '规'.repeat(PINNED_ITEM_MAX_CHARS)),
+      hit('p2', '规'.repeat(PINNED_ITEM_MAX_CHARS)),
+    ]
+    const composed = composeInjection({
+      pinned,
+      hits: [],
+      pinnedEnabled: true,
+      pinnedMaxChars: PINNED_ITEM_MAX_CHARS + 10,
+      maxItems: 3,
+      maxChars: 600,
+    })
+    assert.ok(composed.dropped.some((d) => d.segment === 'pinned'), '第二条应被挤掉')
+    assert.match(composed.text, /另有 1 条常驻规则因预算未注入/)
+  })
+
+  test('没有挤掉时文本里不出现这句（不制造噪声）', () => {
+    const composed = composeInjection({
+      pinned: [hit('p1', '短规则')],
+      hits: [],
+      pinnedEnabled: true,
+      pinnedMaxChars: 800,
+      maxItems: 3,
+      maxChars: 600,
+    })
+    assert.doesNotMatch(composed.text, /因预算未注入/)
+  })
+
+  test('不传 options 时 formatInjection 输出与旧版逐字符一致', () => {
+    const items = [{ memory_id: 'a', text: '甲', chars: 1, source: 'personal' as const }]
+    assert.equal(formatInjection(items), formatInjection(items, [], {}))
+  })
+})

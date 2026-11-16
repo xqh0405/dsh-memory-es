@@ -477,6 +477,8 @@ export function definePersonaTool(deps: PersonaDeps & {
     name: 'memory_persona',
     description: [
       '从最近的**会话记录**里归纳「我自己的行为倾向」候选（memory_type=persona），**只写候选不生效**。',
+      '—— 该用我：想让我的行为习惯随相处慢慢校准；夜间提炼。',
+      '—— 别用我：归纳**用户**的习惯（那是 memory_traits）；单条事实的存取（memory_save / memory_search）。',
       '与 memory_traits 的区别：那个归纳的是**用户**（identity），这个归纳的是**我**（persona）。',
       '默认 dry_run=true，先看产出再决定是否落库；落库的条目 status=pending，approve 之后才进提示段。',
       '素材只读本机会话目录，不碰其他机器。',

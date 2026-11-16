@@ -121,6 +121,9 @@ es_quiet -X PUT "$ES/_index_template/personal_memory_template" -d @- <<'JSON'
         "quarantine_reason": { "type": "keyword", "ignore_above": 256 },
         "supersedes":        { "type": "keyword" },
         "superseded_by":     { "type": "keyword" },
+        "valid_until":       { "type": "date" },
+        "revoked_by":        { "type": "keyword" },
+        "revoke_reason":     { "type": "text" },
         "forget_reason":     { "type": "keyword", "ignore_above": 256 },
         "content_sha256":    { "type": "keyword" },
 
@@ -196,6 +199,13 @@ put_index team_knowledge <<'JSON'
       "conflict_with":     { "type": "keyword" },
       "supersedes":        { "type": "keyword" },
       "superseded_by":     { "type": "keyword" },
+      "valid_until":       { "type": "date" },
+      "revoked_by":        { "type": "keyword" },
+      "revoke_reason":     { "type": "text" },
+      "trust_level":       { "type": "keyword" },
+      "untrusted":         { "type": "boolean" },
+      "merged_into":       { "type": "keyword" },
+      "merge_reason":      { "type": "keyword", "ignore_above": 256 },
       "updated_at":        { "type": "date" }
     }
   }

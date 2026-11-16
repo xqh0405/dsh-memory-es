@@ -387,7 +387,10 @@ export function defineJournalTool(deps: {
   return defineTool({
     name: 'memory_journal',
     description:
-      '把某一天的对话压成一段回顾，写进记忆库（memory_type=journal），并在面板「人格 → 日记」的「每日回顾」栏显示。默认补跑昨天。已存在的同一天会覆盖，不会重复。',
+      '把某一天的对话压成一段回顾，写进记忆库（memory_type=journal），并在面板「人格 → 日记」的「每日回顾」栏显示。'
+      + '默认补跑昨天。已存在的同一天会覆盖，不会重复。'
+      + '—— 该用我：手动补跑某天的回顾，或用户问「上次那天我们聊了什么」。'
+      + '—— 别用我：查某个具体事实（用 memory_search）；写一条新事实（用 memory_save）。',
     parameters: {
       date: {
         type: 'string',

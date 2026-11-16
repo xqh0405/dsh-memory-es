@@ -114,6 +114,10 @@ describe('updateStatus', () => {
       assert.deepEqual(h.state.updates[0].patch, {
         status: 'superseded',
         superseded_by: 'fresh',
+        // 阶段 39：失效语义三字段（撤销而不是覆盖）
+        valid_until: NOW.toISOString(),
+        revoked_by: 'fresh',
+        revoke_reason: '口径更新',
         // 阶段 13：失效原因留痕
         forget_reason: '口径更新',
         updated_at: NOW.toISOString(),
@@ -173,6 +177,9 @@ describe('updateStatus', () => {
       assert.equal(result.superseded_by, '')
       assert.deepEqual(h.state.updates[0].patch, {
         status: 'expired',
+        // 阶段 39：过期要留「从何时起失效」与原因
+        valid_until: NOW.toISOString(),
+        revoke_reason: '过时了',
         forget_reason: '过时了',
         updated_at: NOW.toISOString(),
       })
@@ -205,6 +212,10 @@ describe('updateStatus', () => {
         quarantine_reason: null,
         // 阶段 13：恢复时一并清失效原因
         forget_reason: null,
+        // 阶段 39：不清这三格的话，恢复后仍会被 valid_until 挡在检索外
+        valid_until: null,
+        revoked_by: null,
+        revoke_reason: null,
         updated_at: NOW.toISOString(),
       })
     } finally {

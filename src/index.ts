@@ -39,6 +39,8 @@ import { createLocalChat } from './local-chat.ts'
 import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
+import { normalizeContent } from './fragment.ts'
+import { createInjectResultCache } from './inject-cache.ts'
 import type { Projected } from './fragment.ts'
 import { defineTraitsTool, runTraitsJob, TRAITS_SYSTEM } from './memory/traits.ts'
 import { defineReviewTool } from './memory/review.ts'
@@ -173,6 +175,14 @@ export function apply(ctx: Context, config: ConfigType): void {
     defaultDetail: (config.retrieval.defaultDetail === 'summary' ? 'summary' : 'full') as 'summary' | 'full',
   }
 
+  /**
+   * 阶段 38：注入结果缓存的清空钩子。
+   *
+   * 声明在工具注册之前、由注入 effect 赋值：save 之后必须让「同一 query」立刻能查到
+   * 新内容，否则 10 分钟 TTL 会变成「刚记住却查不到」。
+   */
+  let clearInjectResultCache: () => void = () => {}
+
   // 阶段 9：本会话最近命中的短期缓存（进程内、有 TTL）。
   // search 写、save 读——「检索原文再摄取」的判据只能靠它（全库相似是值钱的同义改写）。
   const recallCache = createRecallCache({
@@ -212,9 +222,13 @@ export function apply(ctx: Context, config: ConfigType): void {
             dims: config.embedding.dims,
           },
           recentRecalls: () => recallCache.recent(userId),
+          // 阶段 37：常驻段写入侧硬预算，与注入侧同一口径（见 save.ts 的 pinnedBudgetUsed）
+          pinnedBudget: { maxChars: config.recallInject.pinnedMaxChars },
           log: (event) => logger.info('save %o', event),
           // 入库后立刻返回，蒸馏在后台跑；失败只记日志，条目留在 distill_state=pending
           onSaved: ({ memoryId, content, domain, route }) => {
+            // 阶段 38：新条目必须能被下一次同 query 检索看到，先清注入缓存
+            clearInjectResultCache()
             if (!distillEnabled) return
             void runDistillJob(
               {
@@ -996,8 +1010,21 @@ export function apply(ctx: Context, config: ConfigType): void {
       // 最近一条用户消息，按 agent 存：assemble 时拿它当 query。
       // 子代理没有 inbox 消息 → 查不到 → 不注入（避免把父会话的记忆带进子任务）。
       const lastMessage = new Map<string, string>()
-      // 同一 query 的结果复用：一个 turn 有多个 step，每步都会重新组装 prompt
-      const resultCache = new Map<string, { at: number; text: string }>()
+      /**
+       * 阶段 38：同一 query 的注入结果复用（会话级）。
+       *
+       * 为什么需要：一个 turn 有多个 step，每步都重新组装 prompt；实测单条 query
+       * 一轮最多 28 次 assemble。此前只在 assemble 层缓存了 text，且 key 用原始 query、
+       * 没有上限、命中时不落盘——面板看不出「这轮是复用还是真检索」。
+       *
+       * 三条口径：
+       *  · key 用 `normalizeContent`：同一句话的全半角/空白差异不该各算一次；
+       *  · `cacheTtlMs` 同时是开关（设 0 = 关闭），TTL 默认 10 分钟；
+       *  · save 成功后清空（见 apply 里的 clearInjectResultCache）——否则会「刚记住却查不到」。
+       */
+      type InjectRecordShape = Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms' | 'embedCached'>
+      const injectResultCache = createInjectResultCache<InjectRecordShape>({ ttlMs: inject.cacheTtlMs })
+      clearInjectResultCache = () => injectResultCache.clear()
       // 落盘通道：插件 logger 不进 docker logs，这是唯一能在命令行验收的入口
       const injectLogPath = resolveInjectPath(inject.logPath)
       const injectWriter = createShadowWriter<InjectRecord>(injectLogPath)
@@ -1067,6 +1094,9 @@ export function apply(ctx: Context, config: ConfigType): void {
 
       const recall = async (query: string, agentId: string): Promise<string> => {
         const startedAt = Date.now()
+        const cacheKey = normalizeContent(query)
+        // get 内部会刷 LRU 并丢弃过期项；ttlMs<=0 时直接返回 undefined（缓存关闭）
+        const cachedResult = injectResultCache.get(cacheKey)
         // 预热命中与否：只看缓存里有没有这条向量（与 search 内部用的是同一个 key）。
         // 注意这要在 writeRecord 之前算——它记录的是「这次 assemble 有没有等 Ollama」。
         const embedCached = embedCache.get(prewarmKey(query)) !== undefined
@@ -1082,6 +1112,13 @@ export function apply(ctx: Context, config: ConfigType): void {
             ...record,
           })
         }
+        // 命中缓存：连 pinned 段一起复用（10 分钟内 pinned 变更不生效，是这条缓存的已知取舍）。
+        // 复用也要落一条记录——否则面板的「注入尝试」会莫名变少，也看不出是缓存。
+        if (cachedResult !== undefined) {
+          writeRecord({ ...cachedResult.record, cache_hit: true, note: '同一 query 命中注入缓存，复用上轮结果' })
+          return cachedResult.text
+        }
+
         // pinned 段先取：它不依赖检索结果，检索超时/低分时它仍然要进
         const pinnedHits = await fetchPinned()
 
@@ -1171,7 +1208,7 @@ export function apply(ctx: Context, config: ConfigType): void {
             // 整段是否注入改由 pinnedInjected 表达。
             const outcome = result.note !== 'ok' ? result.note : 'low_score'
             const only = compose([])
-            writeRecord({
+            const failureRecord: InjectRecordShape = {
               outcome,
               hits: result.hits.length,
               items: only.items,
@@ -1181,11 +1218,14 @@ export function apply(ctx: Context, config: ConfigType): void {
               ...(only.dropped.length === 0 ? {} : { dropped: only.dropped }),
               ...(only.pinnedItems.length > 0 && only.items.length === 0 ? { pinnedOnly: true } : {}),
               ...(top1Score === undefined ? {} : { top1Score }),
-            })
+            }
+            writeRecord(failureRecord)
+            // 低分/低置信也缓存：同一 query 在同一 TTL 内结果不会变，重算只是白花一次检索
+            injectResultCache.set(cacheKey, only.text, failureRecord)
             return only.text
           }
           const composed = compose(result.hits)
-          writeRecord({
+          const successRecord: InjectRecordShape = {
             // 只看**检索段**：composed.text 含 pinned 段，拿它判 no_match 会把
             // 「检索没命中但常驻注入了」记成 injected（同属 outcome 被折叠的问题）。
             outcome: composed.items.length === 0 ? 'no_match' : 'injected',
@@ -1197,7 +1237,9 @@ export function apply(ctx: Context, config: ConfigType): void {
             ...(composed.dropped.length === 0 ? {} : { dropped: composed.dropped }),
             ...(composed.pinnedItems.length > 0 && composed.items.length === 0 ? { pinnedOnly: true } : {}),
             ...(top1Score === undefined ? {} : { top1Score }),
-          })
+          }
+          writeRecord(successRecord)
+          injectResultCache.set(cacheKey, composed.text, successRecord)
           if (composed.text !== '') {
             logger.info(
               '注入 %d 条记忆（其中常驻 %d 条，%d ms，%d 字符）',
@@ -1246,14 +1288,8 @@ export function apply(ctx: Context, config: ConfigType): void {
           const query = lastMessage.get(agentId)
           if (query === undefined) return assembly
 
-          const cached = resultCache.get(query)
-          let text: string
-          if (cached !== undefined && Date.now() - cached.at < inject.cacheTtlMs) {
-            text = cached.text
-          } else {
-            text = await recall(query, agentId)
-            resultCache.set(query, { at: Date.now(), text })
-          }
+          // 阶段 38：缓存下沉到 recall 内部（带命中日志与 LRU 上限），这里不再判断
+          const text = await recall(query, agentId)
           if (text === '') return assembly
 
           return {

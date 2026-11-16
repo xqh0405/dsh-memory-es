@@ -106,6 +106,8 @@ export interface Candidate {
   created_at: string
   privacy: string
   promote_state: string
+  /** 阶段 40：个人条目的来源（user/agent/tool/import/ingest），用于算团队条目的可信度 */
+  origin?: string
 }
 
 export function toCandidate(source: Record<string, unknown>, fallbackId: string): Candidate {
@@ -117,5 +119,6 @@ export function toCandidate(source: Record<string, unknown>, fallbackId: string)
     created_at: typeof source.created_at === 'string' ? source.created_at : '',
     privacy: typeof source.privacy === 'string' ? source.privacy : 'normal',
     promote_state: typeof source.promote_state === 'string' ? source.promote_state : 'none',
+    ...(typeof source.origin === 'string' && source.origin !== '' ? { origin: source.origin } : {}),
   }
 }
