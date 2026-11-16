@@ -75,6 +75,8 @@
     "eval:thresholds": "node scripts/eval-thresholds.ts",
     "eval:contracts": "node scripts/eval-contracts.ts",
     "eval:contracts:gate": "node scripts/eval-contracts.ts --gate",
+    "eval:cjk": "node scripts/eval-cjk-goldset.ts",
+    "eval:write-cost": "node scripts/measure-write-cost.ts",
     "check:contracts": "node scripts/check-contracts.ts",
     "tune": "node scripts/tune.ts"
   },

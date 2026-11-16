@@ -1,0 +1,65 @@
+{
+  "gold": "/home/xqh/dsh-memory-es/tests/eval/cjk-goldset.jsonl",
+  "results": [
+    {
+      "mode": "bm25-only",
+      "total": 81,
+      "r5": 69,
+      "mrr": 41.366666666666674,
+      "falsePositive": 7,
+      "answerable": 74,
+      "verbatim": 69,
+      "verbatimTotal": 69,
+      "baseSent": 69,
+      "resolvable": 69,
+      "byTag": {
+        "专名": {
+          "total": 26,
+          "r5": 26
+        },
+        "缩写": {
+          "total": 7,
+          "r5": 7
+        },
+        "时间": {
+          "total": 6,
+          "r5": 6
+        },
+        "弃答": {
+          "total": 0,
+          "r5": 0
+        }
+      }
+    },
+    {
+      "mode": "hybrid",
+      "total": 81,
+      "r5": 70,
+      "mrr": 53.33333333333333,
+      "falsePositive": 7,
+      "answerable": 74,
+      "verbatim": 70,
+      "verbatimTotal": 70,
+      "baseSent": 70,
+      "resolvable": 70,
+      "byTag": {
+        "专名": {
+          "total": 26,
+          "r5": 25
+        },
+        "缩写": {
+          "total": 7,
+          "r5": 7
+        },
+        "时间": {
+          "total": 6,
+          "r5": 6
+        },
+        "弃答": {
+          "total": 0,
+          "r5": 0
+        }
+      }
+    }
+  ]
+}
