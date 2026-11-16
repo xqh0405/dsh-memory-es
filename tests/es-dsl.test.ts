@@ -77,6 +77,7 @@ describe('bm25Body', () => {
         must: [
           {
             multi_match: {
+              // 阶段 41 默认关：查询改写不生效时，BM25 仍用原句
               query: '比赛腰斩怎么结算',
               // summary 是蒸馏产出的一句话，必须参与 BM25（否则蒸馏白存）
               fields: ['content^2', 'summary^1.5', 'semantic_keywords^1.5'],
@@ -176,6 +177,23 @@ describe('阶段 13：as-of 过滤', () => {
       false,
       '指定了 asOfField 就不该再生成 created_at 过滤',
     )
+  })
+})
+
+describe('阶段 41：查询改写开关（默认全关）', () => {
+  test('strip 打开才去疑问词；默认保留原句', () => {
+    const off = bm25Body('比赛腰斩怎么结算', {}, 10)
+    assert.equal((off.query as { bool: { must: Array<{ multi_match: { query: string } }> } }).bool.must[0].multi_match.query, '比赛腰斩怎么结算')
+    const onQuery = bm25Body('比赛腰斩怎么结算', {}, 10, [], { strip: true })
+    assert.equal((onQuery.query as { bool: { must: Array<{ multi_match: { query: string } }> } }).bool.must[0].multi_match.query, '比赛腰斩 结算')
+  })
+
+  test('whole 打开才加英文整词的 match_phrase（默认不加）', () => {
+    const off = bm25Body('pipeline 的配置', {}, 10)
+    assert.equal('should' in (off.query as { bool: object }).bool, false)
+    const onQuery = bm25Body('pipeline 的配置', {}, 10, [], { whole: true })
+    const should = (onQuery.query as { bool: { should: Array<Record<string, unknown>> } }).bool.should
+    assert.ok(should.some((item) => JSON.stringify(item).includes('"content_exact"')))
   })
 })
 

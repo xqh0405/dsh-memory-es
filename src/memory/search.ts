@@ -189,6 +189,13 @@ export interface RetrievalConfig {
   limit: number
   /** 阶段 39：是否排除已失效条目（默认 true；false = 回滚到只看 status） */
   excludeExpired?: boolean
+  /**
+   * 阶段 41：查询侧改写开关（默认全关）。
+   *
+   * 实测（中文 gold-set 81 条）：三个子项一起开会让 R@5 从 93.2% 掉到 90.5%，
+   * 所以默认关；单项开关用于继续做对照实验，不要凭「听起来合理」就打开。
+   */
+  queryRewrite?: { strip?: boolean; whole?: boolean; fuzzy?: boolean }
   /** 阶段 12 结果多样化：同一 domain 最多几条（0 = 关闭，默认关） */
   maxPerDomain?: number
   /**
@@ -569,7 +576,7 @@ export async function searchMemories(deps: SearchDeps, input: SearchInput): Prom
       scope: target,
       route: 'bm25',
       index: indexName,
-      body: bm25Body(expandedQuery, targetMeta, topK, identifiers),
+      body: bm25Body(expandedQuery, targetMeta, topK, identifiers, deps.retrieval.queryRewrite),
     })
     if (vector) {
       queries.push({

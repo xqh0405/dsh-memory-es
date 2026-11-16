@@ -386,6 +386,14 @@ export const Config: z<ConfigType> = z.object({
     excludeExpired: z.boolean().default(true)
       .description('阶段 39：默认不返回已失效（被 supersede / expire）的条目。'
         + '设为 false 回到「只看 status」的旧行为——字段仍然会写，只是检索不再据此过滤。'),
+    queryRewrite: z.object({
+      strip: z.boolean().default(false),
+      whole: z.boolean().default(false),
+      fuzzy: z.boolean().default(false),
+    }).default({})
+      .description('阶段 41 查询侧改写开关（默认全关）。2026-11-16 中文 gold-set 实测：'
+        + 'strip 无收益、whole 掉 2.7 点、fuzzy 掉 1.3 点，所以默认全关；'
+        + '留作以后有更大 gold-set 时的对照实验开关，不要凭「听起来合理」打开。'),
     abstainOnLowConfidence: z.boolean().default(false)
       .description('召回质量：候选区分度不足时拒答（返回空），而不是「照给几条 + 一句提示」。默认关；2026-11-02 A/B 实测开它后 43 条契约 should 失败 10 → 3，零误伤。'),
     synonyms: z.dict(z.string(), z.string()).default({})

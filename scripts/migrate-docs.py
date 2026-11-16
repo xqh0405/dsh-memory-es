@@ -191,19 +191,64 @@ def chunk_text(text: str, target=TARGET, overlap=OVERLAP, max_len=MAX_CHUNK):
     return chunks
 
 
+MIN_CHUNK = 80          # 小于这个字符数的块并入相邻块（独立成块检索价值太低）
+OVERLAP_RATIO = 0.6     # 相邻块重叠超过较短块的 60% 视为重复
+
+
+def overlap_len(a: str, b: str) -> int:
+    """最长「a 的后缀 == b 的前缀」长度（阶段 41：判断相邻块是否只是重叠）"""
+    limit = min(len(a), len(b))
+    for n in range(limit, 0, -1):
+        if a[-n:] == b[:n]:
+            return n
+    return 0
+
+
+def tidy_chunks_with_path(chunks, min_len=MIN_CHUNK, max_len=MAX_CHUNK, overlap_ratio=OVERLAP_RATIO):
+    """跨 section 的短块合并 + 重叠去重（保留 section_path 语义）"""
+    merged = []
+    for c in chunks:
+        if len(c["content"]) < min_len and merged:
+            candidate = merged[-1]["content"] + "\n\n" + c["content"]
+            if len(candidate) <= max_len:
+                merged[-1]["content"] = candidate
+                continue
+        merged.append(dict(c))
+    if len(merged) >= 2 and len(merged[0]["content"]) < min_len:
+        candidate = merged[0]["content"] + "\n\n" + merged[1]["content"]
+        if len(candidate) <= max_len:
+            # 首块并入下一块时路径取下一块（首块没有「上一节」可依）
+            merged[1]["content"] = candidate
+            merged.pop(0)
+
+    out = []
+    for c in merged:
+        if out:
+            ov = overlap_len(out[-1]["content"], c["content"])
+            if ov / max(1, min(len(out[-1]["content"]), len(c["content"]))) > overlap_ratio:
+                if len(c["content"]) > len(out[-1]["content"]):
+                    out[-1] = c
+                continue
+        out.append(c)
+    return out
+
+
 def build_chunks(meta: dict, body: str, fallback_title: str):
     title = (meta.get("title") or fallback_title or "").strip()
     desc = (meta.get("description") or "").strip()
     sections = split_sections(body) or [("", body)]
 
-    chunks = []
+    raw_chunks = []
     for spath, stext in sections:
         if not stext.strip():
             continue
-        # 太短的 section 也单独成块（标题本身就是线索）
         pieces = chunk_text(stext) if len(stext) > MAX_CHUNK else [stext]
         for piece in pieces:
-            chunks.append({"section_path": spath, "content": piece})
+            raw_chunks.append({"section_path": spath, "content": piece})
+    # 阶段 41：短块合并 + 重叠去重要**跨 section** 做——短块几乎都来自「短 section 自成一块」，
+    # 段内只剩一块，段内 tidy 等于没做（2026-11-16 实测 741 篇文档 0 变化）。
+    # 合并时保留前一块的 section_path：短标题/短列表项本来就属于上一节。
+    chunks = tidy_chunks_with_path(raw_chunks)
     return title, desc, chunks
 
 
