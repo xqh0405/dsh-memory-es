@@ -8,14 +8,16 @@ DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索�
 <tr>
     <td align="center"><img src="docs/images/tab-1-overview.jpg" width="238" alt="概览"><br><sub>概览</sub></td>
     <td align="center"><img src="docs/images/tab-2-browse.jpg" width="238" alt="记忆浏览"><br><sub>记忆浏览</sub></td>
-    <td align="center"><img src="docs/images/tab-3-graph-galaxy.jpg" width="238" alt="星图"><br><sub>星图</sub></td>
-    <td align="center"><img src="docs/images/tab-4-identity.jpg" width="238" alt="自述"><br><sub>自述</sub></td>
+    <td align="center"><img src="docs/images/tab-3-searchlog.jpg" width="238" alt="检索"><br><sub>检索</sub></td>
+    <td align="center"><img src="docs/images/tab-4-inject.jpg" width="238" alt="注入"><br><sub>注入</sub></td>
+    <td align="center"><img src="docs/images/tab-5-graph.jpg" width="238" alt="星图"><br><sub>星图</sub></td>
 </tr>
 <tr>
-    <td align="center"><img src="docs/images/tab-5-persona.jpg" width="238" alt="人格"><br><sub>人格</sub></td>
-    <td align="center"><img src="docs/images/tab-6-review.jpg" width="238" alt="审核台"><br><sub>审核台</sub></td>
-    <td align="center"><img src="docs/images/tab-7-maintain.jpg" width="238" alt="维护"><br><sub>维护</sub></td>
-    <td align="center"><img src="docs/images/tab-8-config.jpg" width="238" alt="配置"><br><sub>配置</sub></td>
+    <td align="center"><img src="docs/images/tab-6-identity.jpg" width="238" alt="自述"><br><sub>自述</sub></td>
+    <td align="center"><img src="docs/images/tab-7-persona.jpg" width="238" alt="人格"><br><sub>人格</sub></td>
+    <td align="center"><img src="docs/images/tab-8-review.jpg" width="238" alt="审核台"><br><sub>审核台</sub></td>
+    <td align="center"><img src="docs/images/tab-9-maint.jpg" width="238" alt="维护"><br><sub>维护</sub></td>
+    <td align="center"><img src="docs/images/tab-10-config.jpg" width="238" alt="配置"><br><sub>配置</sub></td>
 </tr>
 </table>
 
