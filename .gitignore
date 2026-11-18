@@ -243,6 +243,3 @@ scratch-coarse/
 
 # 星图素材的原始文件（已裁切/改名的副本在 panel/assets/skin/）
 sucai/
-
-# 星图皮肤素材：版权归原作者，不随开源仓库分发；本机自行放到 panel/assets/skin/
-panel/assets/skin/
