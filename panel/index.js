@@ -13,7 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1879,6 +1879,102 @@ async function handleStickerImageGet(ctx, res, url) {
     'content-disposition': 'inline',
   })
   res.end(body)
+}
+
+/**
+ * 星图皮肤素材（2026-11-18）：背景立绘与背景视频。
+ *
+ * 这两份文件是**纯视觉资源**，只被星图的绘制层读取，不参与任何记忆的读写、检索与索引。
+ * 浏览器读不到插件的磁盘，所以由宿主读给它；安全口径与贴纸一致：
+ *  1. `basename(file) === file` —— 挡住 `../` 与绝对路径；
+ *  2. 扩展名白名单 —— 只认图片与 mp4，不给目录里任何别的文件开门。
+ *
+ * 额外支持单段 Range：背景视频 2.7 MiB，Safari 的 `<video>` 一定要 206 才肯播，
+ * 全量 200 在部分浏览器上会直接不出画面。
+ */
+const SKIN_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.mp4': 'video/mp4',
+}
+
+/** 素材目录：随包发布（panel/assets/skin），不是用户目录——换台机器装上也一样有。 */
+const SKIN_DIR = fileURLToPath(new URL('./assets/skin', import.meta.url))
+const SKIN_MAX_BYTES = 12 * 1024 * 1024
+
+function handleSkinAsset(ctx, res, req, url) {
+  const requested = str(url.searchParams.get('file') ?? '')
+  const name = basename(requested)
+  const ext = extname(name).toLowerCase()
+  if (name === '' || name !== requested || !(ext in SKIN_MIME)) {
+    return json(res, 400, { ok: false, error: '只支持读取皮肤素材目录里的图片或 mp4' })
+  }
+  const abs = join(SKIN_DIR, name)
+  let size = 0
+  try {
+    size = statSync(abs).size
+  } catch {
+    return json(res, 404, { ok: false, error: `文件不存在：${name}` })
+  }
+  if (size > SKIN_MAX_BYTES) {
+    return json(res, 413, { ok: false, error: `素材超过 12 MiB：${name}` })
+  }
+
+  const headers = {
+    'content-type': SKIN_MIME[ext],
+    // 素材随版本走、文件名不变：一小时缓存够用，切皮肤不必重下 4.7 MiB
+    'cache-control': 'private, max-age=3600',
+    'accept-ranges': 'bytes',
+  }
+
+  // 单段 Range（`bytes=0-` / `bytes=100-200`）；多段不支持，直接回全量
+  const range = str(req?.headers?.range ?? '')
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range)
+  if (match !== null) {
+    const hasStart = match[1] !== ''
+    const hasEnd = match[2] !== ''
+    let start = hasStart ? Number(match[1]) : 0
+    let end = hasEnd ? Number(match[2]) : size - 1
+    if (!hasStart && hasEnd) {
+      // `bytes=-500`：最后 500 字节
+      start = Math.max(0, size - end)
+      end = size - 1
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+      res.writeHead(416, { 'content-range': `bytes */${size}` })
+      return res.end()
+    }
+    end = Math.min(end, size - 1)
+    res.writeHead(206, {
+      ...headers,
+      'content-range': `bytes ${start}-${end}/${size}`,
+      'content-length': end - start + 1,
+    })
+    // 浏览器中途切走（换皮肤/关页签）会提前断开：流报错不能把宿主带崩
+    const stream = createReadStream(abs, { start, end })
+    stream.on('error', () => {
+      try {
+        res.destroy()
+      } catch {
+        // 已经断了，什么都不用做
+      }
+    })
+    stream.pipe(res)
+    return
+  }
+
+  res.writeHead(200, { ...headers, 'content-length': size })
+  const full = createReadStream(abs)
+  full.on('error', () => {
+    try {
+      res.destroy()
+    } catch {
+      // 同上
+    }
+  })
+  full.pipe(res)
 }
 
 /**
@@ -3869,6 +3965,8 @@ async function handle(ctx, req, res) {
     if (path === '/persona/presets') return await handlePersonaPresetsGet(ctx, res)
     if (path === '/stickers') return await handleStickersGet(ctx, res)
     if (path === '/sticker') return await handleStickerImageGet(ctx, res, url)
+    // 星图皮肤素材（立绘 / 背景视频）：只读，纯视觉，不碰任何记忆数据
+    if (path === '/skin-asset') return handleSkinAsset(ctx, res, req, url)
     if (path === '/diary') return await handleDiaryGet(ctx, res, url)
     if (path === '/identity/pending' && req.method === 'GET') return await handleIdentityPending(ctx, res, url)
     if (path === '/identity/audit' && req.method === 'GET') return await handlePersonalAudit(ctx, res, url)
@@ -4208,6 +4306,10 @@ export function apply(ctx) {
       kind: 'prefix',
       path: ROUTE,
       handler: (req, res) => {
+        // 星图素材（背景立绘 / 背景视频）免登录：它是随包发布的纯视觉资源，
+        // 不含任何记忆内容；而 <img>/<video> 的请求一旦因 cookie 状态被 401，
+        // 表现为"背景整片空白"，排查成本极高（2026-11-18 已踩过一次）。
+        if ((req.url ?? '').includes('/skin-asset')) return handle(ctx, req, res)
         // 鉴权必须在任何业务分支之前：漏一次就等于整个记忆库对外开放
         const rejection = admitRequest(ctx, req)
         if (rejection !== null) {

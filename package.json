@@ -28,6 +28,7 @@
     "./client": "./panel/client.js",
     "./locale/*.json": "./panel/locale/*.json",
     "./icon": "./panel/icon.svg",
+    "./assets/*": "./panel/assets/*",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

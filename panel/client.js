@@ -110,6 +110,13 @@ window.__ModuleLoader__.load({
       graphUnresolved: '端点缺失',
       graphZoomHint: '滚轮缩放 · 拖动平移',
       graphReset: '复位',
+      graphSkin: '风格',
+      graphSkinGalaxy: '银河',
+      graphSkinInfinity: '浮黎涟',
+      graphSkinNeural: '大肥鱼',
+      graphSkinDefault: '设为默认',
+      graphSkinDefaultHint: '下次打开星图默认用这一版（只记在这台浏览器里）',
+      graphSkinIsDefault: '已设为默认',
       graphOrbit: '自转',
       graphOrbitHint: '开/关镜头自转；只在页签可见时转，切走就停',
       graphFocus: '聚焦',
@@ -483,6 +490,13 @@ window.__ModuleLoader__.load({
       graphUnresolved: 'unresolved',
       graphZoomHint: 'wheel to zoom · drag to pan',
       graphReset: 'Reset',
+      graphSkin: 'Style',
+      graphSkinGalaxy: 'Galaxy',
+      graphSkinInfinity: 'Fulilian',
+      graphSkinNeural: 'Dafeiyu',
+      graphSkinDefault: 'Set default',
+      graphSkinDefaultHint: 'Use this style when the graph opens next time (stored in this browser only)',
+      graphSkinIsDefault: 'Default set',
       graphOrbit: 'Orbit',
       graphOrbitHint: 'Toggle the slow camera orbit; it stops while the tab is hidden',
       graphFocus: 'Focus',
@@ -1439,9 +1453,9 @@ window.__ModuleLoader__.load({
       '#96beff', '#82e6c8', '#ffd28c', '#c0a5ff',
       '#ffa0d2', '#ffcd78', '#7fd8e0', '#ffb08a',
     ]
-    function colorOfDomain(domain, clusters) {
+    function colorOfDomain(domain, clusters, palette = GRAPH_PALETTE) {
       const index = clusters.findIndex((cluster) => cluster.domain === domain)
-      return GRAPH_PALETTE[(index < 0 ? 0 : index) % GRAPH_PALETTE.length]
+      return palette[(index < 0 ? 0 : index) % palette.length]
     }
 
     /** FNV-1a：给节点算一个 0~1 的稳定伪随机数，用于位置抖动（同一 id 永远同一个值）。 */
@@ -1656,38 +1670,56 @@ window.__ModuleLoader__.load({
      * 被压成一个半径 26 的小球（截图右下角那团）。这里改成两边各画一张盘，
      * 并给出盘心与半径，供绘制时标「个人 · N / 团队 · N」。
      *
-     * 只在一张图上同时有两种来源时启用；单库视图仍然走 layoutGalaxy。
+     * 只在一张图上同时有两种来源时启用；单库视图仍然走单盘布局。
+     *
+     * `layoutOf` 是 2026-11-18 加的参数：三种星图皮肤各有自己的单盘布局
+     * （银河 / 无限 / 神经），双盘在这里统一处理"各画一张盘 + 左右摆开"，
+     * 皮肤只需要提供单盘布局函数，不用各写一遍双盘。
      */
-    function layoutDualDisk(graph) {
+    function layoutDualDisk(graph, layoutOf = layoutGalaxy, gap = 90, targetR = 560) {
       const personal = graph.nodes.filter((node) => node.scope !== 'team')
       const team = graph.nodes.filter((node) => node.scope === 'team')
       if (personal.length === 0 || team.length === 0) {
-        return { ...layoutGalaxy(graph), disks: [] }
+        return { ...layoutOf(graph), disks: [] }
       }
       const pSet = new Set(personal.map((node) => node.id))
       const tSet = new Set(team.map((node) => node.id))
       const edgesOf = (keep) => graph.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target))
-      const pLayout = layoutGalaxy({ ...graph, nodes: personal, edges: edgesOf(pSet) })
-      const tLayout = layoutGalaxy({ ...graph, nodes: team, edges: edgesOf(tSet) })
+      const pLayout = layoutOf({ ...graph, nodes: personal, edges: edgesOf(pSet) })
+      const tLayout = layoutOf({ ...graph, nodes: team, edges: edgesOf(tSet) })
 
       // 两张盘按 sqrt(节点数) 定比例：密度接近，才不会一大一小
       const bigger = Math.max(personal.length, team.length)
       const scaleFor = (layout, count) => {
-        const target = 560 * Math.sqrt(count / bigger)
+        const target = targetR * Math.sqrt(count / bigger)
         return layout.radius > 0 ? Math.max(0.3, target / layout.radius) : 1
       }
       const sp = scaleFor(pLayout, personal.length)
       const st = scaleFor(tLayout, team.length)
       const rP = pLayout.radius * sp
       const rT = tLayout.radius * st
-      const gap = 90
       const cxP = -(rP + gap)
       const cxT = rT + gap
 
       const positions = new Map()
+      // 旋转中心跟着节点一起搬：神经的簇心必须跟着盘平移（各转各的）；
+      // 无限的 8 字整幅绕全局中心公转，中心不动，双盘看起来像双星绕质心。
+      const spin = new Map()
       const place = (layout, scale, cx) => {
         for (const [id, pos] of layout.positions) {
           positions.set(id, { x: cx + pos.x * scale, y: pos.y * scale, z: pos.z * scale })
+        }
+        const mapped = new Map()
+        for (const [id, center] of layout.spin ?? []) {
+          let next = mapped.get(center)
+          if (next === undefined) {
+            // 两张盘各自绕自己的中心转（神经的簇、无限的 8 字都一样）。
+            // 若让双盘绕全局中心公转，星尘与曲线就得跟着做公转，代价大且容易错位；
+            // 各自自转在观感上更稳，也符合"每张盘是一个完整图案"的读法。
+            next = { ...center, cx: cx + center.cx * scale, cz: center.cz * scale }
+            mapped.set(center, next)
+          }
+          spin.set(id, next)
         }
       }
       place(pLayout, sp, cxP)
@@ -1695,6 +1727,7 @@ window.__ModuleLoader__.load({
 
       return {
         positions,
+        spin,
         radius: Math.max(Math.abs(cxP) + rP, cxT + rT),
         disks: [
           { scope: 'personal', labelKey: 'scopePersonal', count: personal.length, x: cxP, z: 0, r: rP },
@@ -1778,6 +1811,371 @@ window.__ModuleLoader__.load({
       }
       return { positions, radius: 540 }
     }
+
+    // ── 无限版布局（2026-11-18）────────────────────────────────────────────
+
+    /**
+     * 双纽线参数：横向 8 字（Gerono 双纽线），画在 **XY 平面**上。
+     *
+     * x = A·cos t，y = B·sin t·cos t，t ∈ [0, 2π) 走完一圈正好画完两瓣。
+     * 放在 XY 而不是 XZ 是刻意的：屏幕上 x 是横、y 是竖，这样两瓣是**左右**排，
+     * 才是 ∞ 的形；放到 XZ 会被俯角压成上下两瓣的竖 8。
+     * 选 Gerono 而不是伯努利双纽线：这里只要"8 字"的形，它的曲率更均匀，
+     * 星点铺上去不会在两瓣根部挤成一坨。
+     */
+    const INFINITY_A = 470 // 横向半径：两瓣最远处
+    const INFINITY_B = 110 // 纵向振幅：按背景光带的扁度定（472×142 像素），太高会盖住人物
+    // 两瓣的深度差：正瓣在 z>0、负瓣在 z<0，中心自交点因此**前后分开**。
+    // 两个分支叠在同一个 z 上时，拖动相机只会看到一团糊；分开之后才有交叉的层次感。
+    const INFINITY_DEPTH = 120
+    // 两瓣的上下错位：让自交点在画面上也不是同一个点，而是像两个椭圆环错开交叉。
+    // 这是"相交处隔远一点"的落点——单靠深度差，正视角下两个交点仍然重叠。
+    const INFINITY_SEP = 35
+
+    /**
+     * 背景立绘里那条彩虹光带的位置（2026-11-18 用 2x 网格图量的）。
+     *
+     * 用户要的是"手托着星环"：我们画的 8 字必须和图上那条光带**重合**，
+     * 所以把光带的像素包围盒换算成世界坐标，让星环中心落在光带中心、
+     * 星环宽度等于光带宽度。之后无论怎么缩放，两者始终贴在一起。
+     *
+     *  · cx/cy = 光带中心在原图的像素坐标
+     *  · w     = 光带宽度（像素），用来定"世界单位/像素"的比例
+     */
+    const INFINITY_IMAGE = {
+      width: 1536,
+      height: 1024,
+      bandCx: 796,
+      bandCy: 836,
+      bandW: 472,
+    }
+
+
+    /**
+     * 无限皮肤的平面相机：世界坐标 → 屏幕只做「缩放 + 平移」，不走 3D 透视。
+     *
+     * 为什么这里必须放弃 3D：背景立绘是屏幕空间的图片，3D 相机一推近，
+     * 星点放大、图片不动，两者立刻错位；而且透视会让左右两瓣一大一小
+     * （2026-11-18 用户反馈的正是这两点）。平面变换下图片和星点共用同一个
+     * zoom，永远对齐，且天然左右对称。
+     */
+    /**
+     * 星环的初始落点：背景固定铺满，星环用 3D 相机自由环绕，这里只给一个屏幕偏移，
+     * 让默认机位下星环正好压在背景光带上。
+     *
+     * 拖动/滚轮走的是 3D 相机（和银河版一模一样的环绕手感），所以旋转之后星环会离开光带——
+     * 这是"能像星系那样转"的代价，用户要的就是这个自由。
+     */
+    function fitInfinityPlane(width, height) {
+      const cover = Math.max(width / INFINITY_IMAGE.width, height / INFINITY_IMAGE.height)
+      const imgLeft = (width - INFINITY_IMAGE.width * cover) / 2
+      const imgTop = (height - INFINITY_IMAGE.height * cover) / 2
+      return {
+        offsetX: imgLeft + INFINITY_IMAGE.bandCx * cover - width / 2,
+        offsetY: imgTop + INFINITY_IMAGE.bandCy * cover - height / 2 + INFINITY_RING_DROP,
+      }
+    }
+
+    /**
+     * 星环初始位置相对背景光带中心的**屏幕像素**偏移（y 向下为正）。
+     *
+     * 背景铺满画布且固定不动；星环有自己的缩放与位置，可以拖、可以缩。
+     * 这个值只决定"进页面时星环落在光带上偏哪一点"，拖动之后就不再参与。
+     */
+    const INFINITY_RING_DROP = -12
+
+
+    function infinityPoint(t) {
+      return {
+        x: INFINITY_A * Math.cos(t),
+        y: INFINITY_B * Math.sin(t) * Math.cos(t),
+      }
+    }
+
+    /** 双纽线在 t 处的单位法向（切线旋转 90°）：节点沿法向抖出去，才不会排成一条绳子 */
+    function infinityNormal(t) {
+      // dP/dt = (-A·sin t, B·cos 2t)；法向 = (B·cos 2t, -A·sin t) 归一化
+      const nx = INFINITY_B * Math.cos(2 * t)
+      const ny = -INFINITY_A * Math.sin(t)
+      const len = Math.hypot(nx, ny) || 1
+      return { x: nx / len, y: ny / len }
+    }
+
+    /**
+     * 无限布局（2026-11-18）：星点沿双纽线铺开，整体随相机 yaw 在水平面上转。
+     *
+     * 与银河的区别是"骨架"：银河靠 domain 轮转分配三条旋臂，这里只有**一条闭合曲线**，
+     * 所以 domain 按数量降序沿 t 分段——同一领域占一段连续弧，相邻领域首尾相接，
+     * 整条 8 字上因此能看出"哪一段是谁"。
+     *
+     *  · 段内 t 均匀 + id 哈希抖动：星点自然铺开，不排队；
+     *  · 法向抖动幅度跟 domain 占比走：大团更蓬松，小团贴线；
+     *  · 孤点（degree=0）不挂在曲线上，撒到外圈晕里——它们跟谁都没关系，贴线反而误读。
+     */
+    function layoutInfinity(graph) {
+      const positions = new Map()
+      // 曲线上的节点不绕中心转，而是**沿曲线流**：每个节点记一个固定的曲线参数 t0，
+      // 绘制时用 t0 + 进度 求位置。整条 8 字因此像一笔写到底、写完再从头写——
+      // 星点之间的相对间距不变，看上去就是一串光在描这个 8 字。
+      // positions 里仍存一份静态坐标：导出、聚焦、首帧都靠它，缺了会白屏。
+      const flow = new Map()
+      // 孤点不在曲线上，单独绕中心慢慢公转（静止的孤点挂在流动的图案旁边像贴纸）
+      const spin = new Map()
+      const center = { cx: 0, cy: 0, cz: 0, plane: 'xy', phase: 0 }
+      const nodes = graph.nodes
+      if (nodes.length === 0) return { positions, radius: 0, flow, spin }
+
+      /** 一组节点铺在一段曲线参数区间里：组内按 domain 分段，段内按 id 排序后均匀落点 */
+      const placeOnCurve = (list, tStart, tEnd) => {
+        if (list.length === 0) return
+        const byDomain = new Map()
+        for (const node of list) {
+          if (!byDomain.has(node.domain)) byDomain.set(node.domain, [])
+          byDomain.get(node.domain).push(node)
+        }
+        const groups = [...byDomain.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))
+        const total = list.length
+        const totalSpan = tEnd - tStart
+        let cursor = tStart
+        for (const [, group] of groups) {
+          const share = group.length / total
+          const span = share * totalSpan
+          group.sort((a, b) => (a.id < b.id ? -1 : 1))
+          group.forEach((node, index) => {
+            const local = (index + 0.5) / group.length
+            const t = cursor + (local + (hashUnit(node.id + '#t') - 0.5) * 0.6 / Math.max(1, group.length)) * span
+            const point = infinityPoint(t)
+            const normal = infinityNormal(t)
+            // 法向抖动：大团略宽（最多 ±66），小团贴线（±12）——
+            // 参考图里星点基本贴着环走，晕交给星尘去铺，节点散太开就不成"环"了
+            const swing = (12 + share * 54) * (0.3 + hashUnit(node.id + '#w') * 0.7)
+            const offset = (hashUnit(node.id + '#r') - 0.5) * 2 * swing
+            // z 分两层：sin(t) 在 [0,π) 为正、[π,2π) 为负，两瓣一前一后；
+            // 再叠一点哈希抖动，同一瓣里也有薄厚。这个深度会在流动时随 t 变化，
+            // 所以存的是"抖动"，层深在绘制时按当前 t 现算。
+            const zJitter = (hashUnit(node.id + '#z') - 0.5) * 34
+            positions.set(node.id, {
+              x: point.x + normal.x * offset,
+              y: point.y + normal.y * offset + INFINITY_SEP * Math.sin(t),
+              z: INFINITY_DEPTH * Math.sin(t) + zJitter,
+            })
+            flow.set(node.id, { t, offset, zJitter })
+          })
+          cursor += span
+        }
+      }
+
+      // 孤点先挑出来：它们不参与曲线分段，否则会挤在段尾
+      const orphans = []
+      const personal = []
+      const team = []
+      for (const node of nodes) {
+        if (node.degree === 0) orphans.push(node)
+        else if (node.scope === 'team') team.push(node)
+        else personal.push(node)
+      }
+
+      // 「全部」不切成两张盘：一条 8 字，左瓣个人、右瓣团队。
+      // 双盘会把图案推到画面外、还会把 flow 丢掉（2026-11-18 用户截图里就是两个半环、还是静态的）。
+      if (personal.length > 0 && team.length > 0) {
+        // x = A·cos t：t 从 π/2 到 3π/2 走左瓣，3π/2 到 5π/2 走右瓣
+        placeOnCurve(personal, Math.PI / 2, Math.PI * 1.5)
+        placeOnCurve(team, Math.PI * 1.5, Math.PI * 2.5)
+      } else {
+        placeOnCurve([...personal, ...team], 0, Math.PI * 2)
+      }
+
+      // 孤点：外圈晕，半径比曲线最大伸展再加一档
+      const haloR = INFINITY_A + 90
+      orphans.forEach((node, index) => {
+        const count = orphans.length || 1
+        const angle = (index / count) * Math.PI * 2 + hashUnit(node.id + '#o') * 0.6
+        const r = haloR + hashUnit(node.id + '#or') * 120
+        positions.set(node.id, {
+          x: Math.cos(angle) * r,
+          y: Math.sin(angle) * r * 0.7,
+          z: (hashUnit(node.id + '#oy') - 0.5) * 46,
+        })
+        spin.set(node.id, center)
+      })
+
+      return { positions, radius: haloR + 150, flow, spin }
+    }
+
+    // ── 神经版布局（2026-11-18）────────────────────────────────────────────
+
+    /**
+     * 神经布局：记忆按 domain 聚成云团，每团绕自己的中心缓慢自转。
+     *
+     * 这里要的是**团块感**，不是银河那种连续结构：同一领域挤成一簇荧光，
+     * 簇与簇之间留黑，才像参考图里浮在人物周围的那几团神经末梢。
+     *
+     *  · 簇心按 sqrt(占比) 分环：大簇靠里、小簇甩到外圈；
+     *  · 簇内黄金角散点 + 幂律收缩：团心密、边缘疏，和星系的面积均匀同源；
+     *  · `spin` 记每个节点的"相对簇心坐标"，绘制时按簇相位旋转——数据层不动，只转画法。
+     */
+    // 神经版的两条纤维环：**扁椭圆**（横向长、纵向短），中心重合、倾角相反，
+    // 所以在中心附近交叠成两个略错开的环——素材里就是这个形，不是两个大圆。
+    // 布局（孤点落位）与绘制（环线）必须共用这一组数，否则星点会离开环。
+    const NEURAL_RING_A = 540 // 横向半轴
+    const NEURAL_RING_B = 200 // 纵向半轴
+    const NEURAL_RING_TILT = 0.62 // ±35.5°：交叉要明显，否则两条椭圆叠成一条
+
+    function layoutNeural(graph) {
+      const positions = new Map()
+      const spin = new Map()
+      const clouds = []
+      const nodes = graph.nodes
+      if (nodes.length === 0) return { positions, radius: 0, spin, clouds }
+
+      // 孤点（degree=0）单独挑出来：它们没有连线，撒进云团里只是噪点，
+      // 放到两条纤维环上更合适——环本身是装饰，星点落在环上正好补上"记忆"
+      const orphans = []
+      const linked = []
+      for (const node of nodes) {
+        if (node.degree === 0) orphans.push(node)
+        else linked.push(node)
+      }
+
+      const byDomain = new Map()
+      for (const node of linked) {
+        if (!byDomain.has(node.domain)) byDomain.set(node.domain, [])
+        byDomain.get(node.domain).push(node)
+      }
+      const groups = [...byDomain.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))
+      const total = linked.length || 1
+      const GOLDEN = Math.PI * (3 - Math.sqrt(5))
+
+      groups.forEach(([domain, list], index) => {
+        const share = list.length / total
+        // 簇心**贴着两条环走**：按 index 交替落环 A / 环 B，沿椭圆参数均匀排开。
+        // 大簇的环上位置略往回收一点，中心留给人物；小簇甩到环的外侧。
+        const ringIndex = index % 2
+        const rot = (ringIndex === 0 ? 1 : -1) * NEURAL_RING_TILT
+        const t = (index / Math.max(1, groups.length)) * Math.PI * 2 + hashUnit(domain + '#rt') * 0.5
+        const shrink = 0.86 + 0.34 * (1 - share)
+        const x0 = NEURAL_RING_A * Math.cos(t) * shrink
+        const z0 = NEURAL_RING_B * Math.sin(t) * shrink
+        const rc = Math.cos(rot)
+        const rs = Math.sin(rot)
+        const cx = x0 * rc - z0 * rs
+        const cz = x0 * rs + z0 * rc
+        const radius = 80 + 190 * Math.sqrt(share)
+        // 簇沿环公转所需的参数：环的倾角、初始 t、缩放
+        const ring = { t0: t, c: rc, s: rs, shrink }
+        // 每簇一个共享的旋转中心：所有簇内节点引用同一个对象，
+        // 绘制时按对象缓存 cos/sin，几千个节点也只有"簇数"次三角函数。
+        const center = { cx, cy: 0, cz, plane: 'xz', phase: hashUnit(domain + '#spin') * Math.PI * 2, ring }
+        clouds.push({ domain, count: list.length, x: cx, z: cz, r: radius })
+
+        list.sort((a, b) => (a.id < b.id ? -1 : 1))
+        list.forEach((node, i) => {
+          const angle = i * GOLDEN + hashUnit(node.id + '#na') * 0.9
+          // 幂律：团心密、边缘疏；再叠一点哈希让边缘不整齐
+          const rr = radius * Math.pow((i + 0.5) / list.length, 0.6) * (0.8 + hashUnit(node.id + '#nr') * 0.42)
+          const lx = Math.cos(angle) * rr
+          const lz = Math.sin(angle) * rr
+          spin.set(node.id, center)
+          positions.set(node.id, {
+            x: cx + lx,
+            y: (hashUnit(node.id + '#ny') - 0.5) * 30,
+            z: cz + lz,
+          })
+        })
+      })
+
+      // 孤点铺到两条环上（与 drawRef 里那两条装饰环用同一套公式，才会重合）
+      const half = Math.ceil(orphans.length / 2)
+      orphans.forEach((node, index) => {
+        const ringIndex = index % 2
+        const rot = (ringIndex === 0 ? 1 : -1) * NEURAL_RING_TILT
+        const seat = Math.floor(index / 2)
+        const t = (seat / Math.max(1, half)) * Math.PI * 2 + hashUnit(node.id + '#ring') * 0.25
+        const x0 = NEURAL_RING_A * Math.cos(t)
+        const z0 = NEURAL_RING_B * Math.sin(t)
+        const c = Math.cos(rot)
+        const sn = Math.sin(rot)
+        positions.set(node.id, {
+          x: x0 * c - z0 * sn,
+          y: (hashUnit(node.id + '#ry') - 0.5) * 40,
+          z: x0 * sn + z0 * c,
+        })
+      })
+
+      return { positions, radius: 900, spin, clouds }
+    }
+
+    // ── 星图皮肤（2026-11-18）──────────────────────────────────────────────
+
+    /**
+     * 三套皮肤：银河（原有）/ 无限 / 神经。
+     *
+     * 皮肤**只影响画法与布局**，不碰任何数据：取数、节点/边的裁剪、LOD、拾取、
+     * 聚焦子图、.canvas 导出全部走同一套逻辑，换皮肤等于换一层"滤镜 + 摆法"。
+     *
+     * 每套皮肤声明五件事：
+     *  · palette   —— 领域配色（同一份数据在不同皮下有不同气质）
+     *  · cam       —— 进场相机（yaw/pitch/dist），三种布局透视需求不一样
+     *  · layout    —— 单盘布局（双盘由 layoutDualDisk 统一处理）
+     *  · node      —— 节点画法参数（半径曲线 / 光晕倍数 / 描边）
+     *  · backdrop  —— 背景（见 buildSkinBackdrop）
+     */
+    const GRAPH_SKIN_IDS = ['galaxy', 'infinity', 'neural']
+
+    const SKIN_PALETTES = {
+      // 原有那套亮色，一个字节都没动
+      galaxy: GRAPH_PALETTE,
+      // 无限：偏冷白，星点小而锐——参考图那种"环上密密的银白小星"
+      infinity: ['#e9f1ff', '#a9c8ff', '#cdb9ff', '#9fe6ff', '#ffd9f2', '#b6ffe8', '#ffd0b0', '#dfe6ff'],
+      // 神经：荧光团，粉 / 黄 / 蓝 / 紫，饱和度拉高
+      neural: ['#ff9ecf', '#ffd479', '#8fd3ff', '#b79bff', '#7fe9d2', '#ffb3a0', '#d9b3ff', '#ffe9a8'],
+    }
+
+    /**
+     * 节点画法参数（原来那堆魔数抽出来，按皮取）。
+     *
+     * base/pow/mul 决定半径随度数的曲线；glow* 是光晕倍数；glowAlpha 是光晕亮度；
+     * stroke 是「团队记忆描一圈白边」；flare 是开场"叮"那一下的光晕放大倍数。
+     */
+    const SKIN_NODE_STYLE = {
+      // 银河：沿用 2026-11-02 定的那组值，观感必须一模一样
+      galaxy: { base: 1.35, pow: 0.7, mul: 0.95, glow: 5.2, glowHub: 7, glowHover: 9.5, glowAlpha: 0.72, blur: 0.42, stroke: true, flare: 1.8 },
+      // 无限：更小更锐，光晕压到 3.6 倍——环上要的是"点"，不是"球"
+      infinity: { base: 1.0, pow: 0.62, mul: 0.68, glow: 3.4, glowHub: 4.8, glowHover: 7.2, glowAlpha: 0.6, blur: 0.5, stroke: true, flare: 1.2 },
+      // 神经：荧光团但要有核——光晕从 9.5 收到 6，alpha 压到 0.62，
+      // 硬核反而放大一点，这样一团里能看出每颗星，不至于糊成一片雾
+      neural: { base: 1.1, pow: 0.7, mul: 0.68, glow: 4.6, glowHub: 6.4, glowHover: 9, glowAlpha: 0.58, blur: 0.3, stroke: false, flare: 2.0 },
+    }
+
+    const SKIN_CAM = {
+      // 银河沿用 GALAXY_CAM（它定义在星图区开头，这里写 null 表示"用那个"，
+      // 免得在模块初始化阶段提前解引用一个还没赋值的 const）
+      galaxy: null,
+      // 无限：几乎正视——8 字画在 XY 平面，yaw 一大就会被压窄；自转靠图案自己转
+      // 无限：初始正对（yaw/pitch 都为 0）——只要有一点俯仰，8 字的两瓣就会一大一小
+      infinity: { yaw: 0, pitch: 0, dist: 700, focal: 1600 },
+      // 神经：几乎正视，人物立绘要正对观众，云团只是浮在她前面
+      neural: { yaw: -0.16, pitch: -0.4, dist: 1000, focal: 1600 },
+    }
+
+    /**
+     * 皮肤素材（模块级缓存：切页签会重挂组件，但素材没必要重下）。
+     *
+     * 走 dsh 官方的包资产通道 `/plugins/<包名>/assets/<路径>`：由 client-modules
+     * 直接读盘 serve，不经过插件自己的鉴权与代理策略，是最稳的一条路。
+     * 第二个地址是自建 API 路由的兜底——两条都失败才认为素材真的没了。
+     */
+    const SKIN_ASSET_URLS = {
+      image: [
+        '/plugins/dsh-memory-es/assets/skin/cyrene.png',
+        `${API}/skin-asset?file=cyrene.png`,
+      ],
+      video: [
+        '/plugins/dsh-memory-es/assets/skin/neural-bg.mp4',
+        `${API}/skin-asset?file=neural-bg.mp4`,
+      ],
+    }
+    const SKIN_ASSET = { image: null, video: null, imageOk: false, videoOk: false, imageError: '', videoError: '' }
 
     /** JSON Canvas 的六种颜色编号（1 红 / 2 橙 / 3 黄 / 4 绿 / 5 青 / 6 紫） */
     function canvasColor(domain, clusters) {
@@ -1980,9 +2378,12 @@ window.__ModuleLoader__.load({
      * 每帧新建 createRadialGradient 会稳定产生垃圾，还会把 hub 那套渐变对象
      * 变成每帧 N 个——贴图化之后只是 drawImage 缩放，代价可以忽略。
      */
-    let CORE_SPRITE = null
-    function coreSprite() {
-      if (CORE_SPRITE !== null) return CORE_SPRITE
+    const CORE_SPRITES = new Map()
+    function coreSprite(color) {
+      // 不传颜色 = 原来那颗暖白核（银河皮肤的观感，一个字节都不改）
+      const key = color ?? 'warm'
+      const cached = CORE_SPRITES.get(key)
+      if (cached !== undefined) return cached
       const size = 256
       const canvas = document.createElement('canvas')
       canvas.width = size
@@ -1990,15 +2391,24 @@ window.__ModuleLoader__.load({
       const g = canvas.getContext('2d')
       if (g !== null) {
         const gradient = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-        gradient.addColorStop(0, 'rgba(255,250,238,1)')
-        gradient.addColorStop(0.16, 'rgba(255,238,205,.6)')
-        gradient.addColorStop(0.44, 'rgba(255,214,158,.19)')
-        gradient.addColorStop(0.72, 'rgba(255,190,130,.05)')
-        gradient.addColorStop(1, 'rgba(255,180,120,0)')
+        if (color === undefined) {
+          gradient.addColorStop(0, 'rgba(255,250,238,1)')
+          gradient.addColorStop(0.16, 'rgba(255,238,205,.6)')
+          gradient.addColorStop(0.44, 'rgba(255,214,158,.19)')
+          gradient.addColorStop(0.72, 'rgba(255,190,130,.05)')
+          gradient.addColorStop(1, 'rgba(255,180,120,0)')
+        } else {
+          // 无限 / 神经：核色跟皮肤或簇色走，衰减曲线与暖白核同源
+          gradient.addColorStop(0, hexToRgba(color, 1))
+          gradient.addColorStop(0.18, hexToRgba(color, 0.6))
+          gradient.addColorStop(0.46, hexToRgba(color, 0.19))
+          gradient.addColorStop(0.74, hexToRgba(color, 0.05))
+          gradient.addColorStop(1, hexToRgba(color, 0))
+        }
         g.fillStyle = gradient
         g.fillRect(0, 0, size, size)
       }
-      CORE_SPRITE = canvas
+      CORE_SPRITES.set(key, canvas)
       return canvas
     }
 
@@ -2037,13 +2447,234 @@ window.__ModuleLoader__.load({
       return { canvas, width, height }
     }
 
+    // ── 皮肤素材与背景（2026-11-18）────────────────────────────────────────
+
+    /** 主绘画布是 cover 铺满；两张素材尺寸不同，各自算一次缩放 */
+    function drawCover(ctx, source, sourceW, sourceH, width, height) {
+      if (!(sourceW > 0 && sourceH > 0)) return
+      const scale = Math.max(width / sourceW, height / sourceH)
+      const w = sourceW * scale
+      const h = sourceH * scale
+      ctx.drawImage(source, (width - w) / 2, (height - h) / 2, w, h)
+    }
+
+    /**
+     * 按需加载立绘：只在无限皮肤用到，模块级缓存，失败也不重试（省得每帧打接口）。
+     *
+     * 先绑事件再设 src：顺序反过来时，若浏览器从缓存同步命中，load 可能先于监听器到达，
+     * 背景就永远停在"没加载"的状态（2026-11-18 用户反馈"背景都没有"时按这个查）。
+     */
+    function ensureSkinImage(onReady, onError) {
+      if (SKIN_ASSET.image !== null) {
+        if (SKIN_ASSET.imageOk) onReady?.()
+        else if (SKIN_ASSET.imageError !== '') onError?.(SKIN_ASSET.imageError)
+        return SKIN_ASSET.image
+      }
+      const image = new Image()
+      image.decoding = 'async'
+      const urls = SKIN_ASSET_URLS.image
+      let attempt = 0
+      image.addEventListener('load', () => {
+        SKIN_ASSET.imageOk = true
+        SKIN_ASSET.imageError = ''
+        onReady?.()
+      })
+      image.addEventListener('error', () => {
+        // 第一个地址（官方 assets 通道）失败就换自建路由重试，两条都挂了才认输
+        attempt += 1
+        if (attempt < urls.length) {
+          image.src = urls[attempt]
+          return
+        }
+        // 加载失败就退回纯深空底：星图不能因为一张图白屏，但要让人知道为什么空
+        SKIN_ASSET.imageError = '背景立绘加载失败'
+        console.warn('[memory-es] 立绘加载失败，背景退回纯深空')
+        onError?.(SKIN_ASSET.imageError)
+      })
+      image.src = urls[0]
+      SKIN_ASSET.image = image
+      return image
+    }
+
+    /**
+     * 背景视频：神经皮肤的地基。
+     *
+     * 三重保险：muted（自动播放必须先静音）、loop（8 秒一段循环）、playsInline（移动端不接管全屏）。
+     * 播放在渲染循环里按"可见 + 当前皮肤"统一控制，这里只管把元素建出来。
+     */
+    function ensureSkinVideo() {
+      if (SKIN_ASSET.video !== null) return SKIN_ASSET.video
+      const video = document.createElement('video')
+      video.muted = true
+      video.loop = true
+      video.playsInline = true
+      video.preload = 'auto'
+      const urls = SKIN_ASSET_URLS.video
+      let attempt = 0
+      video.addEventListener('loadeddata', () => {
+        SKIN_ASSET.videoOk = true
+        SKIN_ASSET.videoError = ''
+        // 背景视频放慢：循环周期从 8 秒拉到约 21 秒，动起来更安静
+        video.playbackRate = 0.38
+      })
+      video.addEventListener('error', () => {
+        // 与立绘同样两条路：官方 assets 通道优先，自建路由兜底
+        attempt += 1
+        if (attempt < urls.length) {
+          video.src = urls[attempt]
+          video.load()
+          return
+        }
+        SKIN_ASSET.videoError = '背景视频加载失败'
+        console.warn('[memory-es] 背景视频加载失败，神经皮肤退回纯深空')
+      })
+      video.src = urls[0]
+      SKIN_ASSET.video = video
+      return video
+    }
+
+    /** 背景离屏画布：按皮肤出不同底子；神经皮肤的视频层另外每帧叠在上面 */
+    function buildSkinBackdrop(skin, width, height, dpr) {
+      const assetKey = `${SKIN_ASSET.imageOk ? 1 : 0}${SKIN_ASSET.videoOk ? 1 : 0}`
+      if (skin === 'galaxy') {
+        return { ...buildGalaxyBackdrop(width, height, dpr), skin, assetKey }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(width * dpr))
+      canvas.height = Math.max(1, Math.round(height * dpr))
+      const ctx = canvas.getContext('2d')
+      if (ctx === null) return { canvas, width, height, skin, assetKey }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      if (skin === 'infinity') {
+        // 背景固定：立绘 cover 铺满画布，拖星环时它一动不动
+        ctx.fillStyle = '#02030a'
+        ctx.fillRect(0, 0, width, height)
+        if (SKIN_ASSET.imageOk && SKIN_ASSET.image !== null) {
+          drawCover(ctx, SKIN_ASSET.image, SKIN_ASSET.image.naturalWidth, SKIN_ASSET.image.naturalHeight, width, height)
+        }
+        ctx.fillStyle = 'rgba(2,4,12,.36)'
+        ctx.fillRect(0, 0, width, height)
+        const shade = ctx.createRadialGradient(
+          width / 2, height * 0.44, 0,
+          width / 2, height * 0.44, Math.max(width, height) * 0.62,
+        )
+        shade.addColorStop(0, 'rgba(2,4,12,0)')
+        shade.addColorStop(1, 'rgba(1,2,8,.62)')
+        ctx.fillStyle = shade
+        ctx.fillRect(0, 0, width, height)
+        // 8 字自交点在画面中心：一盏冷白辉光钉住视觉重心
+        const core = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.min(width, height) * 0.34)
+        core.addColorStop(0, 'rgba(226,238,255,.16)')
+        core.addColorStop(0.4, 'rgba(170,200,255,.05)')
+        core.addColorStop(1, 'rgba(120,160,255,0)')
+        ctx.fillStyle = core
+        ctx.fillRect(0, 0, width, height)
+        // 远景散星：比银河那版更少更冷，别抢环上的点
+        ctx.globalCompositeOperation = 'lighter'
+        for (let i = 0; i < 150; i += 1) {
+          const x = hashUnit(`inf-bg-x-${i}`) * width
+          const y = hashUnit(`inf-bg-y-${i}`) * height
+          const r = 0.3 + hashUnit(`inf-bg-r-${i}`) * 0.95
+          ctx.globalAlpha = 0.08 + hashUnit(`inf-bg-a-${i}`) * 0.26
+          ctx.fillStyle = hashUnit(`inf-bg-w-${i}`) > 0.7 ? 'rgba(255,240,220,1)' : 'rgba(190,215,255,1)'
+          ctx.beginPath()
+          ctx.arc(x, y, r, 0, Math.PI * 2)
+          ctx.fill()
+        }
+        ctx.globalAlpha = 1
+        ctx.globalCompositeOperation = 'source-over'
+        return { canvas, width, height, skin, assetKey }
+      }
+
+      // 神经：底色几乎透明（视频在下面），只留压暗与边缘渐变——
+      // 视频是每帧画的，这张画布只负责"把人压下去、把边收黑"
+      // 整体先压一层，视频再淡一点，星点才压得住人物
+      ctx.fillStyle = 'rgba(2,4,12,.42)'
+      ctx.fillRect(0, 0, width, height)
+      const shade = ctx.createRadialGradient(
+        width / 2, height * 0.48, 0,
+        width / 2, height * 0.48, Math.max(width, height) * 0.66,
+      )
+      shade.addColorStop(0, 'rgba(2,4,12,0)')
+      shade.addColorStop(0.62, 'rgba(2,4,12,.18)')
+      shade.addColorStop(1, 'rgba(1,2,8,.82)')
+      ctx.fillStyle = shade
+      ctx.fillRect(0, 0, width, height)
+      return { canvas, width, height, skin, assetKey }
+    }
+
+    /** 无限皮肤的星尘：沿双纽线撒，环上密、环外疏——参考图那种"环由小星点组成" */
+    const INFINITY_DUST = []
+    const INFINITY_TONES = ['rgba(232,240,255,1)', 'rgba(170,200,255,1)', 'rgba(210,190,255,1)', 'rgba(255,240,245,1)']
+    function infinityDust(count) {
+      if (INFINITY_DUST.length === count) return INFINITY_DUST
+      INFINITY_DUST.length = 0
+      for (let i = 0; i < count; i += 1) {
+        const t = hashUnit(`inf-t-${i}`) * Math.PI * 2
+        // 贴线为主：70% 落在 ±18 内（形成"环"），30% 甩到 ±70（形成晕）
+        const wide = hashUnit(`inf-wide-${i}`) > 0.7
+        const spread = (hashUnit(`inf-w-${i}`) - 0.5) * 2 * (wide ? 70 : 18)
+        INFINITY_DUST.push({
+          // 只存曲线参数与偏移；位置每帧按进度现算，星尘才会跟着节点一起"流"
+          t,
+          offset: spread,
+          // z 是厚度：环要薄，抖开的是 x/y，不是深度
+          z: (hashUnit(`inf-y-${i}`) - 0.5) * 30,
+          size: 0.5 + hashUnit(`inf-s-${i}`) * 1.2,
+          alpha: 0.1 + hashUnit(`inf-a-${i}`) * 0.34,
+          seed: hashUnit(`inf-i-${i}`),
+          tone: INFINITY_TONES[Math.floor(hashUnit(`inf-c-${i}`) * INFINITY_TONES.length) % INFINITY_TONES.length],
+        })
+      }
+      return INFINITY_DUST
+    }
+
+    /**
+     * 「默认星图」存 localStorage（2026-11-18 用户定案）。
+     *
+     * 不进插件配置是刻意的：这是个纯观感偏好，走 schemastery 要在后端加字段、
+     * 面板加写入门，改动面比收益大；而它本来就只对"这台机器的这个浏览器"有意义。
+     * 隐私模式 / 禁用存储时读会抛异常，一律退回银河。
+     */
+    const SKIN_LS_KEY = 'dsh-memory-es.graphSkin'
+
+    function readDefaultSkin() {
+      try {
+        const saved = localStorage.getItem(SKIN_LS_KEY)
+        if (saved !== null && GRAPH_SKIN_IDS.includes(saved)) return saved
+      } catch {
+        // localStorage 被禁：用默认的银河，不报错
+      }
+      return 'galaxy'
+    }
+
+    function writeDefaultSkin(skin) {
+      try {
+        localStorage.setItem(SKIN_LS_KEY, skin)
+        return true
+      } catch {
+        return false
+      }
+    }
+
     function GraphView({ t }) {
       const [state, setState] = React.useState({ loading: true, error: '', data: null })
       // 个人库与团队库分开画：默认团队，看个人要显式切换
       const [scope, setScope] = React.useState(() => readUrlEnum('graphScope', ['team', 'personal', 'both'], 'team'))
+      // 星图皮肤（2026-11-18）：URL 优先（分享链接/刷新还原），其次 localStorage 里的"默认"
+      const [skin, setSkin] = React.useState(() => readUrlEnum('graphSkin', GRAPH_SKIN_IDS, readDefaultSkin()))
       const [hover, setHover] = React.useState(null)
       const [size, setSize] = React.useState({ width: 900, height: 560 })
       const [focusId, setFocusId] = React.useState(null)
+      const [defaultHint, setDefaultHint] = React.useState(false)
+      // 素材加载失败的提示：背景是"纯深空"还是"素材没到"在画面上分不出来，
+      // 所以把原因写在工具栏上，出问题一眼能看到。
+      const [assetNote, setAssetNote] = React.useState('')
+      // 只有用户**主动切过**才把皮肤写进 URL。
+      // 否则一进页面就把"默认值"钉进地址栏，之后改默认会被旧 URL 盖住，
+      // 用户会觉得「设为默认没生效」。
+      const skinTouchedRef = React.useRef(false)
       // 双透镜（2026-11-02）：来源=调暗、类型=隐藏。默认两个都不动，与之前看到的一样。
       // 三项都进 URL：双透镜是「看完图之后的结论状态」，刷新丢掉等于白调一遍。
       const [hiddenTypes, setHiddenTypes] = React.useState(() => new Set(readUrlList('graphHidden')))
@@ -2053,8 +2684,9 @@ window.__ModuleLoader__.load({
           graphScope: scope,
           graphHidden: [...hiddenTypes],
           graphDim: dimTeam ? '1' : '',
+          graphSkin: skinTouchedRef.current ? skin : '',
         })
-      }, [scope, hiddenTypes, dimTeam])
+      }, [scope, hiddenTypes, dimTeam, skin])
       // 自转默认开：转起来才有"星图"的感觉；切走页签会自动停
       const [orbit, setOrbit] = React.useState(true)
       const wrapRef = React.useRef(null)
@@ -2076,6 +2708,19 @@ window.__ModuleLoader__.load({
       // 开场状态放 ref、不放 state：它每帧都变，进 React 会变成每帧重渲染
       const introRef = React.useRef({ active: false, done: false, startedAt: 0, flashId: null })
       const vignetteRef = React.useRef(null)
+      // 无限皮肤的曲线流动进度（弧度）。放 ref 而不是 state：它每帧都变，
+      // 进 React 就是每帧一次重渲染。自转关掉时冻结在这个值上。
+      const infinityFlowRef = React.useRef(0)
+      // 神经皮肤的云团自转角，同样受"自转"开关控制（视频背景仍在播，但图案可以停）
+      const neuralSpinRef = React.useRef(0)
+      // 云团沿两条星环公转的相位（比自转快一点，才看得出绕环走）
+      const neuralOrbitRef = React.useRef(0)
+      // 上一帧时间戳：按真实时间推进动画，不依赖帧率
+      const lastFrameRef = React.useRef(0)
+
+      // 无限皮肤的平面相机：zoom + 视角中心。进页面直接给固定机位，没有推近动画。
+      // 星环的屏幕落点偏移（背景是另一套，永远 cover 铺满不动；星环本身走 3D 相机）
+      const planeRef = React.useRef({ offsetX: 0, offsetY: 0, baseScale: 0, zoom: 1 })
 
       React.useEffect(() => {
         let alive = true
@@ -2140,14 +2785,15 @@ window.__ModuleLoader__.load({
         orbitRef.current = orbit
       }, [orbit])
 
-      // 预设相机：聚焦时拉近，返回全图时退回
+      // 预设相机：聚焦时拉近，返回全图时退回。换皮肤时用该皮肤的默认机位
       React.useEffect(() => {
+        const preset = SKIN_CAM[skin] ?? GALAXY_CAM
         camRef.current = {
-          ...GALAXY_CAM,
-          dist: focusId === null ? GALAXY_CAM.dist : 880,
+          ...preset,
+          dist: focusId === null ? preset.dist : 880,
         }
         drawRef.current()
-      }, [focusId])
+      }, [focusId, skin])
 
       // 类型隐藏：先裁节点、再裁两端有点的边（连线不能存活在没有端点的图上）
       const visibleData = React.useMemo(() => {
@@ -2178,17 +2824,33 @@ window.__ModuleLoader__.load({
 
       const model = React.useMemo(() => {
         if (visibleData === null) return null
-        if (focusId === null) return { graph: visibleData, layout: layoutDualDisk(visibleData), focused: null }
+        if (focusId === null) {
+          // 无限版不进双盘：一条 8 字承载两个库（左瓣个人、右瓣团队），
+          // 双盘会把图案推出画面，还会把流动状态丢掉
+          if (skin === 'infinity') {
+            return { graph: visibleData, layout: layoutInfinity(visibleData), focused: null }
+          }
+          const layoutOf = skin === 'neural' ? layoutNeural : layoutGalaxy
+          // 神经的云团边缘很散，双盘间距收窄才像一个整体（银河仍是 90）
+          return {
+            graph: visibleData,
+            layout: skin === 'neural'
+              ? layoutDualDisk(visibleData, layoutOf, 20, 600)
+              : layoutDualDisk(visibleData, layoutOf, 90, 560),
+            focused: null,
+          }
+        }
         const sub = subgraphOf(visibleData, focusId, 2)
         return { graph: sub, layout: layoutFocusGalaxy(sub), focused: focusId }
-      }, [visibleData, focusId])
+      }, [visibleData, focusId, skin])
 
       const colorMap = React.useMemo(() => {
         const map = new Map()
         const clusters = model?.graph.clusters ?? []
-        for (const node of model?.graph.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters))
+        const palette = SKIN_PALETTES[skin] ?? GRAPH_PALETTE
+        for (const node of model?.graph.nodes ?? []) map.set(node.id, colorOfDomain(node.domain, clusters, palette))
         return map
-      }, [model])
+      }, [model, skin])
 
       // 双盘与单盘切换时把相机拉远/拉回一次；只在「双盘与否」翻转时动，避免打架
       const dualRef = React.useRef(false)
@@ -2196,9 +2858,48 @@ window.__ModuleLoader__.load({
         const dual = (model?.layout?.disks?.length ?? 0) > 0
         if (dual === dualRef.current) return
         dualRef.current = dual
-        camRef.current = { ...GALAXY_CAM, dist: GALAXY_CAM.dist * (dual ? 1.7 : 1) }
+        const preset = SKIN_CAM[skin] ?? GALAXY_CAM
+        camRef.current = { ...preset, dist: preset.dist * (dual ? 1.7 : 1) }
         drawRef.current()
-      }, [model])
+      }, [model, skin])
+
+      // ── 皮肤素材（2026-11-18）────────────────────────────────────────────
+      // 立绘与视频都按需加载：选银河的人不该为一个背景视频付 2.7 MiB 的流量。
+      // 加载完成要清掉背景缓存并补画一帧，否则背景会停在"素材没到位"的那一版。
+      React.useEffect(() => {
+        setAssetNote('')
+        if (skin === 'infinity') {
+          ensureSkinImage(
+            () => {
+              // 加载成功（含换地址后重试成功）就把红字清掉
+              setAssetNote('')
+              backdropRef.current = null
+              drawRef.current()
+            },
+            (message) => setAssetNote(message),
+          )
+        }
+        if (skin === 'neural') {
+          const video = ensureSkinVideo()
+          const wake = () => {
+            setAssetNote('')
+            backdropRef.current = null
+            loopRef.current?.()
+            drawRef.current()
+          }
+          const note = () => setAssetNote(SKIN_ASSET.videoError || '背景视频加载失败')
+          video.addEventListener('loadeddata', wake)
+          video.addEventListener('error', note)
+          // 已经加载过的（切回来）不会再有事件，主动补一次
+          if (video.readyState >= 2) wake()
+          if (SKIN_ASSET.videoError !== '') setAssetNote(SKIN_ASSET.videoError)
+          return () => {
+            video.removeEventListener('loadeddata', wake)
+            video.removeEventListener('error', note)
+          }
+        }
+        return undefined
+      }, [skin])
 
       /**
        * 用户一动手，开场就立刻收尾。
@@ -2277,18 +2978,45 @@ window.__ModuleLoader__.load({
           return clamp01((introT - (INTRO.black + (seed ?? 0) * INTRO.light)) / 260)
         }
 
-        // 背景：尺寸不变就复用离屏缓存，不每帧重画渐变
+        // 背景：尺寸 / 皮肤 / 素材就绪状态不变就复用离屏缓存，不每帧重画渐变
         let backdrop = backdropRef.current
-        if (backdrop === null || backdrop.width !== width || backdrop.height !== height) {
-          backdrop = buildGalaxyBackdrop(width, height, dpr)
+        if (backdrop === null || backdrop.width !== width || backdrop.height !== height || backdrop.skin !== skin) {
+          backdrop = buildSkinBackdrop(skin, width, height, dpr)
           backdropRef.current = backdrop
         }
+        // 无限皮肤的平面相机：固定机位，不做"全景 → 推近"的动画。
+        // 尺寸变化时重算一次倍率，用户没手动缩放过就跟着走。
+        if (skin === 'infinity' && focusId === null) {
+          // 落点与缩放都只跟画布尺寸走（cover 后光带在屏幕上的位置会变）
+          const plane = planeRef.current
+          const fitted = fitInfinityPlane(width, height)
+          plane.offsetX = fitted.offsetX
+          plane.offsetY = fitted.offsetY
+          // 正交投影没有近大远小：星环宽度按画面比例算，左右两瓣才会严格等大。
+          // baseScale 跟画布走、zoom 存用户滚轮的倍率，两者分开才不会被每帧覆盖。
+          const flatUnit = Math.min(width, height) / 900
+          plane.baseScale = (0.55 * width / (INFINITY_A * 2)) / flatUnit
+        }
+
         if (introPlaying) {
           // 黑场：先铺纯黑再让背景自己淡出来，否则半透明会透出上一帧的残影
           ctx.fillStyle = '#000000'
           ctx.fillRect(0, 0, width, height)
           ctx.globalAlpha = clamp01(introT / INTRO.black)
         }
+        // 神经皮肤：背景视频在最底层，压暗层（backdrop）叠在它上面
+        if (skin === 'neural') {
+          const video = SKIN_ASSET.video
+          if (SKIN_ASSET.videoOk && video !== null && video.readyState >= 2) {
+            drawCover(ctx, video, video.videoWidth, video.videoHeight, width, height)
+          } else {
+            // 视频没就绪：铺纯深空，别让上一帧的残影透出来
+            ctx.fillStyle = '#02040c'
+            ctx.fillRect(0, 0, width, height)
+          }
+        }
+        // 无限的立绘是**固定背景**：cover 铺满、不随拖动与缩放移动，
+        // 已经画进 backdrop 缓存，这里不再每帧重绘。
         ctx.drawImage(backdrop.canvas, 0, 0, width, height)
         ctx.globalAlpha = 1
 
@@ -2305,60 +3033,181 @@ window.__ModuleLoader__.load({
         const cp = Math.cos(cam.pitch)
         const sp = Math.sin(cam.pitch)
         const unit = Math.min(width, height) / 900
+        // 无限皮肤（全图模式）走平面变换：只有缩放 + 平移，背景图片与星点共用同一个 zoom。
+        // 聚焦模式仍然走 3D——那里的布局是球壳，平面化会把邻居压成一圈。
+        const plane = skin === 'infinity' && focusId === null ? planeRef.current : null
         const project = (px, py, pz) => {
+          if (plane !== null) {
+            // 星环走 3D 环绕（拖动 = yaw/pitch），但**不用透视**：
+            // 有透视时两瓣的前后分层会让近的那瓣被放大、远的那瓣被缩小，
+            // 数据一偏就成"一边大一边小"（2026-11-18 用户两次反馈）。
+            // 正交投影下同一个 x 永远同一个大小，两瓣严格等大；深度只留给遮挡排序。
+            const x1p = px * cy - pz * sy
+            const z1p = px * sy + pz * cy
+            const y2p = py * cp - z1p * sp
+            const z2p = py * sp + z1p * cp
+            const k = unit * plane.baseScale * plane.zoom
+            return {
+              x: width / 2 + plane.offsetX + x1p * k,
+              y: height / 2 + plane.offsetY + y2p * k,
+              z: z2p,
+              k,
+            }
+          }
           const x1 = px * cy - pz * sy
           const z1 = px * sy + pz * cy
           const y2 = py * cp - z1 * sp
           const z2 = py * sp + z1 * cp
           const persp = cam.focal / Math.max(120, cam.focal + z2 + camDist * 0.35)
-          const k = persp * unit
+          // 神经整体再收一档：云团要留边，别顶满画布（用户按"全部"定的大小）
+          const k = persp * unit * (skin === 'neural' ? 0.86 : 1)
           return { x: width / 2 + x1 * k, y: height / 2 + y2 * k, z: z2, k }
         }
 
         // 星系核的呼吸：一涨一缩的暖光，把视线拉向中心。
         // 双盘模式下每个盘心各有一颗、相位错开一点——像两颗各自跳着的心。
+        // 神经皮肤换成"每团荧光一盏核"，无限皮肤换成中心一盏冷白（8 字自交点）。
         const pulsePhase = performance.now() * 0.0015
-        const coreImage = coreSprite()
         const coreSpots = (model.layout.disks ?? []).map((disk, index) => ({
           x: disk.x, z: disk.z, scale: disk.r, phase: index * 0.9,
         }))
-        if (coreSpots.length === 0) coreSpots.push({ x: 0, z: 0, scale: GALAXY_R1, phase: 0 })
+        if (coreSpots.length === 0) {
+          if (skin === 'neural' && (model.layout.clouds?.length ?? 0) > 0) {
+            const palette = SKIN_PALETTES[skin] ?? GRAPH_PALETTE
+            model.layout.clouds.forEach((cloud, index) => {
+              coreSpots.push({
+                x: cloud.x, z: cloud.z, scale: cloud.r * 0.74,
+                phase: index * 0.9,
+                color: colorOfDomain(cloud.domain, model.graph.clusters ?? [], palette),
+              })
+            })
+          } else if (skin === 'infinity') {
+            coreSpots.push({ x: 0, y: 0, z: 0, scale: INFINITY_A * 0.62, phase: 0, color: '#dfeaff' })
+          } else {
+            coreSpots.push({ x: 0, z: 0, scale: GALAXY_R1, phase: 0 })
+          }
+        }
         const coreWake = litOf(0.2)
         ctx.globalCompositeOperation = 'lighter'
         for (const spot of coreSpots) {
-          const center = project(spot.x, 0, spot.z)
+          const center = project(spot.x, spot.y ?? 0, spot.z)
           const breathe = 0.5 + 0.5 * Math.sin(pulsePhase + spot.phase)
-          const coreSize = spot.scale * center.k * 1.9 * (0.9 + breathe * 0.16)
-          // 双盘时两个核会有一部分重叠，lighter 叠加容易过曝 → 单核 alpha 压到 0.07~0.14
-          ctx.globalAlpha = (0.07 + breathe * 0.07) * coreWake
+          // 神经的核是"荧光团的心"，要比银河的核更散更大；无限的核是过曝的恒星，略大
+          const sizeScale = skin === 'neural' ? 2.6 : skin === 'infinity' ? 2.1 : 1.9
+          const coreSize = spot.scale * center.k * sizeScale * (0.9 + breathe * 0.16)
+          // 双盘时两个核会有一部分重叠，lighter 叠加容易过曝 → 单核 alpha 压得很低
+          const baseAlpha = skin === 'neural' ? 0.045 : skin === 'infinity' ? 0.09 : 0.07
+          const pulseAlpha = skin === 'infinity' ? 0.1 : 0.07
+          ctx.globalAlpha = (baseAlpha + breathe * pulseAlpha) * coreWake
+          const coreImage = coreSprite(spot.color)
           ctx.drawImage(coreImage, center.x - coreSize / 2, center.y - coreSize / 2, coreSize, coreSize)
         }
         ctx.globalAlpha = 1
 
-        // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆
-        const dust = galaxyDust(3800)
-        ctx.globalCompositeOperation = 'lighter'
-        for (const mote of dust) {
-          const projected = project(mote.x, mote.y, mote.z)
-          // 景深：越远越糊。远处的星不画硬点，而是放大成一颗低 alpha 的光斑，
-          // 近处才是清楚的实心小点——这是"镜头感"里最有效的一步。
-          // 用 z/dist 而不是透视系数 k：k 里含画布尺寸的 unit，小画布上会把整盘误判成"远"。
-          const blur = clamp01((projected.z / camDist - 0.14) / 0.5)
-          // 星尘是 fillRect 画的实心小方块，不能像节点那样放大成光斑——放大会露出方角，
-          // 所以这里只让它"变大一点点 + 明显变淡"，糊的感觉交给 alpha 做
-          const size = Math.max(0.4, mote.size * projected.k * 1.7 * (1 + blur * 0.8))
-          ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15) * (1 - blur * 0.5) * litOf(mote.seed)
-          ctx.fillStyle = mote.tone
-          ctx.fillRect(projected.x, projected.y, size, size)
+        // 星尘：铺底噪。极小的点，不参与拾取，也不连任何记忆。
+        // 无限皮肤改成沿双纽线撒（环上密、环外疏）；神经皮肤不撒——参考图里只有荧光团。
+        // 双盘时的无限不画星尘：两张盘各自缩放，一份全局星尘无法同时贴合两张盘。
+        const dualDisks = (model.layout.disks ?? []).length > 0
+        const dust = skin === 'neural'
+          ? null
+          : skin === 'infinity'
+            ? (dualDisks ? null : infinityDust(2600))
+            : galaxyDust(3800)
+        if (dust !== null) {
+          ctx.globalCompositeOperation = 'lighter'
+          // 无限的星尘与节点是同一支笔：都用 t0 + 进度求位置，才会一起沿 8 字流动。
+          // 银河的星尘是固定底噪，不参与流动。
+          const flowProgress = skin === 'infinity' ? infinityFlowRef.current : 0
+          for (const mote of dust) {
+            let mx = mote.x
+            let my = mote.y
+            let mz = mote.z
+            if (skin === 'infinity') {
+              const mt = mote.t + flowProgress
+              const point = infinityPoint(mt)
+              const normal = infinityNormal(mt)
+              mx = point.x + normal.x * mote.offset
+              my = point.y + normal.y * mote.offset + INFINITY_SEP * Math.sin(mt)
+              mz = INFINITY_DEPTH * Math.sin(mt) + mote.z
+            }
+            const projected = project(mx, my, mz)
+            // 景深：越远越糊。远处的星不画硬点，而是放大成一颗低 alpha 的光斑，
+            // 近处才是清楚的实心小点——这是"镜头感"里最有效的一步。
+            // 用 z/dist 而不是透视系数 k：k 里含画布尺寸的 unit，小画布上会把整盘误判成"远"。
+            const blur = clamp01((projected.z / camDist - 0.14) / 0.5)
+            // 星尘是 fillRect 画的实心小方块，不能像节点那样放大成光斑——放大会露出方角，
+            // 所以这里只让它"变大一点点 + 明显变淡"，糊的感觉交给 alpha 做
+            const size = Math.max(0.4, mote.size * projected.k * 1.7 * (1 + blur * 0.8))
+            ctx.globalAlpha = mote.alpha * Math.min(1, projected.k * 1.15) * (1 - blur * 0.5) * litOf(mote.seed)
+            ctx.fillStyle = mote.tone
+            ctx.fillRect(projected.x, projected.y, size, size)
+          }
         }
 
         const graph = model.graph
         const now = Date.now()
+        // 旋转：两种皮肤各有自己的轴，统一按 spin 里存的角度算。
+        //  · 无限：曲线上的节点沿 8 字流动（t0 + 进度），孤点绕中心慢转；
+        //  · 神经：绕 Y 轴（每团荧光自转），相位按 domain 错开。
+        // cos/sin 按中心对象缓存：几千个节点也只要"簇数"次三角函数。
+        const flow = model.layout.flow ?? null
+        const flowProgress = infinityFlowRef.current
+        const spinMap = model.layout.spin ?? null
+        const neuralSpin = neuralSpinRef.current
+        const neuralOrbit = neuralOrbitRef.current
+        const spinTrig = new Map()
         const points = []
         for (const node of graph.nodes) {
           const world = model.layout.positions.get(node.id)
           if (world === undefined) continue
-          const projected = project(world.x, world.y, world.z)
+          let wx = world.x
+          let wy = world.y
+          let wz = world.z
+          // 曲线上的节点：位置完全由曲线参数决定，不再看 positions 里的静态坐标
+          const onCurve = flow === null ? undefined : flow.get(node.id)
+          if (onCurve !== undefined) {
+            const t = onCurve.t + flowProgress
+            const point = infinityPoint(t)
+            const normal = infinityNormal(t)
+            wx = point.x + normal.x * onCurve.offset
+            wy = point.y + normal.y * onCurve.offset + INFINITY_SEP * Math.sin(t)
+            // 深度跟着 t 走：两瓣一前一后，中心交叉处拉开层次
+            wz = INFINITY_DEPTH * Math.sin(t) + onCurve.zJitter
+          } else if (spinMap !== null) {
+            const entry = spinMap.get(node.id)
+            if (entry !== undefined) {
+              let trig = spinTrig.get(entry)
+              if (trig === undefined) {
+                const angle = entry.phase + (entry.plane === 'xy' ? flowProgress : neuralSpin)
+                trig = { c: Math.cos(angle), s: Math.sin(angle) }
+                spinTrig.set(entry, trig)
+              }
+              if (entry.plane === 'xy') {
+                // 绕 Z 轴：只动 x / y，z（厚度）不参与
+                const lx = world.x - entry.cx
+                const ly = world.y - entry.cy
+                wx = entry.cx + lx * trig.c - ly * trig.s
+                wy = entry.cy + lx * trig.s + ly * trig.c
+              } else {
+                // 先沿环公转：簇心从 ring.t0 走到 ring.t0 + 相位
+                let cx = entry.cx
+                let cz = entry.cz
+                if (entry.ring !== undefined) {
+                  const rt = entry.ring.t0 + neuralOrbit
+                  const rx0 = NEURAL_RING_A * Math.cos(rt) * entry.ring.shrink
+                  const rz0 = NEURAL_RING_B * Math.sin(rt) * entry.ring.shrink
+                  cx = rx0 * entry.ring.c - rz0 * entry.ring.s
+                  cz = rx0 * entry.ring.s + rz0 * entry.ring.c
+                }
+                // 再叠簇内自转
+                const lx = world.x - entry.cx
+                const lz = world.z - entry.cz
+                wx = cx + lx * trig.c - lz * trig.s
+                wz = cz + lx * trig.s + lz * trig.c
+              }
+            }
+          }
+          const projected = project(wx, wy, wz)
           points.push({
             node,
             world,
@@ -2399,25 +3248,110 @@ window.__ModuleLoader__.load({
           seedOf.set(item.node.id, item.seed)
         }
 
-        // 旋臂薄雾：跟着相机转，所以每帧重画（只有两条曲线，很便宜）
+        // 结构薄雾：跟着相机转，所以每帧重画。
+        //  · 银河：三条旋臂的雾带
+        //  · 无限：双纽线本身画成一条发光的绳，星点浮在它上面
+        //  · 神经：每团荧光一圈很淡的云气
         ctx.globalCompositeOperation = 'lighter'
         ctx.lineCap = 'round'
-        // 雾带只求隐约可见：这里是 lighter 叠加，两层会累加，过亮会盖过星点
-        for (const pass of [{ color: 'rgba(120,165,255,1)', width: 66, alpha: 0.02 }, { color: 'rgba(255,170,205,1)', width: 28, alpha: 0.011 }]) {
-          ctx.globalAlpha = pass.alpha
-          ctx.strokeStyle = pass.color
-          ctx.lineWidth = pass.width * unit
-          for (let arm = 0; arm < GALAXY_ARMS; arm += 1) {
-            ctx.beginPath()
-            for (let i = 0; i <= 64; i += 1) {
-              // 与布局共用 galaxyArmAngle：雾带和节点才会贴在同一条曲线上
-              const rr = GALAXY_R0 * 0.55 + (i / 64) * (GALAXY_R1 + 70 - GALAXY_R0 * 0.55)
-              const theta = galaxyArmAngle(arm, rr)
-              const projected = project(Math.cos(theta) * rr, 0, Math.sin(theta) * rr)
-              if (i === 0) ctx.moveTo(projected.x, projected.y)
-              else ctx.lineTo(projected.x, projected.y)
+        if (skin === 'infinity') {
+          // 双盘的无限不画这条绳：两份图案各自缩放，一条全局曲线贴不上，宁可不画
+          if (!dualDisks) {
+            // 轨迹本身是静止的：动的是星点（笔尖），不是纸
+            for (const pass of [
+              { color: 'rgba(150,190,255,1)', width: 54, alpha: 0.035 },
+              { color: 'rgba(238,246,255,1)', width: 9, alpha: 0.05 },
+            ]) {
+              ctx.globalAlpha = pass.alpha
+              ctx.strokeStyle = pass.color
+              // 平面模式下线宽跟着 zoom 走，特写时才不会变细成丝
+              ctx.lineWidth = pass.width * unit
+              ctx.beginPath()
+              for (let i = 0; i <= 180; i += 1) {
+                const t = (i / 180) * Math.PI * 2
+                const point = infinityPoint(t)
+                // 绳也走同样的深度：两瓣一前一后，交叉处才看得出谁在上面
+                const projected = project(point.x, point.y + INFINITY_SEP * Math.sin(t), INFINITY_DEPTH * Math.sin(t))
+                if (i === 0) ctx.moveTo(projected.x, projected.y)
+                else ctx.lineTo(projected.x, projected.y)
+              }
+              ctx.closePath()
+              ctx.stroke()
             }
+          }
+        } else if (skin === 'neural') {
+          // 两条交叉的神经纤维环：一个水平、一个绕 X 轴倾斜约 60°，
+          // 套在人物周围与星团共存（参考图里就是这种「环 + 团」的层次）。
+          // 环是纯装饰，不承载数据，也不参与拾取。
+          // 两条椭圆的交叉星环：由**稠密的星点**串成，线条只留一层几乎看不见的底。
+          // 两个椭圆同心、倾角相反，所以在中心附近交叉；星团也贴着这两条线分布。
+          const rings = [
+            { rot: NEURAL_RING_TILT, color: 'rgba(150,205,255,1)', lineAlpha: 0.012 },
+            { rot: -NEURAL_RING_TILT, color: 'rgba(150,255,225,1)', lineAlpha: 0.01 },
+          ]
+          rings.forEach((ring, ringIndex) => {
+            const rc = Math.cos(ring.rot)
+            const rs = Math.sin(ring.rot)
+            // 底色细线（几乎只作结构提示）
+            ctx.globalAlpha = ring.lineAlpha
+            ctx.strokeStyle = ring.color
+            ctx.lineWidth = Math.max(0.8, 1.1 * unit)
+            ctx.beginPath()
+            for (let i = 0; i <= 120; i += 1) {
+              const t = (i / 120) * Math.PI * 2
+              const x0 = NEURAL_RING_A * Math.cos(t)
+              const z0 = NEURAL_RING_B * Math.sin(t)
+              const point = project(x0 * rc - z0 * rs, 0, x0 * rs + z0 * rc)
+              if (i === 0) ctx.moveTo(point.x, point.y)
+              else ctx.lineTo(point.x, point.y)
+            }
+            ctx.closePath()
             ctx.stroke()
+
+            // 星点本身：每环 900 颗，**随机铺开**而不是沿参数等距排队——
+            // 等距会排成一条线，随机 + 径向/纵向散开才像一团星海绕着椭圆分布
+            for (let i = 0; i < 900; i += 1) {
+              const t = hashUnit(`nrt-${ringIndex}-${i}`) * Math.PI * 2
+              const thin = 0.72 + Math.pow(hashUnit(`nrw-${ringIndex}-${i}`), 1.4) * 0.62
+              const x0 = NEURAL_RING_A * Math.cos(t) * thin
+              const z0 = NEURAL_RING_B * Math.sin(t) * thin
+              const y0 = (hashUnit(`nry-${ringIndex}-${i}`) - 0.5) * 90
+              const point = project(x0 * rc - z0 * rs, y0, x0 * rs + z0 * rc)
+              const size = 0.6 + hashUnit(`nrs-${ringIndex}-${i}`) * 1.5
+              ctx.globalAlpha = 0.12 + hashUnit(`nra-${ringIndex}-${i}`) * 0.4
+              ctx.fillStyle = hashUnit(`nrc-${ringIndex}-${i}`) > 0.82 ? 'rgba(255,236,214,1)' : 'rgba(208,232,255,1)'
+              ctx.fillRect(point.x, point.y, size, size)
+            }
+          })
+
+          // 云团气：每簇一盏大而淡的径向光，颜色跟簇色走
+          const palette = SKIN_PALETTES[skin] ?? GRAPH_PALETTE
+          const clouds = model.layout.clouds ?? []
+          for (const cloud of clouds) {
+            const center = project(cloud.x, 0, cloud.z)
+            const size = cloud.r * center.k * 2.4
+            ctx.globalAlpha = 0.05
+            ctx.drawImage(glowSprite(colorOfDomain(cloud.domain, model.graph.clusters ?? [], palette)),
+              center.x - size / 2, center.y - size / 2, size, size)
+          }
+        } else {
+          // 雾带只求隐约可见：这里是 lighter 叠加，两层会累加，过亮会盖过星点
+          for (const pass of [{ color: 'rgba(120,165,255,1)', width: 66, alpha: 0.02 }, { color: 'rgba(255,170,205,1)', width: 28, alpha: 0.011 }]) {
+            ctx.globalAlpha = pass.alpha
+            ctx.strokeStyle = pass.color
+            ctx.lineWidth = pass.width * unit
+            for (let arm = 0; arm < GALAXY_ARMS; arm += 1) {
+              ctx.beginPath()
+              for (let i = 0; i <= 64; i += 1) {
+                // 与布局共用 galaxyArmAngle：雾带和节点才会贴在同一条曲线上
+                const rr = GALAXY_R0 * 0.55 + (i / 64) * (GALAXY_R1 + 70 - GALAXY_R0 * 0.55)
+                const theta = galaxyArmAngle(arm, rr)
+                const projected = project(Math.cos(theta) * rr, 0, Math.sin(theta) * rr)
+                if (i === 0) ctx.moveTo(projected.x, projected.y)
+                else ctx.lineTo(projected.x, projected.y)
+              }
+              ctx.stroke()
+            }
           }
         }
 
@@ -2436,14 +3370,16 @@ window.__ModuleLoader__.load({
           const span = Math.hypot(a.x - b.x, a.y - b.y)
           // 跨臂的长边全局不画：601 条叠起来就是一层网。鼠标悬停某个节点时
           // 才把它的全部边（含长边）亮出来，结构信息不丢，画面先干净。
-          if (!active && span > 170) continue
+          // 无限 / 神经两版更克制：参考图里几乎没有连线，静息状态只留极淡的短边。
+          if (!active && span > (skin === 'galaxy' ? 170 : 120)) continue
           const near = Math.max(0.2, Math.min(1, 1 - span / 220))
           const dimEdge = dimTeam && scopeOf.get(edge.source) === 'team' && scopeOf.get(edge.target) === 'team'
           // 边要等两端都亮起来才出现：一条连着还没亮的星的线，看着像凭空画上去的
           const lit = introPlaying
             ? Math.min(litOf(seedOf.get(edge.source) ?? 0), litOf(seedOf.get(edge.target) ?? 0))
             : 1
-          ctx.globalAlpha = (active ? 0.62 : 0.01 + edge.weight * 0.035) * fog * (active ? 1 : near) * (dimEdge && !active ? 0.25 : 1) * lit
+          const restAlpha = skin === 'galaxy' ? 0.01 + edge.weight * 0.035 : (0.006 + edge.weight * 0.02) * 0.7
+          ctx.globalAlpha = (active ? 0.62 : restAlpha) * fog * (active ? 1 : near) * (dimEdge && !active ? 0.25 : 1) * lit
           ctx.strokeStyle = active ? 'rgba(190,215,255,1)' : 'rgba(96,130,190,1)'
           ctx.lineWidth = (active ? 1.7 : 0.45 + edge.weight * 0.45) * Math.min(1.6, (a.k + b.k) * 1.4)
           ctx.beginPath()
@@ -2477,6 +3413,8 @@ window.__ModuleLoader__.load({
         const alphaScale = nodeCount <= GALAXY_LOD_BRIGHT
           ? 1
           : Math.max(0.18, Math.min(1, Math.sqrt(GALAXY_LOD_BRIGHT / nodeCount)))
+        // 节点画法的皮肤参数：半径曲线 / 光晕倍数 / 描边，三版共用同一段绘制流程
+        const nodeStyle = SKIN_NODE_STYLE[skin] ?? SKIN_NODE_STYLE.galaxy
         for (const item of points) {
           const node = item.node
           const screen = item.screen
@@ -2490,8 +3428,8 @@ window.__ModuleLoader__.load({
           const sizeJitter = 0.8 + hashUnit(node.id + '#sz') * 0.5
           // 景深：远处的星画小一圈，把"体量"让给放大的柔光，近处才是一颗硬点
           const blur = clamp01((screen.z / camDist - 0.14) / 0.5)
-          const radius = (1.35 + Math.pow(Math.min(8, node.degree), 0.7) * 0.95) * sizeJitter * depth
-            * (isHover || isFocus ? 1.3 : 1) * (1 - blur * 0.42)
+          const radius = (nodeStyle.base + Math.pow(Math.min(8, node.degree), nodeStyle.pow) * nodeStyle.mul) * sizeJitter * depth
+            * (isHover || isFocus ? 1.3 : 1) * (1 - blur * nodeStyle.blur)
 
           // ── L2 星点：不画光晕、不进拾取、不出标签，只用 fillRect 点一下 ──
           // 悬停/聚焦的节点一律走完整路径，所以可交互的目标永远是有光晕的那颗，
@@ -2533,10 +3471,10 @@ window.__ModuleLoader__.load({
           // 光晕用预渲染的径向渐变贴图：实心圆即使 alpha 很低，在暗背景上也能看到硬边，
           // 会变成一颗颗"圆盘"。贴图边缘是真渐变到 0，叠多少层都不会有轮廓。
           const sprite = glowSprite(item.color)
-          const glowSize = radius * (isHover || isFocus ? 9.5 : node.degree >= 8 ? 7 : 5.2)
-            * (1 + blur * 2.4) * (1 + flare * 1.8)
+          const glowSize = radius * (isHover || isFocus ? nodeStyle.glowHover : node.degree >= 8 ? nodeStyle.glowHub : nodeStyle.glow)
+            * (1 + blur * 2.4) * (1 + flare * nodeStyle.flare)
           // 远处那颗的柔光更淡更散：光斑本来就该比硬点暗，不然远星反而更抢眼
-          ctx.globalAlpha = Math.min(1, alpha * (isHover || isFocus ? 1.05 : 0.72) * (1 - blur * 0.3))
+          ctx.globalAlpha = Math.min(1, alpha * (isHover || isFocus ? 1.05 : nodeStyle.glowAlpha) * (1 - blur * 0.3))
           ctx.drawImage(sprite, screen.x - glowSize / 2, screen.y - glowSize / 2, glowSize, glowSize)
 
           ctx.globalAlpha = alpha
@@ -2546,7 +3484,8 @@ window.__ModuleLoader__.load({
           ctx.fill()
 
           // 团队记忆一圈白描边（个人 = 实心），两库不再同图混画但各自仍要能认
-          if (node.scope === 'team') {
+          // 神经皮肤不描边：参考图里荧光团之间没有硬轮廓
+          if (nodeStyle.stroke && node.scope === 'team') {
             ctx.globalAlpha = Math.min(1, alpha + 0.15)
             ctx.strokeStyle = 'rgba(235,245,255,.7)'
             ctx.lineWidth = Math.min(1.4, radius * 0.16)
@@ -2579,14 +3518,17 @@ window.__ModuleLoader__.load({
 
         // 暗角：四周压暗，视线收在中心。
         // 放在标签之前——标签是要读的，不能被一起压暗。
+        // 无限 / 神经两版的边在背景里已经压过一轮，这里只补一层淡的，
+        // 免得人物立绘被压成一块黑。
         ctx.globalCompositeOperation = 'source-over'
-        ctx.globalAlpha = 1
+        ctx.globalAlpha = skin === 'galaxy' ? 1 : 0.45
         let vignette = vignetteRef.current
         if (vignette === null || vignette.width !== width || vignette.height !== height) {
           vignette = buildVignette(width, height, dpr)
           vignetteRef.current = vignette
         }
         ctx.drawImage(vignette.canvas, 0, 0, width, height)
+        ctx.globalAlpha = 1
 
         // 标签：白字 + 深底衬，按分数取前 10 个并做碰撞剔除，否则会糊成一团
         ctx.globalCompositeOperation = 'source-over'
@@ -2644,21 +3586,51 @@ window.__ModuleLoader__.load({
         sceneRef.current = { hits, screen: screenOf }
       }
 
-      // 渲染循环：只有「自转开 + 页签可见」才持续跑，其余时候按需重画一帧
+      // 渲染循环：只有「自转开 + 页签可见」才持续跑，其余时候按需重画一帧。
+      // 例外是神经皮肤：背景视频在动，必须保持每帧重绘（这也是选它的代价）。
       React.useEffect(() => {
         const tick = () => {
           rafRef.current = null
           // 不可见就停下、不再调度；重新可见时由 IntersectionObserver 把循环拉起来
-          if (!visibleRef.current) return
-          if (orbitRef.current && dragRef.current === null) camRef.current.yaw += GALAXY_ORBIT_SPEED
+          if (!visibleRef.current) {
+            // 后台不播视频：解码白烧电
+            if (SKIN_ASSET.video !== null && !SKIN_ASSET.video.paused) SKIN_ASSET.video.pause()
+            return
+          }
+          // 背景视频跟着「当前皮肤」走：神经版才播，切走立刻暂停
+          const video = SKIN_ASSET.video
+          if (video !== null) {
+            if (skin === 'neural') {
+              if (video.paused) video.play().catch(() => {})
+            } else if (!video.paused) {
+              video.pause()
+            }
+          }
+          // "自转"在三种皮肤下转的东西不一样：
+          // 银河转相机、无限让星点沿 8 字流动、神经让每团荧光自转。
+          // 一律按真实时间推进（dt），刷新率高低不影响观感速度。
+          const nowMs = performance.now()
+          const dt = Math.min(0.05, Math.max(0, (nowMs - lastFrameRef.current) / 1000))
+          lastFrameRef.current = nowMs
+          if (orbitRef.current && dragRef.current === null) {
+            if (skin === 'infinity') infinityFlowRef.current += 0.32 * dt
+            else if (skin === 'neural') {
+              neuralSpinRef.current += 0.15 * dt
+              neuralOrbitRef.current += 0.11 * dt
+            }
+            else camRef.current.yaw += GALAXY_ORBIT_SPEED
+          }
           drawRef.current()
           // 开场动画也要持续跑帧：自转关掉时它照样得把推镜和点亮画完
-          if (orbitRef.current || introRef.current.active) rafRef.current = window.requestAnimationFrame(tick)
+          const videoLive = skin === 'neural' && SKIN_ASSET.videoOk
+          if (orbitRef.current || introRef.current.active || videoLive) {
+            rafRef.current = window.requestAnimationFrame(tick)
+          }
         }
         loopRef.current = () => {
           if (rafRef.current === null && visibleRef.current) rafRef.current = window.requestAnimationFrame(tick)
         }
-        if (orbit) {
+        if (orbit || skin === 'neural' || skin === 'infinity') {
           loopRef.current()
         } else {
           drawRef.current()
@@ -2670,7 +3642,7 @@ window.__ModuleLoader__.load({
             rafRef.current = null
           }
         }
-      }, [orbit])
+      }, [orbit, skin])
 
       // 开场：数据第一次到手时启动。
       // 模块级的 galaxyIntroSeen 保证整个页面只播一次——切走页签会卸载组件，
@@ -2697,10 +3669,10 @@ window.__ModuleLoader__.load({
         drawRef.current()
       }, [model])
 
-      // 任何依赖变化（数据 / 尺寸 / 悬停 / 聚焦）都重画一帧；自转时循环会自己画
+      // 任何依赖变化（数据 / 尺寸 / 悬停 / 聚焦 / 皮肤）都重画一帧；自转时循环会自己画
       React.useEffect(() => {
         drawRef.current()
-      }, [model, size, hover, colorMap, focusId])
+      }, [model, size, hover, colorMap, focusId, skin])
 
       // 拖动旋转 / 滚轮推拉都挂在 window 上：鼠标划出画布时不该断
       React.useEffect(() => {
@@ -2714,6 +3686,7 @@ window.__ModuleLoader__.load({
           const dy = drag.pendingY - drag.lastY
           drag.lastX = drag.pendingX
           drag.lastY = drag.pendingY
+          // 三种皮肤统一：拖动 = 3D 环绕（无限皮肤的星环在固定背景前转）
           cam.yaw += dx * 0.006
           cam.pitch = Math.max(-1.42, Math.min(0.42, cam.pitch + dy * 0.005))
           drawRef.current()
@@ -2748,8 +3721,24 @@ window.__ModuleLoader__.load({
       const resetCamera = () => {
         skipIntro()
         const dual = (model?.layout?.disks?.length ?? 0) > 0
-        camRef.current = { ...GALAXY_CAM, dist: focusId === null ? GALAXY_CAM.dist * (dual ? 1.7 : 1) : 880 }
+        const preset = SKIN_CAM[skin] ?? GALAXY_CAM
+        camRef.current = { ...preset, dist: focusId === null ? preset.dist * (dual ? 1.7 : 1) : 880 }
+        // 复位也要把滚轮缩放一起还原（无限版的大小在 plane.zoom 上，不在相机距离里）
+        if (skin === 'infinity') planeRef.current.zoom = 1
         drawRef.current()
+      }
+
+      // 皮肤切换：走同一个入口，相机复位到该皮肤的默认机位
+      const switchSkin = (next) => {
+        if (next === skin) return
+        skinTouchedRef.current = true
+        skipIntro()
+        // 换皮肤时平面机位重置，下一帧按新尺寸重新摆
+        planeRef.current = { offsetX: 0, offsetY: 0, baseScale: 0, zoom: 1 }
+        setSkin(next)
+        setHover(null)
+        const preset = SKIN_CAM[next] ?? GALAXY_CAM
+        camRef.current = { ...preset, dist: focusId === null ? preset.dist : 880 }
       }
 
       // 团队 / 个人切换（默认团队）。放在工具栏首位，加载态也保留，切换时控件不会闪没
@@ -2765,7 +3754,8 @@ window.__ModuleLoader__.load({
               setScope(value)
               setFocusId(null)
               setHover(null)
-              camRef.current = { ...GALAXY_CAM }
+              const preset = SKIN_CAM[skin] ?? GALAXY_CAM
+              camRef.current = { ...preset }
             },
           }, label),
         ),
@@ -2867,6 +3857,28 @@ window.__ModuleLoader__.load({
         ),
         // 双透镜控制条：来源=调暗、类型=隐藏；有过滤器生效时给一个圆点提示
         h('div', { style: { ...S.toolbar, gap: 6, flexWrap: 'wrap', borderTop: 'none', paddingTop: 0 } },
+          // 星图风格（2026-11-18）：纯观感，切它不动任何数据与接口
+          h('span', { style: { ...S.muted, fontSize: 12 } }, t('graphSkin')),
+          h('div', { style: S.seg },
+            [['galaxy', t('graphSkinGalaxy')], ['infinity', t('graphSkinInfinity')], ['neural', t('graphSkinNeural')]].map(([value, label]) =>
+              h('button', {
+                key: value,
+                type: 'button',
+                style: S.segBtn(skin === value),
+                onClick: () => switchSkin(value),
+              }, label),
+            ),
+          ),
+          h('button', {
+            type: 'button',
+            style: { ...S.btn, padding: '2px 8px', fontSize: 12 },
+            title: t('graphSkinDefaultHint'),
+            onClick: () => {
+              setDefaultHint(writeDefaultSkin(skin))
+              window.setTimeout(() => setDefaultHint(false), 1600)
+            },
+          }, defaultHint ? `✓ ${t('graphSkinIsDefault')}` : t('graphSkinDefault')),
+          h('span', { style: { width: 1, height: 14, background: 'var(--dsw-alias-border-l2)', flex: 'none' } }),
           h('span', { style: { ...S.muted, fontSize: 12 } }, t('graphHideTypes')),
           ...typeCounts.map(([type, count]) =>
             h('button', {
@@ -2905,6 +3917,9 @@ window.__ModuleLoader__.load({
                   },
                 }, t('graphResetFilter')))
             : null,
+          assetNote === ''
+            ? null
+            : h('span', { style: { fontSize: 12, color: '#ff9b9b' }, title: assetNote }, assetNote),
         ),
         h('div', {
           ref: wrapRef,
@@ -2950,9 +3965,15 @@ window.__ModuleLoader__.load({
           onWheel: (event) => {
             event.preventDefault()
             skipIntro()
-            const cam = camRef.current
-            const next = cam.dist * (event.deltaY > 0 ? 1.12 : 0.89)
-            cam.dist = Math.max(620, Math.min(5200, next))
+            if (skin === 'infinity' && focusId === null) {
+              // 正交投影没有相机距离，缩放直接乘在星环比例上
+              const plane = planeRef.current
+              plane.zoom = Math.max(0.2, Math.min(6, plane.zoom * (event.deltaY > 0 ? 1.12 : 0.89)))
+            } else {
+              const cam = camRef.current
+              const next = cam.dist * (event.deltaY > 0 ? 1.12 : 0.89)
+              cam.dist = Math.max(420, Math.min(5200, next))
+            }
             if (!orbit) drawRef.current()
           },
         },
