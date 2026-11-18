@@ -36,7 +36,7 @@ import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
 import { createLocalModelWriter, createReranker, resolveLocalModelsLogPath } from './local-models.ts'
 import { createLocalChat } from './local-chat.ts'
-import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, type DroppedItem, type InjectRecord } from './recall-inject.ts'
+import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, shouldSkipRepeatInjection, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
 import { normalizeContent } from './fragment.ts'
@@ -1011,6 +1011,15 @@ export function apply(ctx: Context, config: ConfigType): void {
       // 子代理没有 inbox 消息 → 查不到 → 不注入（避免把父会话的记忆带进子任务）。
       const lastMessage = new Map<string, string>()
       /**
+       * 2026-11-18：本轮已 assemble 了几次（按 agent 存）。
+       *
+       * `system-prompt/assemble` 每个 model step 触发一次，query 却不变 → 同一段注入文本
+       * 反复进 prompt。这里只做**计数**：无论 `turnOnce` 开不开都记进日志，用真实数据
+       * 把「同轮重复」与「不同轮复用」分开（两者现在都表现为 cache_hit）。
+       * 新用户消息到达时归零（见 remember 里），所以 seq=1 就是该轮首个 step。
+       */
+      const assembleSeq = new Map<string, number>()
+      /**
        * 阶段 38：同一 query 的注入结果复用（会话级）。
        *
        * 为什么需要：一个 turn 有多个 step，每步都重新组装 prompt；实测单条 query
@@ -1053,7 +1062,10 @@ export function apply(ctx: Context, config: ConfigType): void {
           const text = extractUserText(message)
           const trimmed = text.trim()
           if (trimmed === '') return
-          lastMessage.set(String(agent?.id ?? 'default'), trimmed.slice(0, 2_000))
+          const agentKey = String(agent?.id ?? 'default')
+          lastMessage.set(agentKey, trimmed.slice(0, 2_000))
+          // 新用户消息 = 新一轮：assemble 计数归零，下一次 assemble 就是该轮的 seq=1
+          assembleSeq.set(agentKey, 0)
 
           // 阶段 20：预热。即发即忘、超时放弃——它只抢在 assemble 之前，绝不拖住消息主流程。
           if (!inject.prewarm.enabled) return
@@ -1092,7 +1104,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         }
       }
 
-      const recall = async (query: string, agentId: string): Promise<string> => {
+      const recall = async (query: string, agentId: string, seq: number): Promise<string> => {
         const startedAt = Date.now()
         const cacheKey = normalizeContent(query)
         // get 内部会刷 LRU 并丢弃过期项；ttlMs<=0 时直接返回 undefined（缓存关闭）
@@ -1101,7 +1113,7 @@ export function apply(ctx: Context, config: ConfigType): void {
         // 注意这要在 writeRecord 之前算——它记录的是「这次 assemble 有没有等 Ollama」。
         const embedCached = embedCache.get(prewarmKey(query)) !== undefined
         const writeRecord = (
-          record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms' | 'embedCached'>,
+          record: Omit<InjectRecord, 'ts' | 'agent' | 'query' | 'ms' | 'embedCached' | 'assembleSeq'>,
         ): void => {
           injectWriter.write({
             ts: new Date().toISOString(),
@@ -1109,8 +1121,25 @@ export function apply(ctx: Context, config: ConfigType): void {
             query: query.slice(0, 200),
             ms: Date.now() - startedAt,
             embedCached,
+            // 无论开关如何都记：没有它就没法把「同轮重复」与「不同轮复用」分开统计
+            assembleSeq: seq,
             ...record,
           })
+        }
+        // 2026-11-18：同轮重复注入。turnOnce 打开时只有本轮首个 step 真注入，
+        // 后续 step 落一条 skipped_same_turn 就返回——**不写缓存**，因为下一次新轮
+        // 仍要从 ES 取最新结果（缓存键是 query，留着会让新轮拿到旧文本）。
+        if (shouldSkipRepeatInjection(seq, inject.turnOnce)) {
+          writeRecord({
+            outcome: 'skipped_same_turn',
+            hits: 0,
+            items: [],
+            pinnedItems: [],
+            pinnedInjected: 0,
+            chars: 0,
+            note: `本轮第 ${seq} 次 assemble：turnOnce 已开，跳过重复注入`,
+          })
+          return ''
         }
         // 命中缓存：连 pinned 段一起复用（10 分钟内 pinned 变更不生效，是这条缓存的已知取舍）。
         // 复用也要落一条记录——否则面板的「注入尝试」会莫名变少，也看不出是缓存。
@@ -1289,7 +1318,10 @@ export function apply(ctx: Context, config: ConfigType): void {
           if (query === undefined) return assembly
 
           // 阶段 38：缓存下沉到 recall 内部（带命中日志与 LRU 上限），这里不再判断
-          const text = await recall(query, agentId)
+          // 2026-11-18：本轮第几次 assemble —— 新用户消息会把计数归零，所以 1 就是本轮首个 step
+          const seq = (assembleSeq.get(agentId) ?? 0) + 1
+          assembleSeq.set(agentId, seq)
+          const text = await recall(query, agentId, seq)
           if (text === '') return assembly
 
           return {

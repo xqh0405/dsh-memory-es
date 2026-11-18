@@ -237,6 +237,15 @@ export interface ConfigType {
      * 实测这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信。
      */
     shortCommandSkip: boolean
+    /**
+     * 同一轮只注入一次（2026-11-18）。
+     *
+     * `system-prompt/assemble` 每个 model step 触发一次，而 query 是「最近一条用户消息」，
+     * 同一轮内不变 → 同一段注入文本反复进 prompt（实测单个 query 最多 65 次、间隔中位 3 秒）。
+     * 打开后只在每轮首个 step 注入，后续 step 落盘 `skipped_same_turn` 并跳过。
+     * **默认关**：assemble 每 step 重建 prompt，跳过就等于后续 step 看不到这段记忆。
+     */
+    turnOnce: boolean
     sectionOrder: number
     cacheTtlMs: number
     /** top1 的向量相似度门槛；低于它不注入（note=ok 分不出闲聊与相关） */
@@ -688,6 +697,12 @@ export const Config: z<ConfigType> = z.object({
         + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
+    turnOnce: z.boolean().default(false)
+      .description('同一轮只注入一次：`system-prompt/assemble` 每个 step 触发，而 query 是最近一条用户消息，'
+        + '同一轮内不变 → 同一段文本被反复塞进 prompt（11-17~18 实测：88.7% 的注入字符是这种复用，'
+        + '单 query 最多 65 次、间隔中位 3 秒）。打开后只在每轮首个 step 注入，后续 step 记 `skipped_same_turn`。'
+        + '默认 false：assemble 每 step 重建 prompt，跳过等于后续 step 看不到这段记忆——'
+        + '省上下文换可见性，先灰度观察再决定。'),
     cacheTtlMs: z.number().step(1_000).min(0).default(600_000)
       .description('同一 query 的检索结果复用窗口（毫秒）。一个 turn 有多个 model step，'
         + '每步都重新组装 prompt；不复用会把同一个查询打 N 次，在共享 Ollama 上是浪费。'

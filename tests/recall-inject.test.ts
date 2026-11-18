@@ -11,7 +11,7 @@ import { describe, test } from 'node:test'
 
 import type { Projected } from '../src/fragment.ts'
 import { EsError } from '../src/es/http.ts'
-import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, pinnedSearchBody, resolveInjectPath } from '../src/recall-inject.ts'
+import { classifyInjectError, formatInjection, passesInjectGate, pickForInjection, pickForInjectionDetailed, pinnedSearchBody, resolveInjectPath, shouldSkipRepeatInjection } from '../src/recall-inject.ts'
 
 function hit(id: string, content: string, source: 'personal' | 'team' = 'personal'): Projected {
   return {
@@ -216,5 +216,24 @@ describe('阶段 36：常驻段的取数条件（非 pinned 不得进常驻段�
   test('size 就是候选池大小，必须明显大于 PINNED_MAX_ITEMS', () => {
     const body = pinnedSearchBody(64) as { size: number }
     assert.equal(body.size, 64)
+  })
+})
+
+describe('2026-11-18：同轮重复注入判定（turnOnce）', () => {
+  test('开关关着时永远不跳，seq 多大都照常注入', () => {
+    // 默认就是关 —— 这条钉住「升级不会悄悄改变注入行为」
+    for (const seq of [0, 1, 2, 65]) {
+      assert.equal(shouldSkipRepeatInjection(seq, false), false)
+    }
+  })
+
+  test('开关打开：本轮首个 step 注入，后续 step 跳过', () => {
+    assert.equal(shouldSkipRepeatInjection(1, true), false)
+    assert.equal(shouldSkipRepeatInjection(2, true), true)
+    assert.equal(shouldSkipRepeatInjection(65, true), true)
+  })
+
+  test('seq 还没初始化（0）时不能跳 —— 否则首轮就丢记忆', () => {
+    assert.equal(shouldSkipRepeatInjection(0, true), false)
   })
 })

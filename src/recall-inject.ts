@@ -370,7 +370,7 @@ export function composeInjection(input: ComposeInput): ComposeResult {
 }
 
 /** 可观测的一次注入尝试结果，供日志与测试断言 */
-export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'low_score' | 'timeout' | 'error' | 'disabled' | 'empty_query' | 'short_query'
+export type InjectOutcome = 'injected' | 'no_match' | 'low_confidence' | 'low_score' | 'timeout' | 'error' | 'disabled' | 'empty_query' | 'short_query' | 'skipped_same_turn'
 
 export interface InjectResult {
   outcome: InjectOutcome
@@ -437,6 +437,16 @@ export interface InjectRecord {
    * 验收预热收益就看它：`true` 说明 assemble 没等 Ollama。
    */
   embedCached?: boolean
+  /**
+   * 2026-11-18：本轮的**第几次** assemble（1 = 该轮首个 step）。
+   *
+   * 为什么需要：`system-prompt/assemble` 每个 model step 触发一次，而 query 是「最近一条
+   * 用户消息」——同一轮内它不变，于是同一段注入文本会被反复塞进 prompt。实测（11-17~18）
+   * 本机 500 次注入里有 470 次命中同一段缓存文本，单个 query 最多重复 65 次、间隔中位 3 秒。
+   * **只有记下 seq，才能把「同轮重复」与「不同轮复用」分开统计**——否则两者都表现为 `cache_hit`。
+   * 老记录没有本字段（面板按 1 处理 = 不参与去重统计）。
+   */
+  assembleSeq?: number
 }
 
 /**
@@ -510,4 +520,24 @@ export function passesInjectGate(input: InjectGateInput): boolean {
   if (input.degraded) return false
   if (input.vectorScore === undefined || !Number.isFinite(input.vectorScore)) return false
   return input.vectorScore >= input.minScore
+}
+
+/**
+ * 同一轮内的重复注入要不要跳过（2026-11-18）。
+ *
+ * 背景：`system-prompt/assemble` 每个 model step 触发一次，query 却是「最近一条用户消息」，
+ * 同一轮里它不变 → 同一段注入文本反复进 prompt。11-17~18 实测：本机 500 次注入里
+ * 470 次 `cache_hit`，总字符 519,227，其中 460,396（88.7%）是这种复用；
+ * 单个 query 最多重复 65 次、间隔中位 3 秒（即同一轮内每个 step 各一次）。
+ *
+ * **为什么默认关**：assemble 每 step 重建 system prompt，跳过就等于「后续 step 看不到这段记忆」。
+ * 省的是上下文，代价是可见性——所以做成开关，先在灰度容器观察，不在默认路径上改行为。
+ *
+ * @param assembleSeq 本轮第几次 assemble（1 = 该轮首个 step）
+ * @param turnOnce    开关；false 时永远不跳（只记录 seq 供统计）
+ */
+export function shouldSkipRepeatInjection(assembleSeq: number, turnOnce: boolean): boolean {
+  if (!turnOnce) return false
+  // seq <= 1 是本轮首次（或调用方还没准备好 seq），一律照常注入
+  return assembleSeq > 1
 }
