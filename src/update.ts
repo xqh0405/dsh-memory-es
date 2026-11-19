@@ -316,9 +316,15 @@ function releaseLock(path: string | null): void {
   }
 }
 
-async function fetchLatestRelease(
+/**
+ * 查仓库最新的 Release。
+ *
+ * 2026-11-19 起对外导出：面板要「有没有新版本」的红点，不能为了这个
+ * 再写一份 GitHub 调用逻辑（限流、tag 解析、user-agent 都得重复）。
+ */
+export async function fetchLatestRelease(
   repo: string,
-  fetchImpl: typeof fetch,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<{ version: string; assets: ReleaseAsset[] } | null> {
   const response = await fetchImpl(`https://api.github.com/repos/${repo}/releases/latest`, {
     headers: {

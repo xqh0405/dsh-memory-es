@@ -39,6 +39,7 @@ import { createLocalChat } from './local-chat.ts'
 import { classifyInjectError, composeInjection, isShortCommand, normalizePinnedHits, passesInjectGate, pinnedSearchBody, PINNED_FETCH_SIZE, RECALL_SECTION_NAME, resolveInjectPath, shouldSkipRepeatInjection, type DroppedItem, type InjectRecord } from './recall-inject.ts'
 import { readMood, writeMood } from './memory/mood.ts'
 import { isDue, readUpdateState, runUpdate, type UpdateDeps } from './update.ts'
+import { setUpdateDeps } from './update-runtime.ts'
 import { normalizeContent } from './fragment.ts'
 import { createInjectResultCache } from './inject-cache.ts'
 import type { Projected } from './fragment.ts'
@@ -790,6 +791,8 @@ export function apply(ctx: Context, config: ConfigType): void {
         }
       },
     }
+    // 面板的「有新版本」红点与手动更新要读这份 deps（同一进程、同一模块实例）
+    setUpdateDeps(updateDeps)
     // 同一进程内不并发跑两轮（5 分钟 tick 可能撞上上一轮还没结束）
     let updateRunning = false
     const updateTick = async (): Promise<void> => {
@@ -817,6 +820,8 @@ export function apply(ctx: Context, config: ConfigType): void {
       return () => {
         clearInterval(timer)
         clearTimeout(kick)
+        // 插件卸载后别再让面板拿着失效的 deps 去调 GitHub / 装包
+        setUpdateDeps(null)
       }
     }, 'dsh-memory-es.update-daily')
   }

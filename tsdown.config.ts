@@ -7,7 +7,11 @@
 import type { UserConfig } from 'tsdown'
 
 export default {
-  entry: { index: 'src/index.ts' },
+  // 两个入口：
+  //  · index   —— 插件本体
+  //  · update-runtime —— 面板要 import 同一份更新状态（模块级单例），
+  //    必须作为独立文件产出；内联进 index 后 panel/index.js 就 import 不到了
+  entry: { index: 'src/index.ts', update: 'src/update.ts', 'update-runtime': 'src/update-runtime.ts' },
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

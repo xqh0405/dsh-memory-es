@@ -117,6 +117,10 @@ window.__ModuleLoader__.load({
       graphSkinDefault: '设为默认',
       graphSkinDefaultHint: '下次打开星图默认用这一版（只记在这台浏览器里）',
       graphSkinIsDefault: '已设为默认',
+      updateDot: '有新版本',
+      updateStarted: '已开始更新，约一分钟重启',
+      updateRunning: '更新进行中…',
+      updateError: '更新启动失败',
       graphOrbit: '自转',
       graphOrbitHint: '开/关镜头自转；只在页签可见时转，切走就停',
       graphFocus: '聚焦',
@@ -497,6 +501,10 @@ window.__ModuleLoader__.load({
       graphSkinDefault: 'Set default',
       graphSkinDefaultHint: 'Use this style when the graph opens next time (stored in this browser only)',
       graphSkinIsDefault: 'Default set',
+      updateDot: 'Update available',
+      updateStarted: 'Updating, restarting in about a minute',
+      updateRunning: 'Updating…',
+      updateError: 'Could not start the update',
       graphOrbit: 'Orbit',
       graphOrbitHint: 'Toggle the slow camera orbit; it stops while the tab is hidden',
       graphFocus: 'Focus',
@@ -6373,6 +6381,8 @@ window.__ModuleLoader__.load({
       // 页签在主区滚动时粘顶：底色必须与画布同色，否则内容会从下面透上来。
       `[${WORKSPACE_ATTR}] [${TABS_ATTR}] { position: sticky; top: 0; z-index: 2; background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
       `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] [${TABS_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
+      // 有新版本的红点：一圈向外扩散的脉冲，安静但看得出来
+      '@keyframes memoryEsUpdatePulse { 0% { box-shadow: 0 0 0 0 rgba(255,86,86,.55); } 70% { box-shadow: 0 0 0 6px rgba(255,86,86,0); } 100% { box-shadow: 0 0 0 0 rgba(255,86,86,0); } }',
     ].join('\n')
 
     /**
@@ -6384,6 +6394,41 @@ window.__ModuleLoader__.load({
       // 工具条上的状态徽标：由 MemoryPanel 在 overview 拉回来后回报。
       // 不在这里自己再拉一次——overview 是重查询，重复发一遍只为了让标题栏显示两个字段不划算。
       const [status, setStatus] = React.useState(null)
+      // 自更新（2026-11-19）：有新版本就在版本号旁边点一颗红点，点一下手动更新。
+      // 10 分钟查一次；服务端还有 5 分钟缓存，十几个容器共用一个出口 IP 也不会把额度打光。
+      const [updateInfo, setUpdateInfo] = React.useState(null)
+      const [updateNotice, setUpdateNotice] = React.useState('')
+
+      React.useEffect(() => {
+        let alive = true
+        const check = () => {
+          apiGet('/update/check')
+            .then((value) => { if (alive) setUpdateInfo(value) })
+            .catch(() => { /* 查不到就当作没有更新，不打扰 */ })
+        }
+        check()
+        const timer = window.setInterval(check, 10 * 60_000)
+        return () => {
+          alive = false
+          window.clearInterval(timer)
+        }
+      }, [])
+
+      const startUpdate = () => {
+        if (updateInfo === null || updateInfo.running || !updateInfo.hasUpdate) return
+        apiPost('/update/run', {})
+          .then(() => {
+            setUpdateNotice(t('updateStarted'))
+            setUpdateInfo((prev) => (prev === null ? prev : { ...prev, running: true }))
+          })
+          .catch((error) => setUpdateNotice(`${t('updateError')}：${String(error.message ?? error)}`))
+      }
+
+      React.useEffect(() => {
+        if (updateNotice === '') return undefined
+        const timer = window.setTimeout(() => setUpdateNotice(''), 8000)
+        return () => window.clearTimeout(timer)
+      }, [updateNotice])
       return h('div', { style: S.workspace, [WORKSPACE_ATTR]: '' },
         h('div', { style: S.topbar },
           typeof close === 'function'
@@ -6400,6 +6445,29 @@ window.__ModuleLoader__.load({
                 status.reachable ? t('esOk') : t('esDown'))
             : null,
           status && status.version ? h('span', { style: S.topbarMeta }, `v${status.version}`) : null,
+          updateInfo !== null && updateInfo.enabled && (updateInfo.hasUpdate || updateInfo.running)
+            ? h('button', {
+                type: 'button',
+                title: updateInfo.running
+                  ? t('updateRunning')
+                  : `${t('updateDot')} v${updateInfo.latest}`,
+                onClick: startUpdate,
+                style: {
+                  appearance: 'none', border: 'none', background: 'transparent', padding: 0,
+                  marginLeft: 2, cursor: updateInfo.running ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', flex: 'none',
+                },
+              }, h('span', {
+                style: {
+                  width: 8, height: 8, borderRadius: 999,
+                  background: updateInfo.running ? '#ffb454' : '#ff5656',
+                  animation: updateInfo.running ? 'none' : 'memoryEsUpdatePulse 1.8s ease-out infinite',
+                },
+              }))
+            : null,
+          updateNotice === ''
+            ? null
+            : h('span', { style: { ...S.topbarMeta, color: '#3fb37f', flex: 'none' } }, updateNotice),
         ),
         h('div', { style: S.workspaceScroll },
           h('div', { style: S.workspaceContent },

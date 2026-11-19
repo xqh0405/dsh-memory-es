@@ -1882,6 +1882,98 @@ async function handleStickerImageGet(ctx, res, url) {
 }
 
 /**
+ * 自更新：面板上的「有新版本」红点与手动更新（2026-11-19）。
+ *
+ * 状态在 `lib/update-runtime.js` 里（index.ts 装配自更新时注册的同一份 deps），
+ * 这里只是把它读出来给浏览器。检查结果缓存 5 分钟：同一台宿主机上十几个容器
+ * 共用一个出口 IP，逐个查 npm/GitHub 会把未认证额度打光。
+ */
+let updateCheckCache = { at: 0, value: null }
+const UPDATE_CHECK_TTL_MS = 5 * 60_000
+
+/** 懒加载运行时模块：抓不到就当作「这台实例没开自更新」，面板不显示红点 */
+async function loadUpdateRuntime() {
+  try {
+    return await import('../lib/update-runtime.js')
+  } catch {
+    return null
+  }
+}
+
+/** 最新版本号。用 npm registry 而不是 GitHub API：限流宽松得多，响应也小。 */
+async function fetchLatestVersion() {
+  try {
+    const response = await fetch('https://registry.npmjs.org/dsh-memory-es/latest', {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!response.ok) return ''
+    const body = await response.json()
+    return typeof body.version === 'string' ? body.version : ''
+  } catch {
+    return ''
+  }
+}
+
+async function handleUpdateCheck(ctx, res) {
+  const runtime = await loadUpdateRuntime()
+  const deps = runtime !== null && typeof runtime.getUpdateDeps === 'function' ? runtime.getUpdateDeps() : null
+  if (deps === null) return json(res, 200, { ok: true, value: { enabled: false } })
+
+  const now = Date.now()
+  if (updateCheckCache.value !== null && now - updateCheckCache.at < UPDATE_CHECK_TTL_MS) {
+    return json(res, 200, { ok: true, value: updateCheckCache.value })
+  }
+
+  const { compareVersions, readUpdateState } = await import('../lib/update.js')
+  const state = readUpdateState(deps.stateDir)
+  const latest = await fetchLatestVersion()
+  const value = {
+    enabled: true,
+    current: deps.localVersion,
+    latest,
+    hasUpdate: latest !== '' && compareVersions(latest, deps.localVersion) > 0,
+    lastAction: state.lastAction ?? '',
+    lastResult: state.lastResult ?? '',
+    lastCheckAt: state.lastCheckAt ?? '',
+    running: typeof runtime.isUpdateRunning === 'function' ? runtime.isUpdateRunning() : false,
+  }
+  // 查不到最新版（离线/限流）时不写缓存，否则会把「没有更新」记住 5 分钟
+  if (latest !== '') updateCheckCache = { at: now, value }
+  return json(res, 200, { ok: true, value })
+}
+
+/**
+ * 手动触发一次更新。
+ *
+ * 立即返回 202，真正的安装在后台跑：runUpdate 成功后会延迟 60 秒退出进程，
+ * 由容器/服务管理器拉起新代码——这一点和每天 06:00 的自动更新完全一样。
+ */
+async function handleUpdateRun(ctx, res) {
+  const runtime = await loadUpdateRuntime()
+  const deps = runtime !== null && typeof runtime.getUpdateDeps === 'function' ? runtime.getUpdateDeps() : null
+  if (deps === null) return json(res, 503, { ok: false, error: '这台实例没有开启自更新（update.enabled=false）' })
+  if (typeof runtime.isUpdateRunning === 'function' && runtime.isUpdateRunning()) {
+    return json(res, 409, { ok: false, error: '已经有一轮更新在进行，稍等它结束' })
+  }
+  runtime.markUpdateRunning(true)
+  const { runUpdate } = await import('../lib/update.js')
+  void (async () => {
+    try {
+      const outcome = await runUpdate(deps)
+      console.error(`[memory-es] 手动更新：${outcome.action}（${outcome.reason}）`)
+    } catch (error) {
+      console.error(`[memory-es] 手动更新失败：${String(error?.message ?? error)}`)
+    } finally {
+      runtime.markUpdateRunning(false)
+      // 结果写回缓存前的旧值已无意义，清掉让面板下次重新查
+      updateCheckCache = { at: 0, value: null }
+    }
+  })()
+  return json(res, 202, { ok: true, value: { started: true } })
+}
+
+/**
  * 星图皮肤素材（2026-11-18）：背景立绘与背景视频。
  *
  * 这两份文件是**纯视觉资源**，只被星图的绘制层读取，不参与任何记忆的读写、检索与索引。
@@ -3923,6 +4015,7 @@ async function handle(ctx, req, res) {
   const path = url.pathname.startsWith(ROUTE) ? url.pathname.slice(ROUTE.length) || '/' : url.pathname
   try {
     const reviewMatch = /^\/review\/([^/]+)\/(approve|reject|withdraw|merge)$/.exec(path)
+    if (path === '/update/run' && req.method === 'POST') return await handleUpdateRun(ctx, res)
     if (path === '/maintenance/consolidate' && req.method === 'POST') return await handleConsolidate(ctx, res, req)
     if (path === '/maintenance/export' && req.method === 'POST') return await handleExport(ctx, res, req)
     // 阶段 29：文档归档 / 恢复（只改 status 位，不删数据）
@@ -3965,6 +4058,8 @@ async function handle(ctx, req, res) {
     if (path === '/persona/presets') return await handlePersonaPresetsGet(ctx, res)
     if (path === '/stickers') return await handleStickersGet(ctx, res)
     if (path === '/sticker') return await handleStickerImageGet(ctx, res, url)
+    // 自更新：红点检查 + 手动触发
+    if (path === '/update/check' && req.method === 'GET') return await handleUpdateCheck(ctx, res)
     // 星图皮肤素材（立绘 / 背景视频）：只读，纯视觉，不碰任何记忆数据
     if (path === '/skin-asset') return handleSkinAsset(ctx, res, req, url)
     if (path === '/diary') return await handleDiaryGet(ctx, res, url)
