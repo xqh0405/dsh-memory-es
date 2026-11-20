@@ -321,18 +321,53 @@ function releaseLock(path: string | null): void {
  *
  * 2026-11-19 起对外导出：面板要「有没有新版本」的红点，不能为了这个
  * 再写一份 GitHub 调用逻辑（限流、tag 解析、user-agent 都得重复）。
+ *
+ * 2026-11-20 补重试：11-18 实测一次 `TypeError: fetch failed` 就让当天更新整个跳过，
+ * 要等到第二天 06:00 才重来。这里只对「抛异常」的网络抖动重试（间隔 1s / 3s），
+ * 对 HTTP 非 2xx 不重试——那是限流或仓库不存在，重试只会打更多请求。
  */
+export const RELEASE_FETCH_RETRY_DELAYS_MS = [1_000, 3_000] as const
+
+/**
+ * 带网络重试的 fetch：只包住「请求根本没拿到响应」这一种失败。
+ *
+ * init 用工厂函数而不是对象：重试要新建 `AbortSignal.timeout`，否则信号在第一次
+ * 尝试时就开始计时，重试时可能已经过期、直接以超时失败。
+ *
+ * 导出给测试（传 delays=[0] 就不用真的等 1 秒）；生产路径只通过 fetchLatestRelease 调用。
+ */
+export async function fetchWithNetworkRetry(
+  url: string,
+  makeInit: () => RequestInit,
+  fetchImpl: typeof fetch,
+  delays: readonly number[] = RELEASE_FETCH_RETRY_DELAYS_MS,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetchImpl(url, makeInit())
+    } catch (error) {
+      const wait = delays[attempt]
+      if (wait === undefined) throw error
+      await new Promise<void>((resolve) => setTimeout(resolve, wait))
+    }
+  }
+}
+
 export async function fetchLatestRelease(
   repo: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ version: string; assets: ReleaseAsset[] } | null> {
-  const response = await fetchImpl(`https://api.github.com/repos/${repo}/releases/latest`, {
-    headers: {
-      accept: 'application/vnd.github+json',
-      'user-agent': 'dsh-memory-es-update',
-    },
-    signal: AbortSignal.timeout(30_000),
-  })
+  const response = await fetchWithNetworkRetry(
+    `https://api.github.com/repos/${repo}/releases/latest`,
+    () => ({
+      headers: {
+        accept: 'application/vnd.github+json',
+        'user-agent': 'dsh-memory-es-update',
+      },
+      signal: AbortSignal.timeout(30_000),
+    }),
+    fetchImpl,
+  )
   if (!response.ok) return null
   const body = (await response.json()) as {
     tag_name?: unknown

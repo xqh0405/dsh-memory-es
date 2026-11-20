@@ -12,6 +12,7 @@ import { test } from 'node:test'
 import {
   compareVersions,
   diffMapping,
+  fetchWithNetworkRetry,
   isDue,
   parseTemplates,
   planUpdate,
@@ -175,4 +176,40 @@ test('防重启死循环：已尝试过同一版本就不再下载', async () =>
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('fetchWithNetworkRetry：网络抖动重试一次就成功（11-18 那次 fetch failed 不该丢掉当天更新）', async () => {
+  let calls = 0
+  const flaky = (async () => {
+    calls += 1
+    if (calls === 1) throw new TypeError('fetch failed')
+    return new Response('{}', { status: 200 })
+  }) as unknown as typeof fetch
+  const response = await fetchWithNetworkRetry('https://example.invalid', () => ({}), flaky, [0])
+  assert.equal(response.status, 200)
+  assert.equal(calls, 2, '第一次抛异常后应重试，而不是直接失败')
+})
+
+test('fetchWithNetworkRetry：重试用尽后抛最后一次错误（由调用方判定 skipped）', async () => {
+  let calls = 0
+  const alwaysDown = (async () => {
+    calls += 1
+    throw new TypeError('fetch failed')
+  }) as unknown as typeof fetch
+  await assert.rejects(
+    () => fetchWithNetworkRetry('https://example.invalid', () => ({}), alwaysDown, [0, 0]),
+    /fetch failed/,
+  )
+  assert.equal(calls, 3, '1 次首试 + 2 次重试')
+})
+
+test('fetchWithNetworkRetry：HTTP 非 2xx 不重试（限流重试只会打更多请求）', async () => {
+  let calls = 0
+  const limited = (async () => {
+    calls += 1
+    return new Response('{}', { status: 403 })
+  }) as unknown as typeof fetch
+  const response = await fetchWithNetworkRetry('https://example.invalid', () => ({}), limited, [0, 0])
+  assert.equal(response.status, 403)
+  assert.equal(calls, 1, '拿到响应就不重试，由调用方按 status 处理')
 })
