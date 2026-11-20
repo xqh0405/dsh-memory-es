@@ -41,7 +41,7 @@ export const RECALL_SECTION_NAME = 'dsh-memory-es-recall'
  *
  * 2026-11-20 补两个缺口（近 3 天实测）：
  *  · `开始做` —— 本机 106 次，全部 low_confidence（top1 0.7645），每次都真检索、从不注入；
- *  · `√`/`✓` —— molijin 25 次，纯确认符号，归一化去不掉（不在标点集合里），必须显式列。
+ *  · `√`/`✓` —— 某成员 25 次，纯确认符号，归一化去不掉（不在标点集合里），必须显式列。
  */
 export const SHORT_COMMAND_WORDS: ReadonlySet<string> = new Set([
   '继续', '继续吧', '继续写', '继续做', '继续推进', '接着', '接着来',
