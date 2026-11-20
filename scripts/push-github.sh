@@ -119,7 +119,26 @@ git diff --shortstat "$PARENT"..HEAD
 echo
 
 # ── 4. 生成 squash commit 并推送 ───────────────────────────────
-TREE=$(git rev-parse HEAD^{tree})
+# 公开侧排除清单：内部运维记录只留在本地与 origin，不进公开仓库。
+# 用临时 index 建 tree，不改本地分支、也不动 origin。
+EXCLUDE_FILE="${PUBLIC_EXCLUDE:-.state/public-exclude.txt}"
+if [ -f "$EXCLUDE_FILE" ]; then
+  TMP_IDX=$(mktemp)
+  GIT_INDEX_FILE="$TMP_IDX" git read-tree HEAD
+  excluded=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in \#*) continue ;; esac
+    if GIT_INDEX_FILE="$TMP_IDX" git rm --cached --quiet --ignore-unmatch -- "$f" 2>/dev/null; then
+      excluded=$((excluded + 1))
+    fi
+  done < "$EXCLUDE_FILE"
+  TREE=$(GIT_INDEX_FILE="$TMP_IDX" git write-tree)
+  rm -f "$TMP_IDX"
+  echo "公开侧排除 $excluded 个文件（清单：$EXCLUDE_FILE）"
+else
+  TREE=$(git rev-parse HEAD^{tree})
+fi
 NEW=$(git commit-tree "$TREE" -p "$PARENT" -m "$FULL_MESSAGE")
 echo "squash commit: $NEW"
 
