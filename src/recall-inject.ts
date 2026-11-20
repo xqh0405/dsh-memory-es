@@ -32,7 +32,7 @@ export const RECALL_SECTION_NAME = 'dsh-memory-es-recall'
  * 短指令白名单：这些消息**不携带「要查什么」**，检索必然低置信。
  *
  * 2026-11-15 巡检实测（近 3 天 1177 次注入检索）：
- *  · zhongjinqi 的 query 76%（537/703）是 ≤6 字，样本 `继续` / `jixu` / `提交` / `+放这`；
+ *  · 某个成员的 query 76%（537/703）是 ≤6 字，样本 `继续` / `jixu` / `提交` / `+放这`；
  *  · 这类 query 的 top1 全部落在 0.695~0.743，低于 `midBandFloor=0.76` → 必然 low_confidence；
  *  · 它们仍会完整跑一次 embed（CPU 124ms / GPU 35ms）+ 一次 ES 检索，纯浪费。
  *

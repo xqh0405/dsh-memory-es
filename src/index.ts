@@ -1222,7 +1222,7 @@ export function apply(ctx: Context, config: ConfigType): void {
 
         // 短指令短路（2026-11-15 巡检）：`继续`/`提交`/`ok` 这类消息不携带「要查什么」，
         // 实测 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然 low_confidence。
-        // 跳过检索段只注 pinned：省一次 embed + 一次 ES 检索（zhongjinqi 一人 3 天 537 次）。
+        // 跳过检索段只注 pinned：省一次 embed + 一次 ES 检索（实测一名成员 3 天 537 次）。
         // 注意必须在 fetchPinned 之后：常驻段照常注入，这是短指令回合唯一有价值的部分。
         if (inject.shortCommandSkip && isShortCommand(query)) {
           const only = compose([])

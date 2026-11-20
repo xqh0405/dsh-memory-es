@@ -1770,7 +1770,7 @@ test('handlePersonaSwitch：普通成员账号（无 mem_admin）也能切——
   // 自己的提示词与贴图——碰不到记忆数据。而成员账号只有 mem_personal_rw_<uid>，
   // 按 mem_admin 守的结果是「人格页能打开、点切换恒 403」，成员完全用不了。
   const { handlePersonaSwitch } = await import('../panel/index.js')
-  const { ctx, row } = presetFixture({ identity: { userId: 'chencan', username: 'mem-user-chencan', password: 'p', teamWrite: false } })
+  const { ctx, row } = presetFixture({ identity: { userId: 'alice', username: 'mem-user-alice', password: 'p', teamWrite: false } })
   const oldEnv = process.env.MEMORY_ES_PERSONA_PREV
   const prevFile = join(mkdtempSync(join(tmpdir(), 'persona-reader-')), 'persona-prev.json')
   process.env.MEMORY_ES_PERSONA_PREV = prevFile

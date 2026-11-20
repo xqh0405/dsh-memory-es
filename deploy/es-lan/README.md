@@ -180,12 +180,12 @@ python3 scripts/migrate-mnemon.py --source runtime \
 
 | 容器 | insights | 热记忆 | Documents | 迁入后索引 |
 |---|---|---|---|---|
-| xqh | 250 | 78 | 361 篇 | 328 |
-| zhongjinqi | 0 | 12 | 20 篇 | 12 |
-| zhongyuhang | 0 | 10 | 1 篇 | 10 |
-| laoliu / liuxinling | 0 | 5 / 5 | 2 / 15 篇 | 5 / 5 |
-| molijin / tanxu / chencan | 0 | 3 / 3 / 3 | 4 / 2 / 1 篇 | 3 / 3 / 3 |
-| hongzhihui | 0 | 1 | 0 篇 | 1 |
+| 管理员库 | 250 | 78 | 361 篇 | 328 |
+| 成员 A | 0 | 12 | 20 篇 | 12 |
+| 成员 B | 0 | 10 | 1 篇 | 10 |
+| 成员 C / D | 0 | 5 / 5 | 2 / 15 篇 | 5 / 5 |
+| 成员 E / F / G | 0 | 3 / 3 / 3 | 4 / 2 / 1 篇 | 3 / 3 / 3 |
+| 成员 H | 0 | 1 | 0 篇 | 1 |
 
 热记忆合计 120 条全部带向量。
 

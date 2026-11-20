@@ -727,7 +727,7 @@ export const Config: z<ConfigType> = z.object({
     shortCommandSkip: z.boolean().default(true)
       .description('短指令短路：`继续`/`提交`/`ok` 这类不携带信息量的消息只注入 pinned 常驻段，跳过检索。'
         + '2026-11-15 巡检实测：这类 query 的 top1 恒在 0.695~0.743（< midBandFloor 0.76）→ 必然低置信，'
-        + '仍会完整跑 embed + ES 检索（zhongjinqi 一人 3 天 537/703 次）。'
+        + '仍会完整跑 embed + ES 检索（实测一名成员 3 天 537/703 次）。'
         + '用白名单判定，不会误杀「北单接口」这类短但有信息量的查询。设为 false 回到旧行为。'),
     sectionOrder: z.number().step(1).default(3203)
       .description('注入段落在 system prompt 里的排序值；默认排在我们的工具说明（3200）与引用约定（3202）之后。'),
