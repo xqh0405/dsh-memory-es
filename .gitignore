@@ -228,8 +228,19 @@ scratch-recall/
 # npm 命令偶然留下的缓存目录（不是构建产物，别进仓库也别碍眼）
 .npm-cache-tmp/
 
-# 内部资料（调研 / 评审 / 运维记录 / 部署清单）：只留本地与 origin，不进公开仓库。
-# 新写的调研与审查一律放 internal/，不要放 docs/——那会随公开仓库出去。
+# 内部资料（调研 / 评审 / 运维记录 / 部署清单 / 临时脚本 / 素材 / 导出镜像）：
+# 只留本地与 origin，不进公开仓库。
+#
+# 规矩只有一条：**跟项目打包无关的东西一律放 internal/**，不要放仓库根目录。
+#   internal/scratch/    临时脚本与一次性实验（原 scratch-*）
+#   internal/research/   调研缓存与原始素材（原 .research*）
+#   internal/chat/       会话抓取与冒烟脚本（原 .chat-inspect、.dsh-smoke）
+#   internal/reports/    巡检报告（原 reports/）
+#   internal/knowledge/  团队知识库的 Markdown 镜像导出
+#   internal/sucai/      星图素材原图
+#   internal/*.md        内部文档（路线 / 修复 / 部署清单 / 调研 / 评审）
+#
+# 公开仓库 docs/ 只放开发文档、本地模型扩展与三份人设。
 internal/
 
 # 使用巡检报告（含各人使用统计，跟人有关，同上不入库）——统一放 reports/
