@@ -53,9 +53,11 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+# squash 模式下 $REMOTE/$BRANCH 是一条**独立线**（每次推送都是新 commit，本地不跟进），
+# 所以它通常不在本地 HEAD 的历史里——这是正常状态，不是分叉。这里只做提示。
 if ! git merge-base --is-ancestor "$PARENT" HEAD; then
-  echo "$REMOTE/$BRANCH 不在本地 HEAD 的历史里（公开仓库被改过？），本脚本不做 force，人工处理" >&2
-  exit 1
+  echo "提示：$REMOTE/$BRANCH 是独立的一条线（squash 模式），本次会用本地 HEAD 的内容建新的一条" >&2
+  echo "      如需保留远端最新内容，请先人工核对（本脚本不做 force，也不找回旧内容）" >&2
 fi
 
 if [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$PARENT^{tree}")" ]; then
@@ -73,8 +75,13 @@ ADDED=$(printf '%s\n' "$DIFF" | grep -E '^\+' | grep -vE '^\+\+\+' || true)
 
 # 阻断级：真实凭据与内网地址，出现就停
 BLOCK_RE='(_authToken=|BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|(192\.168|10\.|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+)'
-# 警告级：内部拓扑与私有域名，提醒人工确认（不阻断）
-WARN_RE='(dsh-(xqh|test|es)|xqh1314\.com|lottery-cloud|huoxin-data)'
+# 警告级：内部标识（容器名、私有域名、业务项目名）**不写死在脚本里**——那本身就是泄露。
+# 从本地词表读，一行一个，词表在 .gitignore 的 .state/ 下，不入库。
+WARN_FILE="${WARN_WORDS_FILE:-.state/redact-words.txt}"
+warn_hit() {
+  # $1 = 待检文本；命中词表则输出「行号:该行」，无词表时什么都不命中
+  [ -f "$WARN_FILE" ] && printf '%s\n' "$1" | grep -nF -f "$WARN_FILE" || true
+}
 
 BLOCK_HITS=$(printf '%s\n' "$ADDED" | grep -nE "$BLOCK_RE" || true)
 if [ -n "$BLOCK_HITS" ]; then
@@ -84,7 +91,7 @@ if [ -n "$BLOCK_HITS" ]; then
   exit 2
 fi
 
-WARN_HITS=$(printf '%s\n' "$ADDED" | grep -nE "$WARN_RE" || true)
+WARN_HITS=$(warn_hit "$ADDED")
 if [ -n "$WARN_HITS" ]; then
   echo "脱敏扫描有**警告级**命中（人工确认是否可公开）：" >&2
   printf '%s\n' "$WARN_HITS" | head -10 >&2
@@ -96,7 +103,7 @@ fi
 BODY=""
 while IFS= read -r line; do
   [ -n "$line" ] || continue
-  if printf '%s' "$line" | grep -qE "$BLOCK_RE|$WARN_RE"; then
+  if printf '%s' "$line" | grep -qE "$BLOCK_RE" || [ -n "$(warn_hit "$line")" ]; then
     BODY="${BODY}- （一条含内部信息的修改变更，已脱敏略去）"$'\n'
   else
     BODY="${BODY}- ${line}"$'\n'
