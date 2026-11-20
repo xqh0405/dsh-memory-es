@@ -14,7 +14,7 @@ import { isShortCommand, SHORT_COMMAND_MAX_CHARS } from '../src/recall-inject.ts
 
 describe('isShortCommand', () => {
   test('日常推进/确认词命中（含中英文与错拼）', () => {
-    for (const word of ['继续', '继续吧', '继续写', '开始', '开始执行', '提交', '提交一下', '好', '好的', '嗯', '可以', '行', 'ok', 'OK', 'okay', 'jixu', 'go']) {
+    for (const word of ['继续', '继续吧', '继续写', '开始', '开始做', '开始执行', '提交', '提交一下', '好', '好的', '嗯', '可以', '行', 'ok', 'OK', 'okay', 'jixu', 'go', '√', '✓']) {
       assert.equal(isShortCommand(word), true, `${word} 应该被判为短指令`)
     }
   })
