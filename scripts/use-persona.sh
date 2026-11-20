@@ -2,9 +2,9 @@
 # 人格切换：把 preset 写进本机 profile 配置的 persona.seed，并连带把 stickers.dir
 # 指到同名的那套表情包（persona/stickers/<name>/）。
 #
-# 默认只改「本机实际生效」的那处（profile 配置），仓库 persona/seed.md 不动——
-# 它是「新装默认」，属于发布动作，要一起改得显式加 --also-default。
-# 三处生效位置见 persona/README.md。
+# 只改「本机实际生效」的那处（profile 配置）。
+# 仓库默认人格就是 persona/presets/xilian.md 本身（2026-11-20 起不再有 seed.md 副本），
+# 所以 --also-default 已经不需要了——保留参数只为不弄坏旧脚本，它会打印一句提示。
 #
 # 用法：
 #   scripts/use-persona.sh                      # 列出预设与贴图，标出当前生效的
@@ -12,7 +12,7 @@
 #   scripts/use-persona.sh hutao --seed-only    # 只换人格，贴图不动
 #   scripts/use-persona.sh hutao --stickers-only# 只换贴图，人格不动
 #   scripts/use-persona.sh hutao --dry-run      # 只打印要做什么，不写任何文件
-#   scripts/use-persona.sh hutao --also-default # 同时把仓库默认 seed.md 也换掉
+#   scripts/use-persona.sh hutao --also-default # 已废弃：默认人格直接取预设，没有副本可同步
 #   scripts/use-persona.sh hutao --deploy       # 切换后顺便分发到 125（需 PACK_HOST）
 #
 # 环境变量：
@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRESET_DIR="$ROOT/persona/presets"
 STICKER_DIR="$ROOT/persona/stickers"
-SEED_FILE="$ROOT/persona/seed.md"
+DEFAULT_PRESET_FILE="$PRESET_DIR/xilian.md"
 CONFIG="${PERSONA_CONFIG:-$HOME/.dsh/profiles/web/cordis.patch.yml}"
 STICKER_ROOT="${PERSONA_STICKERS_ROOT:-$HOME/.dsh/stickers}"
 DRY_RUN=0
@@ -45,9 +45,33 @@ list_presets() {
     [ -f "$f" ] || continue
     local name chars first mark
     name="$(basename "$f" .md)"
-    chars=$(python3 -c 'import sys;print(len(open(sys.argv[1],encoding="utf-8").read().replace("\n","").replace(" ","")))' "$f")
-    # 用 python 按「字符」截断：cut -c 会切坏 UTF-8 多字节，终端里变成乱码
-    first=$(python3 -c 'import sys;print(open(sys.argv[1],encoding="utf-8").readline().strip()[:46])' "$f")
+    # 字数只算正文：剥掉 frontmatter，否则会多报两三百字（用户会以为预设变长了）
+    chars=$(python3 - "$f" <<'PYCHARS'
+import re
+import sys
+
+text = open(sys.argv[1], encoding='utf-8').read()
+text = re.sub(r'^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?', '', text)
+print(len(text.replace('\n', '').replace(' ', '')))
+PYCHARS
+)
+    # 用 python 按「字符」截断：cut -c 会切坏 UTF-8 多字节，终端里变成乱码。
+    # 摘要取「身份」正文：跳过 frontmatter 与 `【身份】` 这类段落标题，
+    # 否则 2026-11-20 加了标记之后列表里全是 `---`。
+    first=$(python3 - "$f" <<'PYFIRST'
+import re
+import sys
+
+text = open(sys.argv[1], encoding='utf-8').read()
+text = re.sub(r'^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?', '', text)
+for line in text.split('\n'):
+    stripped = line.strip()
+    if stripped == '' or re.fullmatch(r'【[^】]*】', stripped):
+        continue
+    print(stripped[:46])
+    break
+PYFIRST
+)
     mark=""
     # 本机生效的那份：去掉所有空白后比对（配置里的块标量可能多/少空行，
     # 逐字节比会漏判；人格正文里空白不携带语义）
@@ -63,23 +87,27 @@ print("1" if norm(open(sys.argv[1], encoding="utf-8").read()) == norm(sys.argv[2
   echo
   if [ -n "$current" ]; then
     local tip
-    tip=$(printf '%s' "$current" | python3 -c 'import sys;print(sys.stdin.readline().strip()[:46])')
+    # 与列表里的摘要同一套规则：跳过 frontmatter 与段落标题（否则显示成 `---`）
+    tip=$(printf '%s' "$current" | python3 -c '
+import re, sys
+text = re.sub(r"^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?", "", sys.stdin.read())
+for line in text.split("\n"):
+    s = line.strip()
+    if s == "" or re.fullmatch(r"【[^】]*】", s):
+        continue
+    print(s[:46])
+    break
+')
     echo "当前本机生效（$CONFIG）：$tip…"
   else
     echo "当前本机生效：读不到配置里的 persona.seed（$CONFIG）"
   fi
-  # 仓库默认是发布用的「实例」：显示它现在等于哪份预设，避免只看文件分不清
-  local defaultTip defaultMatch
-  defaultTip=$(python3 -c 'import sys;print(open(sys.argv[1],encoding="utf-8").readline().strip()[:46])' "$SEED_FILE")
-  defaultMatch=""
-  for f in "$PRESET_DIR"/*.md; do
-    [ -f "$f" ] || continue
-    if cmp -s "$f" "$SEED_FILE"; then
-      defaultMatch=" = $(basename "$f" .md)"
-      break
-    fi
-  done
-  echo "仓库默认（persona/seed.md）：$defaultTip…${defaultMatch}"
+  # 默认人格就是 xilian.md 本身（单一源）。它存在与否决定「新装用户有没有人格」
+  if [ -f "$DEFAULT_PRESET_FILE" ]; then
+    echo "默认人格（persona/presets/xilian.md）：新装即生效"
+  else
+    echo "默认人格缺失：persona/presets/xilian.md 不存在，新装用户将没有人格"
+  fi
   # 贴图包：与人格同名，dir 指向哪套就说明当前在用哪套
   local curdir
   curdir=$(bash "$0" --read-stickers-dir "$CONFIG" 2>/dev/null || echo '')
@@ -168,21 +196,33 @@ if [ -z "$NAME" ]; then
 fi
 shift || true
 ALSO_DEFAULT=0
-for arg in "$@"; do
-  case "$arg" in
+TIER_OVERRIDE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --also-default) ALSO_DEFAULT=1 ;;
     --deploy) DEPLOY=1 ;;
     --seed-only) SEED_ONLY=1 ;;
     --stickers-only) STICKERS_ONLY=1 ;;
-    *) echo "未知参数：$arg" >&2; exit 2 ;;
+    --tier=*) TIER_OVERRIDE="${1#--tier=}" ;;
+    --tier)
+      shift || true
+      TIER_OVERRIDE="${1:-}"
+      [ -n "$TIER_OVERRIDE" ] || { echo "--tier 需要一个值：lite 或 full" >&2; exit 2; }
+      ;;
+    *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
+  shift
 done
+case "$TIER_OVERRIDE" in
+  ''|lite|full) ;;
+  *) echo "--tier 只接受 lite 或 full（收到：$TIER_OVERRIDE）" >&2; exit 2 ;;
+esac
 if [ "$SEED_ONLY" = "1" ] && [ "$STICKERS_ONLY" = "1" ]; then
   echo "--seed-only 与 --stickers-only 只能选一个" >&2; exit 2
 fi
 
-# 找预设：hutao → presets/hutao.md；xilian/seed → persona/seed.md
+# 找预设：hutao → presets/hutao.md；xilian / seed 都是 presets/xilian.md 的别名
 # 预设只认 presets/ 下的文件；seed 是昔涟的历史别名（早期列表把它当预设名发出去过）
 case "$NAME" in
   seed|xilian|昔涟) SRC="$PRESET_DIR/xilian.md" ;;
@@ -194,10 +234,31 @@ if [ ! -f "$SRC" ]; then
   exit 2
 fi
 
+# 档位：--tier 指定优先；否则取预设 frontmatter 的 tier_default（缺省 lite）
+if [ -n "$TIER_OVERRIDE" ]; then
+  TIER="$TIER_OVERRIDE"
+  TIER_FROM="--tier 指定"
+else
+  TIER=$(python3 - "$SRC" <<'PYTIER'
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+match = re.match(r'^\s*---\r?\n([\s\S]*?)\r?\n---', text)
+tier = 'lite'
+if match:
+    found = re.search(r'^tier_default:\s*(\S+)', match.group(1), re.M)
+    if found:
+        tier = found.group(1).strip()
+print(tier if tier in ('lite', 'full') else 'lite')
+PYTIER
+)
+  TIER_FROM="预设 tier_default"
+fi
+
 echo "==> 目标预设：$SRC（$(python3 -c 'import sys;print(len(open(sys.argv[1],encoding="utf-8").read().replace("\n","").replace(" ","")))' "$SRC") 字）"
+echo "==> 档位：$TIER（$TIER_FROM）"
 echo "==> 本机配置：$CONFIG（默认只改这里，热生效）"
 if [ "$ALSO_DEFAULT" = "1" ]; then
-  echo "==> 仓库默认：$SEED_FILE（--also-default：一起换）"
+  echo "==> --also-default 已废弃：默认人格直接取 persona/presets/xilian.md，没有副本要同步（本次忽略）" >&2
 fi
 STICKER_PACK=""
 if [ "$SEED_ONLY" != "1" ]; then
@@ -220,7 +281,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "  1. 备份配置 → $CONFIG.bak-<时间戳>"
   [ "$STICKERS_ONLY" != "1" ] && echo "  2. 替换其中 persona.seed 块（保持缩进与 |+ 语义）"
   [ -n "$STICKER_PACK" ] && echo "  3. 把 stickers.dir 指到 $STICKER_ROOT/$(basename "$STICKER_PACK")"
-  [ "$ALSO_DEFAULT" = "1" ] && echo "  4. 同时覆盖仓库默认 $SEED_FILE（--also-default）"
+  [ "$ALSO_DEFAULT" = "1" ] && echo "  4. （--also-default 已废弃，忽略）"
   [ "$DEPLOY" = "1" ] && echo "  5. 分发到 125（PACK_HOST / PACK_SSH_KEY）"
   exit 0
 fi
@@ -229,13 +290,6 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 CONFIG_BAK="$CONFIG.bak-$STAMP"
 cp -p "$CONFIG" "$CONFIG_BAK"
 echo "  备份配置：$CONFIG_BAK"
-
-SEED_BAK=""
-if [ "$ALSO_DEFAULT" = "1" ]; then
-  SEED_BAK="$SEED_FILE.bak-$STAMP"
-  cp -p "$SEED_FILE" "$SEED_BAK"
-  echo "  备份仓库默认：$SEED_BAK"
-fi
 
 if [ "$STICKERS_ONLY" != "1" ]; then
 if ! python3 - "$SRC" "$CONFIG" "$CONFIG_BAK" <<'PY'
@@ -300,6 +354,63 @@ then
 fi
 fi  # STICKERS_ONLY
 
+# 档位写进 profile 配置的 persona.tier（与 seed 同一个文件，热生效）
+if [ "$STICKERS_ONLY" != "1" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "==> [dry-run] 会把 persona.tier 设为 $TIER"
+  elif ! python3 - "$CONFIG" "$TIER" <<'PYSET'
+import re
+import sys
+
+cfg, tier = sys.argv[1], sys.argv[2]
+lines = open(cfg, encoding='utf-8').read().split('\n')
+
+# 定位 persona: 块（顶格或缩进的都认，取第一个）
+start = None
+for i, line in enumerate(lines):
+    m = re.match(r'^(\s*)persona:\s*$', line)
+    if m:
+        start = i
+        base_indent = len(m.group(1))
+        break
+if start is None:
+    print('  配置里没有 persona: 块，跳过档位写入（用默认 lite）')
+    sys.exit(0)
+
+# 块尾：下一个缩进 <= base_indent 的非空行
+end = len(lines)
+for j in range(start + 1, len(lines)):
+    if not lines[j].strip():
+        continue
+    if len(lines[j]) - len(lines[j].lstrip()) <= base_indent:
+        end = j
+        break
+
+# 已有 tier: 就替换
+for j in range(start + 1, end):
+    m = re.match(r'^(\s*)tier:\s*(\S*)\s*$', lines[j])
+    if m:
+        lines[j] = f'{m.group(1)}tier: {tier}'
+        open(cfg, 'w', encoding='utf-8').write('\n'.join(lines))
+        print(f'  persona.tier → {tier}（替换原有值）')
+        sys.exit(0)
+
+# 没有就插在 seed: 行前，缩进跟着 seed
+for j in range(start + 1, end):
+    m = re.match(r'^(\s*)seed:', lines[j])
+    if m:
+        lines.insert(j, f'{m.group(1)}tier: {tier}')
+        open(cfg, 'w', encoding='utf-8').write('\n'.join(lines))
+        print(f'  persona.tier → {tier}（新增）')
+        sys.exit(0)
+
+print('  persona: 块里没有 seed:，跳过档位写入')
+PYSET
+  then
+    echo "  ⚠️ 档位写入失败，配置里仍是上一次的值（人格已切换）" >&2
+  fi
+fi
+
 # 贴图：只改 stickers.dir（不搬文件，图片在 persona/stickers/<name>/ 里）
 if [ -n "$STICKER_PACK" ]; then
   TARGET_DIR="$STICKER_ROOT/$(basename "$STICKER_PACK")"
@@ -352,17 +463,9 @@ PY
   fi
 fi
 
-if [ "$ALSO_DEFAULT" = "1" ]; then
-  if cmp -s "$SRC" "$SEED_FILE"; then
-    echo "  仓库默认已与目标一致，跳过复制"
-  else
-    cp -p "$SRC" "$SEED_FILE"
-    echo "  仓库默认已更新：$SEED_FILE（--also-default）"
-  fi
-fi
 echo
 echo "完成。本机配置监听会热生效，下一轮对话即换口吻。"
-echo "回滚：cp '$CONFIG_BAK' '$CONFIG'${SEED_BAK:+ && cp '$SEED_BAK' '$SEED_FILE'}"
+echo "回滚：cp '$CONFIG_BAK' '$CONFIG'"
 
 if [ "$DEPLOY" = "1" ]; then
   echo

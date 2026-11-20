@@ -171,11 +171,11 @@ describe('apply', () => {
     const config = baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } })
     apply(harness.ctx as never, config)
     assert.equal(harness.registered.length, 12, '十二个工具各一次 effect')
-    assert.equal(harness.sections.length, 4, '记忆 / 人格 / 心情 / 表情包 各一次 effect')
+    assert.equal(harness.sections.length, 5, '记忆 / 纪律 / 人格 / 心情 / 表情包 各一次 effect')
     assert.equal(
       harness.disposers.length,
-      24,
-      '十二个工具 + 四个提示段 + 人格缓存刷新 + 每日回顾 + 每日提炼 + 自更新 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
+      25,
+      '十二个工具 + 五个提示段（含阶段 14 的纪律段）+ 人格缓存刷新 + 每日回顾 + 每日提炼 + 自更新 + 四个事件监听（心情 / 工具结果 / 影子召回 / 自动召回注入），都走 ctx.effect',
     )
     for (const dispose of harness.disposers) dispose()
     assert.equal(harness.registered.length, 0)
@@ -282,7 +282,7 @@ describe('apply', () => {
   test('提示词段：名字/顺序正确，正文非空且不含会触发插值的花括号', () => {
     const harness = fakeCtx()
     apply(harness.ctx as never, baseConfig({ es: { url: 'http://127.0.0.1:1', caCertPath: '', requestTimeoutMs: 1000 } }))
-    assert.equal(harness.sections.length, 4)
+    assert.equal(harness.sections.length, 5)
     const section = harness.sections.find((s) => s.name === 'dsh-memory-es')!
     assert.equal(section.order, 3200)
     assert.equal(typeof section.text, 'string')

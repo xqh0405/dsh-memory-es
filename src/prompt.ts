@@ -100,6 +100,130 @@ function escapeBraces(text: string): string {
   return text.replaceAll('{{', '｛｛').replaceAll('}}', '｝｝')
 }
 
+// ───────────────────────────── 阶段 14：人设双档 ─────────────────────────────
+
+/** 人设档位：lite = 纯享版（≤500 字），full = 细腻版（≤2500 字）。都是**上限**，不是要写满的指标 */
+export const PERSONA_TIERS = ['lite', 'full'] as const
+export type PersonaTier = (typeof PERSONA_TIERS)[number]
+
+/** 只在 lite 档保留的块：`<!-- lite:only -->…<!-- /lite:only -->` */
+const TIER_ONLY_LITE = { open: '<!-- lite:only -->', close: '<!-- /lite:only -->' } as const
+/** 只在 full 档保留的块：`<!-- lite:skip -->…<!-- /lite:skip -->` */
+const TIER_SKIP_LITE = { open: '<!-- lite:skip -->', close: '<!-- /lite:skip -->' } as const
+
+/** frontmatter：正文最开头的 `---` 到下一个 `---`（含换行） */
+const FRONTMATTER_RE = /^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?/
+
+/** 任意 HTML 注释（含未成对的残留） */
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g
+
+export interface TierRenderResult {
+  /** 渲染后的正文（已剥 frontmatter 与注释） */
+  body: string
+  /** 解析过程中遇到的问题，调用方负责 log；空数组 = 一切正常 */
+  warnings: string[]
+}
+
+/**
+ * 按档位渲染一份人设源文本。
+ *
+ * 为什么要这一步而不是"两份文件各写一遍"：同一条规则要写两遍就是漂移的起点
+ * （`persona/README.md` 已经记过 `seed.md` 与预设不同步的坑）。所以做成
+ * **默认两档共享 + 排除块**：没被排除的就在，被 `lite:skip` 包住的只在 full 出现。
+ *
+ * 解析顺序不能换：
+ *  1. 剥 frontmatter（元数据不该进提示词）
+ *  2. 按档位删掉不该出现的那类块
+ *  3. 剥掉所有剩余的 HTML 注释
+ *  4. 标记不成对时**保留原文**并记 warning——宁可多给几个字，也不能静默吞掉内容
+ */
+export function applyPersonaTier(source: string, tier: PersonaTier): TierRenderResult {
+  const warnings: string[] = []
+
+  // 1. frontmatter
+  let text = source.replace(FRONTMATTER_RE, '')
+
+  // 2. 按档位排除块
+  const drop = tier === 'lite' ? TIER_SKIP_LITE : TIER_ONLY_LITE
+  const removed = removeMarkedBlock(text, drop.open, drop.close)
+  text = removed.text
+  if (!removed.paired) {
+    warnings.push(`人设里 ${drop.open} 与 ${drop.close} 不成对，该标记已按原文保留`)
+  }
+
+  // 3. 剥剩余注释（含另一档的标记、以及任何说明性注释）
+  text = text.replace(HTML_COMMENT_RE, '')
+  // 删块会留下空行：三个以上连续换行收敛成两行，免得 lite 档里出现大段空白
+  text = text.replace(/\n{3,}/g, '\n\n')
+
+  return { body: text.trim(), warnings }
+}
+
+/**
+ * 删掉所有 `open…close` 包住的块。
+ *
+ * 只处理单层、不处理嵌套：HTML 注释本身不允许嵌套，嵌套会让外层提前闭合，
+ * 所以这里遇到嵌套按「第一个 close 即结束」处理，剩下的交给注释剥离兜底。
+ * 返回 `paired=false` 表示存在没闭合的 open——调用方要保留原文而不是猜。
+ */
+function removeMarkedBlock(
+  text: string,
+  open: string,
+  close: string,
+): { text: string; paired: boolean } {
+  let out = ''
+  let cursor = 0
+  for (;;) {
+    const start = text.indexOf(open, cursor)
+    if (start === -1) {
+      out += text.slice(cursor)
+      return { text: out, paired: true }
+    }
+    const end = text.indexOf(close, start + open.length)
+    if (end === -1) {
+      // 不成对：从 open 起原样保留，交给上层警告
+      out += text.slice(cursor)
+      return { text: out, paired: false }
+    }
+    out += text.slice(cursor, start)
+    cursor = end + close.length
+  }
+}
+
+/**
+ * 阶段 14：工程纪律段（order 3198，排在人格段 3199 之前）。
+ *
+ * 为什么单独成段：纪律是所有角色共有的安全约束（不编造、报错原样贴、技术内容不改写），
+ * 不是人设偏好。它混在人设里时，用户自建人设只要不写就丢了——而这三条不该是"可选项"。
+ *
+ * 拆出来之后，纯享版才能真的只装 300 字人格：纪律不在那 300 字里算。
+ */
+export const PERSONA_DISCIPLINE_SECTION_NAME = 'dsh-memory-es-discipline'
+export const PERSONA_DISCIPLINE_SECTION_ORDER = 3198
+
+export const PERSONA_DISCIPLINE_PROMPT = [
+  '## 工程纪律（优先于任何角色设定）',
+  '',
+  '无论扮演什么角色、用什么口吻，以下约束始终高于人格设定：',
+  '',
+  '- **工程严谨性不打折**：不因为换了口气就降低准确性、省略关键细节，或用角色扮演代替真实结论。',
+  '- **技术内容原样呈现**：代码、命令、路径、报错一律照实，不为了可爱或顺口而改写。',
+  '- **不确定就说不确定**：拿不准的地方直说并给验证办法；不猜着往下做，不编造事实与能力。',
+  '- **工具规则照常遵守**：该调工具就调、该等审批就等；人格不改变任何工具权限与安全边界。',
+  '- **一句话切换**：用户说「用普通语气」或「关掉人格」时，立刻切回简洁中性口吻，不再扮演。',
+].join('\n')
+
+/**
+ * 组装纪律段。`extra` 只能**追加**，不能删掉内置条目——这正是它与人格段的区别：
+ * 人格可以自定义，纪律不行。
+ */
+export function buildDisciplineSection(enabled: boolean, extra = ''): string {
+  if (!enabled) return ''
+  const appended = extra.trim()
+  if (appended === '') return PERSONA_DISCIPLINE_PROMPT
+  return `${PERSONA_DISCIPLINE_PROMPT}\n\n### 部署者补充\n\n${escapeBraces(appended)}`
+}
+
 /**
  * 组装人格段：内核 seed + 已生效的表层条目（阶段 9.3）。
  *
@@ -110,9 +234,14 @@ export function buildPersonaSection(
   seed: string,
   enabled: boolean,
   entries: readonly string[] = [],
+  tier: PersonaTier = 'full',
+  onWarning?: (message: string) => void,
 ): string {
   if (!enabled) return ''
-  const body = escapeBraces(seed.trim())
+  // 阶段 14：先按档位剥掉 frontmatter / 注释 / 不该出现的那一档内容
+  const rendered = applyPersonaTier(seed, tier)
+  for (const warning of rendered.warnings) onWarning?.(warning)
+  const body = escapeBraces(rendered.body)
   const list = entries.map((e) => e.trim()).filter((e) => e !== '')
   if (body === '' && list.length === 0) return ''
 

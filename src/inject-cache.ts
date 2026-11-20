@@ -1,5 +1,5 @@
 /**
- * 阶段 38：注入结果的会话级缓存。
+ * 阶段 38：注入结果的按 agent 隔离缓存（进程级实例，key 里带 agentId）。
  *
  * 为什么需要：一个 turn 有多个 model step，每步都重新组装 prompt；实测单条 query
  * 一轮最多 28 次 assemble。同 query 在短时间内重复检索，结果不会变，只是白花

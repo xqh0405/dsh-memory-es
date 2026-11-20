@@ -6,11 +6,21 @@ import { readFileSync } from 'node:fs'
 
 let captured = null
 
-// 极简 React 替身：只需要 createElement / useState / Fragment。
-// 注意组件都是 h(Comp, props) 构造 element 而不是被调用，所以不需要 useEffect 等 hook。
+// 极简 React 替身。
+//
+// 离屏冒烟会**直接调用组件函数**（`Component({t})`），所以组件体里的 hook 真的会执行——
+// 少一个就会 `React.xxx is not a function`（2026-11-20 之前一直是坏的）。
+// 这里不求语义完整，只要「能跑过一遍、不抛异常」：
+//   · useEffect 不执行（没有渲染循环，副作用不该在构造期发生）
+//   · useRef 给一个可变对象
+//   · useCallback 原样返回、useMemo 直接求值
 const ReactStub = {
   createElement: (type, props, ...children) => ({ type, props, children }),
-  useState: (init) => [init, () => {}],
+  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  useEffect: () => {},
+  useRef: (init) => ({ current: init }),
+  useCallback: (fn) => fn,
+  useMemo: (fn) => fn(),
   Fragment: 'Fragment',
 }
 
@@ -146,5 +156,24 @@ console.log('  卸载时释放的字典:', JSON.stringify(full.disposed))
 if (full.disposed.length !== 2) throw new Error(`字典应释放 2 份，实际 ${full.disposed.length}`)
 
 console.log('  字典:', JSON.stringify(full.localeDictionaries))
+
+// ── 5. hooks 顺序：Persona 组件里不能有「早退之后才调 hook」──────────────
+// 2026-11-20 白屏事故：`if (persona.loading) return` 早退之后再 React.useEffect，
+// 加载完成那次渲染的 hook 数量就和上一次不同 → React 抛错 → 整页空白。
+// 这类错误语法检查查不出来，只能靠结构断言。
+{
+  const personaStart = src.indexOf('function Persona(')
+  if (personaStart === -1) throw new Error('找不到 Persona 组件')
+  const nextComponent = src.indexOf('\n    function ', personaStart + 20)
+  const body = src.slice(personaStart, nextComponent === -1 ? src.length : nextComponent)
+  const earlyReturn = body.indexOf('if (persona.loading) return')
+  if (earlyReturn === -1) throw new Error('Persona 里找不到 loading 早退，检查是否改了结构')
+  const afterEarly = body.slice(earlyReturn)
+  if (/React\.use[A-Z]/.test(afterEarly)) {
+    throw new Error('Persona 在 loading 早退之后还调了 hook —— 会造成白屏（hooks 数量不一致）')
+  }
+  console.log('  hooks 顺序: OK（早退之后无 hook）')
+}
+
 console.log('SMOKE OK')
 

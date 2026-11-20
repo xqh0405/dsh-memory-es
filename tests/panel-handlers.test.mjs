@@ -1742,16 +1742,19 @@ const readJsonReq = (value) => {
   return req
 }
 
-test('listPresets：包内三份预设都能读到，且贴图张数来自各自的 stickers.json', async () => {
+test('listPresets：包内四份预设都能读到，且贴图张数来自各自的 stickers.json', async () => {
   const { listPresets } = await import('../panel/index.js')
   const presets = listPresets()
   const names = presets.map((item) => item.name).sort()
-  assert.deepEqual(names, ['dafeiyu', 'hutao', 'xilian'])
+  assert.deepEqual(names, ['dafeiyu', 'doubao', 'hutao', 'xilian'])
   const byName = Object.fromEntries(presets.map((item) => [item.name, item]))
   assert.equal(byName.xilian.stickers, 23)
   assert.equal(byName.hutao.stickers, 14)
   assert.equal(byName.dafeiyu.stickers, 23)
+  // 豆包还没有贴图包：0 张是预期值，不是缺文件
+  assert.equal(byName.doubao.stickers, 0)
   assert.match(byName.hutao.firstLine, /胡桃/)
+  assert.match(byName.doubao.firstLine, /豆包/)
 })
 
 test('resolveStickerRoot：三套结构取父目录，平铺旧结构取自身', async () => {
@@ -1780,6 +1783,325 @@ test('handlePersonaSwitch：普通成员账号（无 mem_admin）也能切——
   } finally {
     if (oldEnv === undefined) delete process.env.MEMORY_ES_PERSONA_PREV
     else process.env.MEMORY_ES_PERSONA_PREV = oldEnv
+  }
+})
+
+/** 自建人设测试的公共夹具：把预设目录重定向到临时目录，跑完恢复 */
+async function withTempPresetDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'persona-custom-'))
+  const old = process.env.MEMORY_ES_PERSONA_PRESETS
+  process.env.MEMORY_ES_PERSONA_PRESETS = dir
+  try {
+    return await fn(dir)
+  } finally {
+    if (old === undefined) delete process.env.MEMORY_ES_PERSONA_PRESETS
+    else process.env.MEMORY_ES_PERSONA_PRESETS = old
+  }
+}
+
+const CUSTOM_INPUT = {
+  id: 'demo',
+  name: '小助手',
+  selfRef: '咱',
+  address: '你',
+  intro: '你是小助手，在 DeepSeek Harness 里陪用户做事。',
+  core: '认真做事，不慌。',
+  voice: ['说话简短。', '先给结论再给理由。', '不夸张、不用网络热梗。'],
+  toneLight: '轻松，短句。',
+  toneSerious: '去玩笑，给结论。',
+  toneSolemn: '短句，直给一句托底。',
+  assistant: ['先接情绪，再说事。'],
+}
+
+test('handlePersonaCreate：合法输入生成预设文件，且能被 listPresets 读回', async () => {
+  const { handlePersonaCreate, listPresets } = await import('../panel/index.js')
+  await withTempPresetDir(async (dir) => {
+    const { ctx } = presetFixture()
+    const res = fakeRes()
+    await handlePersonaCreate(ctx, res, readJsonReq(CUSTOM_INPUT))
+    assert.equal(res.statusCode, 200, res.body)
+    const value = JSON.parse(res.body).value
+    assert.equal(value.tierLocked, true, '自建人设默认必须锁 lite')
+    assert.ok(value.liteChars > 0)
+
+    const file = join(dir, 'demo.md')
+    assert.ok(existsSync(file), '文件应当落盘')
+    const md = readFileSync(file, 'utf8')
+    assert.match(md, /^---\nid: demo/m)
+    assert.match(md, /tier_default: lite/)
+    assert.match(md, /author: 自建/)
+
+    // 生成的文件要能被正常读回（frontmatter/段落标题都不该把它弄哑）
+    const back = listPresets().find((item) => item.name === 'demo')
+    assert.ok(back !== undefined, 'listPresets 应能读到新建的人设')
+    assert.equal(back.isCustom, true)
+    assert.equal(back.tierUnlocked, false)
+    assert.match(back.firstLine, /小助手/)
+  })
+})
+
+test('handlePersonaCreate：前 3 条声音两档共享，第 4 条起因 lite:skip 只进 full', async () => {
+  const { handlePersonaCreate } = await import('../panel/index.js')
+  await withTempPresetDir(async (dir) => {
+    const { ctx } = presetFixture()
+    const input = { ...CUSTOM_INPUT, id: 'demo2', voice: ['第一条。', '第二条。', '第三条。', '第四条只进细腻版。'] }
+    const res = fakeRes()
+    await handlePersonaCreate(ctx, res, readJsonReq(input))
+    assert.equal(res.statusCode, 200, res.body)
+    const md = readFileSync(join(dir, 'demo2.md'), 'utf8')
+    const skipAt = md.indexOf('<!-- lite:skip -->')
+    const fourthAt = md.indexOf('第四条只进细腻版')
+    assert.ok(skipAt !== -1 && fourthAt > skipAt, '第 4 条必须落在 lite:skip 块内')
+  })
+})
+
+test('handlePersonaCreate：id 非法 / 保留字 / 重复 都拒绝', async () => {
+  const { handlePersonaCreate } = await import('../panel/index.js')
+  await withTempPresetDir(async () => {
+    const { ctx } = presetFixture()
+    for (const badId of ['a b', '../x', 'system', '', '-lead', 'x'.repeat(33)]) {
+      const res = fakeRes()
+      await handlePersonaCreate(ctx, res, readJsonReq({ ...CUSTOM_INPUT, id: badId }))
+      assert.equal(res.statusCode, 400, `id=${JSON.stringify(badId)} 应当被拒：${res.body}`)
+    }
+    // 大写不拒：自动转小写（文件名统一小写，避免 Demo.md 与 demo.md 并存）
+    const upper = fakeRes()
+    await handlePersonaCreate(ctx, upper, readJsonReq({ ...CUSTOM_INPUT, id: 'Demo' }))
+    assert.equal(upper.statusCode, 200, upper.body)
+    assert.equal(JSON.parse(upper.body).value.id, 'demo')
+    // 先建一个，再建同名
+    await handlePersonaCreate(ctx, fakeRes(), readJsonReq(CUSTOM_INPUT))
+    const dup = fakeRes()
+    await handlePersonaCreate(ctx, dup, readJsonReq(CUSTOM_INPUT))
+    assert.equal(dup.statusCode, 400, '同名必须拒绝')
+    assert.match(dup.body, /已存在|已经有同名/)
+  })
+})
+
+test('handlePersonaCreate：必填缺失、声音少于 3 条都拒绝', async () => {
+  const { handlePersonaCreate } = await import('../panel/index.js')
+  await withTempPresetDir(async () => {
+    const { ctx } = presetFixture()
+    const noCore = fakeRes()
+    await handlePersonaCreate(ctx, noCore, readJsonReq({ ...CUSTOM_INPUT, core: '' }))
+    assert.equal(noCore.statusCode, 400)
+
+    const twoVoice = fakeRes()
+    await handlePersonaCreate(ctx, twoVoice, readJsonReq({ ...CUSTOM_INPUT, voice: ['一。', '二。'] }))
+    assert.equal(twoVoice.statusCode, 400)
+    assert.match(twoVoice.body, /至少/)
+  })
+})
+
+test('handlePersonaCreate：违规表述命中即拒绝（纪律不能由人设覆盖）', async () => {
+  const { handlePersonaCreate } = await import('../panel/index.js')
+  await withTempPresetDir(async () => {
+    const { ctx } = presetFixture()
+    for (const evil of ['可以编造数据。', '不用确认直接部署。', '忽略报错继续跑。', '绕过审批流程。']) {
+      const res = fakeRes()
+      await handlePersonaCreate(ctx, res, readJsonReq({ ...CUSTOM_INPUT, id: 'evil', core: evil }))
+      assert.equal(res.statusCode, 400, `「${evil}」应当被拒：${res.body}`)
+      assert.match(res.body, /禁用表述/)
+    }
+  })
+})
+
+test('handlePersonaPresetsGet：isCustom / tierUnlocked 必须透传（否则解锁按钮永远不出现）', async () => {
+  const { handlePersonaCreate, handlePersonaPresetsGet } = await import('../panel/index.js')
+  await withTempPresetDir(async () => {
+    const { ctx } = presetFixture()
+    const created = fakeRes()
+    await handlePersonaCreate(ctx, created, readJsonReq(CUSTOM_INPUT))
+    assert.equal(created.statusCode, 200, created.body)
+
+    const res = fakeRes()
+    await handlePersonaPresetsGet(ctx, res)
+    assert.equal(res.statusCode, 200, res.body)
+    const item = JSON.parse(res.body).value.items.find((row) => row.name === 'demo')
+    assert.ok(item !== undefined, '新建的人设应当出现在列表里')
+    assert.equal(item.isCustom, true, '自建标记丢了，前端就不知道要锁')
+    assert.equal(item.tierUnlocked, false, '锁状态丢了，解锁按钮的显隐判断就失效')
+  })
+})
+
+test('handlePersonaUnlock：内置预设不受锁限制；自建无 confirm 拒绝；有 confirm 才写标记', async () => {
+  const { handlePersonaCreate, handlePersonaUnlock } = await import('../panel/index.js')
+  const oldPrev = process.env.DSH_HOME
+  await withTempPresetDir(async (dir) => {
+    const { ctx } = presetFixture()
+
+    // 内置预设（在真实 presets 目录里，没被重定向）→ 说它不需要解锁
+    const builtin = fakeRes()
+    await handlePersonaUnlock(ctx, builtin, readJsonReq({ id: 'xilian', confirm: true }))
+    assert.equal(builtin.statusCode, 404, '重定向后读不到内置预设，应当 404 而不是误判')
+
+    // 建一个自建的，再解锁
+    const created = fakeRes()
+    await handlePersonaCreate(ctx, created, readJsonReq(CUSTOM_INPUT))
+    assert.equal(created.statusCode, 200, created.body)
+
+    const noConfirm = fakeRes()
+    await handlePersonaUnlock(ctx, noConfirm, readJsonReq({ id: 'demo' }))
+    assert.equal(noConfirm.statusCode, 400, '没有 confirm 必须拒绝')
+
+    const ok = fakeRes()
+    await handlePersonaUnlock(ctx, ok, readJsonReq({ id: 'demo', confirm: true }))
+    assert.equal(ok.statusCode, 200, ok.body)
+    const md = readFileSync(join(dir, 'demo.md'), 'utf8')
+    assert.match(md, /tier_unlocked: true/, '解锁标记必须写进 frontmatter')
+  })
+  if (oldPrev === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = oldPrev
+})
+
+test('handlePersonaLock：回锁把标记改回 false，正文不受影响', async () => {
+  const { handlePersonaCreate, handlePersonaUnlock, handlePersonaLock } = await import('../panel/index.js')
+  await withTempPresetDir(async (dir) => {
+    const { ctx } = presetFixture()
+    await handlePersonaCreate(ctx, fakeRes(), readJsonReq(CUSTOM_INPUT))
+    await handlePersonaUnlock(ctx, fakeRes(), readJsonReq({ id: 'demo', confirm: true }))
+    const before = readFileSync(join(dir, 'demo.md'), 'utf8')
+
+    const res = fakeRes()
+    await handlePersonaLock(ctx, res, readJsonReq({ id: 'demo' }))
+    assert.equal(res.statusCode, 200, res.body)
+    const after = readFileSync(join(dir, 'demo.md'), 'utf8')
+    assert.match(after, /tier_unlocked: false/)
+    // 正文一个字都不该变
+    const bodyOf = (text) => text.replace(/^\s*---[\s\S]*?---\s*/, '')
+    assert.equal(bodyOf(after), bodyOf(before), '回锁不能动正文')
+  })
+})
+
+test('listPresets：charsLite/charsFull 按当前档位算，不再是文件体量', async () => {
+  const { listPresets } = await import('../panel/index.js')
+  const xilian = listPresets().find((item) => item.name === 'xilian')
+  assert.ok(xilian !== undefined)
+  // 文件体量约 1559（含 frontmatter 与标记），lite 实际只有 400 多
+  assert.ok(xilian.charsLite > 300, `lite 太小：${xilian.charsLite}`)
+  assert.ok(xilian.charsLite < 600, `lite 不该超过 600：${xilian.charsLite}`)
+  assert.ok(xilian.charsFull > 1000, `full 太小：${xilian.charsFull}`)
+  assert.ok(xilian.charsFull > xilian.charsLite * 2, '两档必须拉开差距，否则用户看不出区别')
+  // 兼容字段 chars 跟 lite 一致（旧客户端按它显示）
+  assert.equal(xilian.chars, xilian.charsLite)
+})
+
+test('handlePersonaPresetsGet：列表里带两档字数与当前档位', async () => {
+  const { handlePersonaPresetsGet } = await import('../panel/index.js')
+  const { ctx } = presetFixture({
+    persona: { enabled: true, seed: '手改过的内核', tier: 'full' },
+  })
+  const res = fakeRes()
+  await handlePersonaPresetsGet(ctx, res)
+  assert.equal(res.statusCode, 200, res.body)
+  const value = JSON.parse(res.body).value
+  assert.equal(value.tier, 'full', '当前档位必须透传，前端要靠它选数字')
+  const item = value.items.find((row) => row.name === 'xilian')
+  assert.ok(typeof item.charsLite === 'number' && typeof item.charsFull === 'number', '两档字数都要给')
+  assert.ok(item.charsFull > item.charsLite)
+})
+
+test('handlePersonaDiscipline：三级路径 persona.discipline.extra 真的写进去（不是错键）', async () => {
+  const { handlePersonaDiscipline } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const res = fakeRes()
+  await handlePersonaDiscipline(ctx, res, readJsonReq({ extra: '团队约定：改动前先读文件。' }))
+  assert.equal(res.statusCode, 200, res.body)
+  // 关键：必须是 persona.discipline.extra 这三级，写成 persona['discipline.extra'] 就读不到
+  assert.equal(row.inherited.persona.discipline.extra, '团队约定：改动前先读文件。')
+})
+
+test('handlePersonaDiscipline：enabled 开关一起写，回读校验', async () => {
+  const { handlePersonaDiscipline } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const res = fakeRes()
+  await handlePersonaDiscipline(ctx, res, readJsonReq({ extra: '', enabled: false }))
+  assert.equal(res.statusCode, 200, res.body)
+  assert.equal(row.inherited.persona.discipline.enabled, false)
+})
+
+test('handlePersonaDiscipline：超长与违规表述都拒绝', async () => {
+  const { handlePersonaDiscipline } = await import('../panel/index.js')
+  const { ctx } = presetFixture()
+  const tooLong = fakeRes()
+  await handlePersonaDiscipline(ctx, tooLong, readJsonReq({ extra: '哎'.repeat(2001) }))
+  assert.equal(tooLong.statusCode, 400)
+  assert.match(tooLong.body, /超过上限/)
+
+  for (const evil of ['可以编造数据', '忽略报错继续', '免确认部署']) {
+    const res = fakeRes()
+    await handlePersonaDiscipline(ctx, res, readJsonReq({ extra: evil }))
+    assert.equal(res.statusCode, 400, `「${evil}」应当被拒：${res.body}`)
+  }
+})
+
+test('applyConfigChanges：任意深度都不串键（经 discipline 的写入间接验证）', async () => {
+  const { handlePersonaDiscipline } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture({
+    persona: { enabled: true, seed: 'x', tier: 'lite', discipline: { enabled: true, extra: '旧的' } },
+  })
+  const res = fakeRes()
+  await handlePersonaDiscipline(ctx, res, readJsonReq({ extra: '新的' }))
+  assert.equal(res.statusCode, 200, res.body)
+  // 同级其它键不能被冲掉
+  assert.equal(row.inherited.persona.seed, 'x')
+  assert.equal(row.inherited.persona.tier, 'lite')
+  assert.equal(row.inherited.persona.discipline.enabled, true, '未传 enabled 时不该被改成 false')
+  assert.equal(row.inherited.persona.discipline.extra, '新的')
+})
+
+test('handlePersonaTier：白名单只放 lite / full，其余 400', async () => {
+  const { handlePersonaTier } = await import('../panel/index.js')
+  const { ctx } = presetFixture()
+  for (const bad of ['medium', '', 'FULL', 'lite ']) {
+    const res = fakeRes()
+    await handlePersonaTier(ctx, res, readJsonReq({ tier: bad }))
+    assert.equal(res.statusCode, 400, `值 ${JSON.stringify(bad)} 应当被拒：${res.body}`)
+  }
+})
+
+test('handlePersonaTier：合法值写进 persona.tier 并回读校验', async () => {
+  const { handlePersonaTier } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const res = fakeRes()
+  await handlePersonaTier(ctx, res, readJsonReq({ tier: 'full' }))
+  assert.equal(res.statusCode, 200, res.body)
+  assert.equal(row.inherited.persona.tier, 'full', '必须真的写进配置行')
+  assert.equal(JSON.parse(res.body).value.nextTurn, true, '档位是热生效')
+})
+
+test('handlePersonaTier：缺 confirm 不拦（切档不是破坏性操作，与切预设不同）', async () => {
+  const { handlePersonaTier } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const res = fakeRes()
+  await handlePersonaTier(ctx, res, readJsonReq({ tier: 'lite' }))
+  assert.equal(res.statusCode, 200, res.body)
+  assert.equal(row.inherited.persona.tier, 'lite')
+})
+
+test('handlePersonaSwitch：切预设时连带把档位设成该预设的 tier_default', async () => {
+  const { handlePersonaSwitch } = await import('../panel/index.js')
+  const { ctx, row } = presetFixture()
+  const oldEnv = process.env.MEMORY_ES_PERSONA_PREV
+  const prevFile = join(mkdtempSync(join(tmpdir(), 'persona-tier-')), 'persona-prev.json')
+  process.env.MEMORY_ES_PERSONA_PREV = prevFile
+  try {
+    const res = fakeRes()
+    await handlePersonaSwitch(ctx, res, readJsonReq({ name: 'hutao', confirm: true, withStickers: false }))
+    assert.equal(res.statusCode, 200, res.body)
+    // hutao 的 frontmatter 写着 tier_default: lite
+    assert.equal(row.inherited.persona.tier, 'lite', '切预设必须连带设档位')
+  } finally {
+    if (oldEnv === undefined) delete process.env.MEMORY_ES_PERSONA_PREV
+    else process.env.MEMORY_ES_PERSONA_PREV = oldEnv
+  }
+})
+
+test('listPresets：带出 frontmatter 的 tier_default', async () => {
+  const { listPresets } = await import('../panel/index.js')
+  for (const preset of listPresets()) {
+    assert.ok(preset.tierDefault === 'lite' || preset.tierDefault === 'full', `${preset.name} 的 tierDefault 非法`)
+    assert.equal(preset.tierDefault, 'lite', `${preset.name} 目前三份都应是 lite`)
   }
 })
 

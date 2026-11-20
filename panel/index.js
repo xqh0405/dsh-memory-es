@@ -13,7 +13,7 @@
  * 审计索引不在插件配置里（名字硬编码 `memory_audit`），且 reader 身份没有它的读权限，
  * 所以概览里的审计计数先留空（null），等 P3 用整理身份补。
  */
-import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -333,9 +333,18 @@ function applyConfigChanges(current, changes, resolved) {
     next[group] = groupValue && typeof groupValue === 'object' ? { ...groupValue } : groupValue
   }
   for (const change of changes) {
-    const [group, key] = change.key.split('.')
-    if (next[group] === undefined || next[group] === null) next[group] = {}
-    next[group][key] = resolved.get(change.key)
+    // 任意深度：以前只 split 出两级，`persona.discipline.extra` 会被写成
+    // `persona['discipline.extra']` 这种错键——配置不报错、功能静默失效（2026-11-20 踩到）。
+    const path = change.key.split('.')
+    let cursor = next
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const key = path[i]
+      const existing = cursor[key]
+      // 逐层浅拷贝：不修改传进来的 current，也保住同级其它键
+      cursor[key] = existing && typeof existing === 'object' ? { ...existing } : {}
+      cursor = cursor[key]
+    }
+    cursor[path[path.length - 1]] = resolved.get(change.key)
   }
   return next
 }
@@ -1798,12 +1807,24 @@ async function handlePersonaGet(ctx, res) {
 
   const persona = config.persona ?? {}
   const seed = str(persona.seed)
+  const tier = persona.tier === 'full' ? 'full' : 'lite'
+  // 面板预览要显示「这个档位真正注入什么」，而不是带 frontmatter 与标记的源文件
+  const seedRendered = renderPersonaText(seed, tier)
   return json(res, 200, {
     ok: true,
     value: {
       enabled: persona.enabled !== false,
+      tier,
+      // 纪律段：独立于人设，任何档位都注入（阶段 14）
+      discipline: {
+        enabled: persona.discipline?.enabled !== false,
+        extra: str(persona.discipline?.extra),
+      },
       seed,
       seedLength: seed.trim().length,
+      // rendered*：当前档位渲染后的文本与字数（预览与标题都用它）
+      seedRendered,
+      renderedLength: seedRendered.replace(/\s/g, '').length,
       entries: (active.hits?.hits ?? []).map((hit) => ({
         memoryId: str(hit._source?.memory_id),
         content: str(hit._source?.content),
@@ -3134,10 +3155,18 @@ async function handleConfigWrite(ctx, res, req) {
  * 目标目录由服务端拼，客户端无法指定路径。
  */
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const PRESET_DIR = join(PLUGIN_ROOT, 'persona', 'presets')
+/**
+ * 预设目录。抽成函数而不是常量：测试要能把自建人设写进临时目录，
+ * 否则跑一次测试就往仓库的 persona/presets 里丢文件。
+ */
+function presetDir() {
+  return process.env.MEMORY_ES_PERSONA_PRESETS || join(PLUGIN_ROOT, 'persona', 'presets')
+}
 const PRESET_STICKERS = join(PLUGIN_ROOT, 'persona', 'stickers')
-const PRESET_LABELS = { xilian: '昔涟', hutao: '胡桃', dafeiyu: '大肥鱼' }
+const PRESET_LABELS = { xilian: '昔涟', hutao: '胡桃', dafeiyu: '大肥鱼', doubao: '豆包' }
 const PRESET_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/
+/** 与 src/prompt.ts 的 applyPersonaTier 同一套规则：开头的 --- … --- 是元数据，不进展示 */
+const PRESET_FRONTMATTER_RE = /^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?/
 /** 恢复栈只留最近 3 次：再多也没人翻，而每次都是一份 1.4KB 的正文 */
 const PERSONA_PREV_LIMIT = 3
 
@@ -3153,7 +3182,7 @@ function normText(text) {
 function listPresets() {
   let files
   try {
-    files = readdirSync(PRESET_DIR)
+    files = readdirSync(presetDir())
   } catch {
     return []
   }
@@ -3164,7 +3193,7 @@ function listPresets() {
     if (!PRESET_NAME_PATTERN.test(name)) continue
     let body
     try {
-      body = readFileSync(join(PRESET_DIR, file), 'utf8')
+      body = readFileSync(join(presetDir(), file), 'utf8')
     } catch {
       continue
     }
@@ -3175,12 +3204,37 @@ function listPresets() {
     } catch {
       stickerCount = 0
     }
+    // 展示用正文：剥掉 frontmatter（首行是 `---` 对用户没有意义）；
+    // 但 body 仍返回完整原文——切换时要原样写进 seed，由渲染层按档位解析
+    const displayBody = body.replace(PRESET_FRONTMATTER_RE, '')
+    const tierMatch = body.match(/^\s*---\r?\n([\s\S]*?)\r?\n---/)
+    const tierRaw = tierMatch ? (tierMatch[1].match(/^tier_default:\s*(\S+)/m)?.[1] ?? '') : ''
+    const authorMatch = tierMatch ? (tierMatch[1].match(/^author:\s*(\S+)/m)?.[1] ?? '') : ''
+    const unlocked = tierMatch ? /^tier_unlocked:\s*true/m.test(tierMatch[1]) : false
+    // 两档各算一次真实注入字数。**不能再用文件体量**：displayBody 里还带着
+    // `<!-- lite:skip -->` 标记，算出来 1559 字，而 lite 实际只注入 440——
+    // 面板上两档看起来「差不多」就是这么来的（2026-11-20 用户实测反馈）。
+    const charsLite = renderTierChars(body, 'lite')
+    const charsFull = renderTierChars(body, 'full')
     out.push({
       name,
       label: PRESET_LABELS[name] ?? name,
       body,
-      chars: body.replace(/\s+/g, '').length,
-      firstLine: body.split('\n').find((line) => line.trim() !== '') ?? '',
+      // 阶段 14：自建人设默认锁 lite（§6.6）——内置的 author 是「内置」，不受锁影响
+      author: authorMatch,
+      isCustom: authorMatch === '自建',
+      tierUnlocked: unlocked,
+      charsLite,
+      charsFull,
+      // 兼容旧客户端：没拿到档位信息时按 lite 显示（与 config 默认一致）
+      chars: charsLite,
+      // 摘要取「身份」正文：跳过 `【身份】` 这类段落标题行，否则列表里全是标题
+      firstLine:
+        displayBody
+          .split('\n')
+          .map((line) => line.trim())
+          .find((line) => line !== '' && !/^【[^】]*】$/.test(line)) ?? '',
+      tierDefault: tierRaw === 'full' ? 'full' : 'lite',
       stickers: stickerCount,
     })
   }
@@ -3298,12 +3352,21 @@ function currentPersonaState(ctx) {
 async function handlePersonaPresetsGet(ctx, res) {
   const state = currentPersonaState(ctx)
   if (!state.ok) return json(res, 503, { ok: false, error: state.error })
+  // 当前档位：前端据此决定列表里显示 charsLite 还是 charsFull
+  const tierRow = findEntryRow(ctx)
+  const tier = tierRow.ok && tierRow.value?.persona?.tier === 'full' ? 'full' : 'lite'
   const presets = listPresets().map((preset) => ({
     name: preset.name,
     label: preset.label,
     chars: preset.chars,
+    charsLite: preset.charsLite,
+    charsFull: preset.charsFull,
     firstLine: preset.firstLine,
     stickers: preset.stickers,
+    // 阶段 14：这两项必须透传——前端靠它们决定「解锁细腻版」按钮显不显示。
+    // 之前漏在这里，表现是按钮永远不出现（接口有字段、前端拿不到）
+    isCustom: preset.isCustom === true,
+    tierUnlocked: preset.tierUnlocked === true,
     active: normText(preset.body) === normText(state.seed),
   }))
   const prev = readPersonaPrev()
@@ -3311,6 +3374,8 @@ async function handlePersonaPresetsGet(ctx, res) {
     ok: true,
     value: {
       items: presets,
+      // 当前档位：前端据此决定显示 charsLite 还是 charsFull
+      tier,
       // 当前内核不是任何一份预设（手改过）时，前端要能说清楚「你切走就回不来」
       custom: presets.length > 0 && presets.every((preset) => !preset.active),
       stickerDir: state.stickerDir,
@@ -3322,6 +3387,429 @@ async function handlePersonaPresetsGet(ctx, res) {
         stickerDir: str(row.stickerDir),
       })),
     },
+  })
+}
+
+// ── 阶段 14：自建人设 ────────────────────────────────────────────────────
+/**
+ * 自建人设：用户填结构化字段，服务端生成同格式的预设文件。
+ *
+ * 为什么不收自由 Markdown：用户写错一个 `<!-- lite:skip -->` 就会让整段被吞，
+ * 而且七段顺序乱了提示词结构就散。收字段、由这里拼，用户写不出结构错的文件。
+ *
+ * 安全边界（`docs/人设双档与自建方案.md` §5.3）：
+ *  · 纪律**不在**表单里——它由纪律段统一提供，人设覆盖不了；
+ *  · 违规词命中即拒绝（词表不是万全，作用是把明显违规挡在落盘前）；
+ *  · 自建默认锁 lite，要 full 得走解锁确认（见 handlePersonaUnlock）。
+ */
+const CUSTOM_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
+
+/** 命中即拒绝：要求模型违反工程纪律的说法 */
+const FORBIDDEN_PERSONA_PATTERNS = [
+  [/忽略(报错|错误|异常|警告)/, '要求忽略报错'],
+  [/(可以|允许|随便|尽管)编造/, '允许编造'],
+  [/(不用|不必|无需)(确认|审批|授权|询问)/, '跳过确认'],
+  [/绕过(审批|确认|权限|校验|限制)/, '绕过审批'],
+  [/免(确认|审批|授权)/, '免确认'],
+  [/(隐藏|瞒着|不告诉)(用户|报错|风险|事实)/, '隐瞒信息'],
+]
+
+/** 纪律补充的字数上限：够写几行团队约定，又不至于把它写成第二份人设 */
+const DISCIPLINE_EXTRA_MAX = 2000
+
+const CUSTOM_LIMITS = {
+  name: 24,
+  intro: 60,
+  core: 200,
+  coreDetail: 400,
+  voiceItem: 120,
+  toneItem: 60,
+  assistantItem: 80,
+  sceneItem: 100,
+  antiItem: 80,
+  liteMax: 500,
+  fullMax: 2500,
+}
+
+/**
+ * 与 src/prompt.ts 的 applyPersonaTier 同规则（跨实现一致性有测试兜底）。
+ * 面板要显示「切到这个档位后真正注入的文本」，所以这里返回文本而不只是字数。
+ */
+const TIER_SKIP_RE = /<!--\s*lite:skip\s*-->[\s\S]*?<!--\s*\/lite:skip\s*-->/g
+const TIER_ONLY_RE = /<!--\s*lite:only\s*-->[\s\S]*?<!--\s*\/lite:only\s*-->/g
+const ANY_COMMENT_RE = /<!--[\s\S]*?-->/g
+const FRONTMATTER_STRIP_RE = /^\s*---\r?\n[\s\S]*?\r?\n---\r?\n?/
+
+function renderPersonaText(markdown, tier) {
+  let text = markdown.replace(FRONTMATTER_STRIP_RE, '')
+  text = tier === 'lite' ? text.replace(TIER_SKIP_RE, '') : text.replace(TIER_ONLY_RE, '')
+  text = text.replace(ANY_COMMENT_RE, '')
+  // 删块后会留空行，收敛一下（与 prompt.ts 一致）
+  text = text.replace(/\n{3,}/g, '\n\n')
+  return text.trim()
+}
+
+function renderTierChars(markdown, tier) {
+  return renderPersonaText(markdown, tier).replace(/\s/g, '').length
+}
+
+/** 取数组字段：过滤空串、去首尾空白、按上限截断（超长报错而不是静默截） */
+function collectList(input, key, maxItem, { min = 0, max = 99 } = {}) {
+  const raw = input?.[key]
+  if (raw === undefined || raw === null) {
+    return min > 0 ? { ok: false, error: `缺少字段 ${key}` } : { ok: true, value: [] }
+  }
+  if (!Array.isArray(raw)) return { ok: false, error: `${key} 必须是数组` }
+  const items = raw.map((item) => String(item ?? '').trim()).filter((item) => item !== '')
+  if (items.length < min) return { ok: false, error: `${key} 至少要 ${min} 条` }
+  if (items.length > max) return { ok: false, error: `${key} 最多 ${max} 条` }
+  const tooLong = items.find((item) => item.length > maxItem)
+  if (tooLong !== undefined) {
+    return { ok: false, error: `${key} 里有单条超过 ${maxItem} 字：${tooLong.slice(0, 20)}…` }
+  }
+  return { ok: true, value: items }
+}
+
+function collectText(input, key, max, { required = false } = {}) {
+  const value = String(input?.[key] ?? '').trim()
+  if (required && value === '') return { ok: false, error: `缺少字段 ${key}` }
+  if (value.length > max) return { ok: false, error: `${key} 超过 ${max} 字` }
+  return { ok: true, value }
+}
+
+/**
+ * 把字段拼成与内置预设同格式的 Markdown。
+ *
+ * 两档的分配（§4.6）：身份/内核主干/前 3 条声音/三档语气/助手第 1 条 两档共享；
+ * 内核扩展、声音第 4 条起、其余助手条目、场景、反向清单 只进 full。
+ */
+function buildCustomPersonaMarkdown(input) {
+  const lines = [
+    '---',
+    `id: ${input.id}`,
+    `name: ${input.name}`,
+    `self_ref: ${input.selfRef}`,
+    `address: ${input.address}`,
+    'tier_default: lite',
+    'version: 1',
+    'author: 自建',
+    '---',
+    '',
+    '【身份】',
+    '',
+    input.intro,
+    '',
+    '【内核】',
+    '',
+    input.core,
+  ]
+  if (input.coreDetail !== '') {
+    lines.push('<!-- lite:skip -->', input.coreDetail, '<!-- /lite:skip -->')
+  }
+  lines.push('', '【声音】', '')
+  input.voice.forEach((item, index) => {
+    // 前 3 条进 lite：再多就撑破 500 字上限
+    if (index === 3) lines.push('<!-- lite:skip -->')
+    lines.push(`${index + 1}. ${item}`)
+  })
+  if (input.voice.length > 3) lines.push('<!-- /lite:skip -->')
+
+  lines.push('', '【三档语气】', '')
+  for (const [label, value] of [
+    ['轻快（默认）', input.toneLight],
+    ['认真（讲方案、报结论）', input.toneSerious],
+    ['郑重（用户受挫、告别）', input.toneSolemn],
+  ]) {
+    lines.push(`- ${label}：${value}`)
+  }
+
+  lines.push('', '【作为助手】', '')
+  input.assistant.forEach((item, index) => {
+    if (index === 1) lines.push('<!-- lite:skip -->')
+    lines.push(`- ${item}`)
+  })
+  if (input.assistant.length > 1) lines.push('<!-- /lite:skip -->')
+
+  if (input.scenes.length > 0) {
+    lines.push('', '<!-- lite:skip -->', '【场景】', '')
+    for (const item of input.scenes) lines.push(`- ${item}`)
+    lines.push('<!-- /lite:skip -->')
+  }
+  if (input.anti.length > 0) {
+    lines.push('', '<!-- lite:skip -->', '【反向清单】', '')
+    for (const item of input.anti) lines.push(`- ${item}`)
+    lines.push('<!-- /lite:skip -->')
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+function validateCustomPersona(input) {
+  const id = String(input?.id ?? '').trim().toLowerCase()
+  if (!CUSTOM_ID_RE.test(id)) {
+    return { ok: false, error: 'id 只能用小写字母、数字、下划线和短横（1~32 位，字母或数字开头）' }
+  }
+  if (['system', 'assistant', 'user', 'default', 'seed'].includes(id)) {
+    return { ok: false, error: `id「${id}」是保留字` }
+  }
+  if (listPresets().some((item) => item.name === id)) {
+    return { ok: false, error: `已经有同名的预设或自建人设：${id}` }
+  }
+
+  const fields = {}
+  for (const [key, max, required] of [
+    ['name', CUSTOM_LIMITS.name, true],
+    ['selfRef', 12, true],
+    ['address', 12, true],
+    ['intro', CUSTOM_LIMITS.intro, true],
+    ['core', CUSTOM_LIMITS.core, true],
+    ['coreDetail', CUSTOM_LIMITS.coreDetail, false],
+    ['toneLight', CUSTOM_LIMITS.toneItem, true],
+    ['toneSerious', CUSTOM_LIMITS.toneItem, true],
+    ['toneSolemn', CUSTOM_LIMITS.toneItem, true],
+  ]) {
+    const got = collectText(input, key, max, { required })
+    if (!got.ok) return got
+    fields[key] = got.value
+  }
+
+  const voice = collectList(input, 'voice', CUSTOM_LIMITS.voiceItem, { min: 3, max: 12 })
+  if (!voice.ok) return voice
+  const assistant = collectList(input, 'assistant', CUSTOM_LIMITS.assistantItem, { min: 1, max: 6 })
+  if (!assistant.ok) return assistant
+  const scenes = collectList(input, 'scenes', CUSTOM_LIMITS.sceneItem, { max: 6 })
+  if (!scenes.ok) return scenes
+  const anti = collectList(input, 'anti', CUSTOM_LIMITS.antiItem, { max: 8 })
+  if (!anti.ok) return anti
+
+  const value = {
+    id,
+    ...fields,
+    voice: voice.value,
+    assistant: assistant.value,
+    scenes: scenes.value,
+    anti: anti.value,
+  }
+
+  // 违规词：扫所有文本字段（含数组项），命中即拒
+  const haystack = [
+    value.name, value.selfRef, value.address, value.intro, value.core, value.coreDetail,
+    ...value.voice, ...value.assistant, ...value.scenes, ...value.anti,
+    value.toneLight, value.toneSerious, value.toneSolemn,
+  ].join('\n')
+  for (const [re, why] of FORBIDDEN_PERSONA_PATTERNS) {
+    const hit = haystack.match(re)
+    if (hit !== null) {
+      return { ok: false, error: `命中禁用表述「${hit[0]}」（${why}）；工程纪律不能由人设覆盖` }
+    }
+  }
+
+  const markdown = buildCustomPersonaMarkdown(value)
+  const liteChars = renderTierChars(markdown, 'lite')
+  const fullChars = renderTierChars(markdown, 'full')
+  const warnings = []
+  if (fullChars > CUSTOM_LIMITS.fullMax) {
+    return { ok: false, error: `细腻版 ${fullChars} 字，超过上限 ${CUSTOM_LIMITS.fullMax}` }
+  }
+  if (liteChars > CUSTOM_LIMITS.liteMax) {
+    // 不拒：上限是提醒，不是考核。但要让用户知道超了
+    warnings.push(`纯享版 ${liteChars} 字，超过上限 ${CUSTOM_LIMITS.liteMax}；建议精简（可少写几条声音或反悔清单）`)
+  }
+  return { ok: true, value: { ...value, markdown, liteChars, fullChars }, warnings }
+}
+
+/**
+ * 自建人设解锁细腻版（§6.6）。
+ *
+ * 为什么需要这一步：细腻版上限 2500 字，不容易一眼看完，是提示注入的天然载体。
+ * 内置预设是部署者写的、已有人审；自建的才要求这一次显式确认。
+ *
+ * 契约：
+ *  · 必须 `confirm: true`——不确认就等于没通读；
+ *  · 只对 `author: 自建` 的文件生效（内置的没必要锁）；
+ *  · 写 `tier_unlocked: true` 进 frontmatter，并记一条审计。
+ */
+async function handlePersonaUnlock(ctx, res, req) {
+  if (!requireLocalWrite(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+  const id = String(input.id ?? '').trim()
+
+  const preset = listPresets().find((item) => item.name === id)
+  if (!preset) return json(res, 404, { ok: false, error: `没有这个预设：${id === '' ? '（空）' : id}` })
+  if (!preset.isCustom) {
+    return json(res, 400, { ok: false, error: '内置预设不受锁限制，无需解锁' })
+  }
+  if (input.confirm !== true) {
+    return json(res, 400, { ok: false, error: '需要 confirm:true（确认已通读这份人设全文）' })
+  }
+
+  const path = join(presetDir(), `${id}.md`)
+  const source = readFileSync(path, 'utf8')
+  const withFlag = setFrontmatterFlag(source, 'tier_unlocked', 'true')
+  if (withFlag === null) {
+    return json(res, 400, { ok: false, error: '这份人设没有 frontmatter，无法标记解锁' })
+  }
+  writeFileSync(path, withFlag, 'utf8')
+  appendPersonaAudit({ action: 'unlock', id, chars: preset.chars })
+
+  json(res, 200, { ok: true, value: { id, tierUnlocked: true, chars: preset.chars } })
+}
+
+/** 回锁：撤销解锁标记（审计里留痕，不删历史） */
+async function handlePersonaLock(ctx, res, req) {
+  if (!requireLocalWrite(ctx, res)) return null
+  const body = await readJsonBody(req)
+  const id = String(body.value?.id ?? '').trim()
+  const path = join(presetDir(), `${id}.md`)
+  if (!existsSync(path)) return json(res, 404, { ok: false, error: `没有这个预设：${id}` })
+  const source = readFileSync(path, 'utf8')
+  const withFlag = setFrontmatterFlag(source, 'tier_unlocked', 'false')
+  if (withFlag === null) return json(res, 400, { ok: false, error: '这份人设没有 frontmatter' })
+  writeFileSync(path, withFlag, 'utf8')
+  appendPersonaAudit({ action: 'relock', id })
+  json(res, 200, { ok: true, value: { id, tierUnlocked: false } })
+}
+
+/**
+ * 在 frontmatter 里设置/替换一个布尔键。没有 frontmatter 返回 null。
+ * 只动 frontmatter 内部，正文一个字不碰——正文可能很长，正则整段重写风险太大。
+ */
+function setFrontmatterFlag(source, key, value) {
+  const match = source.match(/^(\s*)---\r?\n([\s\S]*?)(\r?\n)---\r?\n?/)
+  if (match === null) return null
+  let fm = match[2]
+  const lineRe = new RegExp(`^${key}:.*$`, 'm')
+  if (lineRe.test(fm)) {
+    fm = fm.replace(lineRe, `${key}: ${value}`)
+  } else {
+    fm = `${fm}${match[3]}${key}: ${value}`
+  }
+  return source.slice(0, match.index) + `${match[1]}---${match[3]}${fm}${match[3]}---${match[3]}` +
+    source.slice(match.index + match[0].length)
+}
+
+/**
+ * 人设审计：追加一行 JSONL。不写 ES——这一步在面板侧，不该为一条审计引入检索依赖；
+ * 文件坏了也只是少一条记录，不影响功能。
+ */
+function appendPersonaAudit(record) {
+  try {
+    const dir = join(DSH_HOME, 'memory-es')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'persona-audit.jsonl')
+    appendFileSync(path, `${JSON.stringify({ ...record, at: new Date().toISOString() })}\n`, 'utf8')
+  } catch {
+    // 审计写不进去不该阻断操作；失败静默（下一次成功时会补上各自的记录）
+  }
+}
+
+async function handlePersonaCreate(ctx, res, req) {
+  if (!requireLocalWrite(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+
+  const validated = validateCustomPersona(body.value ?? {})
+  if (!validated.ok) return json(res, 400, { ok: false, error: validated.error })
+
+  const path = join(presetDir(), `${validated.value.id}.md`)
+  if (existsSync(path)) {
+    return json(res, 400, { ok: false, error: `文件已存在：${validated.value.id}.md（换一个 id）` })
+  }
+  try {
+    writeFileSync(path, validated.value.markdown, { encoding: 'utf8', flag: 'wx' })
+  } catch (error) {
+    return json(res, 500, { ok: false, error: `写入失败：${String(error?.message ?? error)}` })
+  }
+
+  json(res, 200, {
+    ok: true,
+    value: {
+      id: validated.value.id,
+      liteChars: validated.value.liteChars,
+      fullChars: validated.value.fullChars,
+      // 自建人设默认锁 lite（§6.6）：要 full 得调 /persona/unlock 再确认
+      tierLocked: true,
+      warnings: validated.warnings,
+    },
+  })
+}
+
+/**
+ * 阶段 14：切人设档位（lite / full）。
+ *
+ * 为什么不塞进 EDITABLE 那张表：档位与人设是同一个页面的一件事，
+ * 而且切换预设时要连带设它（见 handlePersonaSwitch），做成独立接口才好复用。
+ *
+ * 白名单只有两个字面值——`persona.tier` 在 config schema 里是 union，写别的会被拒。
+ */
+async function handlePersonaTier(ctx, res, req) {
+  if (!requireLocalWrite(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const tier = str(body.value?.tier)
+  if (tier !== 'lite' && tier !== 'full') {
+    return json(res, 400, { ok: false, error: `tier 只接受 lite 或 full（收到：${tier === '' ? '（空）' : tier}）` })
+  }
+
+  const written = await writeEntryConfig(ctx, [{ key: 'persona.tier', value: tier, type: 'string' }])
+  if (!written.ok) return json(res, 500, { ok: false, error: written.error })
+
+  // 写后读回校验：折叠/类型转换都可能让值没落进去，回读不一致就别报成功
+  const row = findEntryRow(ctx)
+  const saved = row.ok ? (row.value?.persona?.tier === 'full' ? 'full' : 'lite') : ''
+  if (saved !== tier) {
+    return json(res, 500, { ok: false, error: `写入后回读不一致（期望 ${tier}，实际 ${saved || '读不到'}）` })
+  }
+  json(res, 200, { ok: true, value: { tier, nextTurn: true } })
+}
+
+/**
+ * 阶段 14：工程纪律段的部署者补充（`persona.discipline.extra`）。
+ *
+ * 语义边界：**只能追加，不能删**。内置 5 条是安全底线，不给人设/部署者留删掉的路径——
+ * 这也是它与「人格」最大的区别：人设随便改，纪律不行。
+ *
+ * 为什么还要一个开关：有些部署者确实想完全关掉（比如自己另有一套更严的约束）。
+ * 允许关，但 `index.ts` 会在启动时 log 一条显眼警告。
+ */
+async function handlePersonaDiscipline(ctx, res, req) {
+  if (!requireLocalWrite(ctx, res)) return null
+  const body = await readJsonBody(req)
+  if (!body.ok) return json(res, 400, { ok: false, error: body.error })
+  const input = body.value ?? {}
+
+  const extra = String(input.extra ?? '').trim()
+  if (extra.length > DISCIPLINE_EXTRA_MAX) {
+    return json(res, 400, { ok: false, error: `补充内容 ${extra.length} 字，超过上限 ${DISCIPLINE_EXTRA_MAX}` })
+  }
+  // 不允许用户在补充里写「取消上面几条」这类*删除*语义——那句只会在提示词里与内置条目打架
+  for (const [re, why] of FORBIDDEN_PERSONA_PATTERNS) {
+    const hit = extra.match(re)
+    if (hit !== null) {
+      return json(res, 400, { ok: false, error: `补充内容命中禁用表述「${hit[0]}」（${why}）` })
+    }
+  }
+
+  const pairs = [{ key: 'persona.discipline.extra', value: extra, type: 'string' }]
+  if (typeof input.enabled === 'boolean') {
+    pairs.push({ key: 'persona.discipline.enabled', value: input.enabled, type: 'boolean' })
+  }
+
+  const written = await writeEntryConfig(ctx, pairs)
+  if (!written.ok) return json(res, 500, { ok: false, error: written.error })
+
+  // 写后回读：颜色看文件里到底落没落进去
+  const row = findEntryRow(ctx)
+  const saved = row.ok ? row.value?.persona?.discipline ?? {} : {}
+  const savedExtra = str(saved.extra).trim()
+  if (savedExtra !== extra) {
+    return json(res, 500, { ok: false, error: '写入后回读不一致（补充内容没落盘）' })
+  }
+  json(res, 200, {
+    ok: true,
+    value: { enabled: saved.enabled !== false, extra: savedExtra, nextTurn: true },
   })
 }
 
@@ -3362,6 +3850,9 @@ async function handlePersonaSwitch(ctx, res, req) {
   const pairs = [
     { key: 'persona.seed', value: foldSeed(preset.body), type: 'string' },
     { key: 'persona.enabled', value: true, type: 'boolean' },
+    // 阶段 14：切预设连带把档位设成该预设建议的（与 use-persona.sh 一致），
+    // 否则切到细腻版角色却留在 lite，用户会以为"切了但没变"
+    { key: 'persona.tier', value: preset.tierDefault === 'full' ? 'full' : 'lite', type: 'string' },
   ]
   if (stickerDir !== '') pairs.push({ key: 'stickers.dir', value: stickerDir, type: 'string' })
 
@@ -4030,6 +4521,13 @@ async function handle(ctx, req, res) {
     if (path === '/config' && req.method === 'POST') return await handleConfigWrite(ctx, res, req)
     // 阶段 34：切人格（同时换 stickers.dir）与「恢复上一份」——与 /config 同一条管理员门
     if (path === '/persona/switch' && req.method === 'POST') return await handlePersonaSwitch(ctx, res, req)
+    // 阶段 14：人设档位（lite / full）
+    if (path === '/persona/tier' && req.method === 'POST') return await handlePersonaTier(ctx, res, req)
+    if (path === '/persona/discipline' && req.method === 'POST') return await handlePersonaDiscipline(ctx, res, req)
+    // 阶段 14：自建人设（创建 / 解锁细腻版 / 回锁）
+    if (path === '/persona/create' && req.method === 'POST') return await handlePersonaCreate(ctx, res, req)
+    if (path === '/persona/unlock' && req.method === 'POST') return await handlePersonaUnlock(ctx, res, req)
+    if (path === '/persona/lock' && req.method === 'POST') return await handlePersonaLock(ctx, res, req)
     if (path === '/persona/restore' && req.method === 'POST') return await handlePersonaRestore(ctx, res, req)
     // 删除：物理删一条记忆（个人/团队两种 scope，权限各自校验）
     if (path === '/memories/delete' && req.method === 'POST') return await handleDeleteMemory(ctx, res, req)
@@ -4454,6 +4952,11 @@ export {
   // 阶段 34：人格预设切换（导出给测试：目录白名单、恢复栈、贴图根推导都是易错点）
   handlePersonaPresetsGet,
   handlePersonaSwitch,
+  handlePersonaTier,
+  handlePersonaDiscipline,
+  handlePersonaCreate,
+  handlePersonaUnlock,
+  handlePersonaLock,
   handlePersonaRestore,
   listPresets,
   resolveStickerRoot,

@@ -184,6 +184,47 @@ window.__ModuleLoader__.load({
       personaPresetDone: '已切换，下一轮对话生效',
       personaPresetNow: '当前生效：',
       personaPresetCustom: '当前内核是手改的（不属于任何预设），切走后可用「恢复上一份」找回',
+      // 阶段 14：人设档位（两档都是**上限**不是指标）
+      personaTier: '档位',
+      personaTierLite: '纯享版（≤500 字）',
+      personaTierFull: '细腻版（≤2500 字）',
+      personaTierHint: '两档都是上限、不是要写满：纯享版省 token，细腻版味道更足。改完下一轮生效。',
+      personaTierCharsHint: '当前档位真正注入提示词的字数（不含 frontmatter 与标记）',
+      personaTierLiteShort: '纯享版',
+      personaTierFullShort: '细腻版',
+      personaKernelEditHint: '这里编辑的是源文件：<!-- lite:skip --> 包住的段只进细腻版；保存后上面按当前档位重新渲染',
+      personaDiscipline: '工程纪律',
+      personaDisciplineHint: '独立于人格，任何档位都注入；换角色不会丢',
+      personaDisciplineOffHint: '已关闭——不编造 / 报错原样贴 这些约束将只依赖人设自述（不建议）',
+      personaDisciplineEnabled: '启用工程纪律段',
+      personaDisciplineBuiltin: '内置 5 条（不可删）：工程严谨性不打折 · 技术内容原样呈现 · 不确定就说不确定 · 工具规则照常遵守 · 一句话切普通语气',
+      personaDisciplinePlaceholder: '在这里补充团队自己的约束（只能追加，不能删内置条目）',
+      personaDisciplineSave: '保存补充',
+      personaDisciplineDone: '已保存，下一轮生效',
+      personaTierDone: '档位已切换，下一轮对话生效',
+      // 阶段 14：自建人设
+      personaCreate: '新建',
+      personaCreateHint: '自己写一份人设：填字段即可，服务端按统一格式拼装。纪律不在这里——它单独注入，任何档位都生效。',
+      personaUnlock: '解锁细腻版',
+      personaUnlockHint: '自建人设默认锁在纯享版；细腻版文本长、不容易一眼看完，解锁前请确认已通读。',
+      personaUnlockConfirm: '确认已通读全文，允许这份自建人设使用细腻版？',
+      personaUnlockDone: '已解锁细腻版；改动会记一条审计',
+      personaCreateSave: '创建',
+      personaCreateDone: '已创建',
+      personaFieldId: 'id（小写字母数字）',
+      personaFieldName: '显示名',
+      personaFieldSelfRef: '自称',
+      personaFieldAddress: '对用户的称呼',
+      personaField_intro: '一句话自我介绍（身份）',
+      personaField_core: '性格底色（一两句，两档共享）',
+      personaField_coreDetail: '性格扩展（可选，只进细腻版）',
+      personaField_voice: '说话规则：每行一条，至少 3 条（前 3 条两档共享，之后只进细腻版）',
+      personaField_toneLight: '轻快档：什么场合、什么句式',
+      personaField_toneSerious: '认真档：讲方案/报结论时怎么变',
+      personaField_toneSolemn: '郑重档：安慰时怎么托底',
+      personaField_assistant: '作为助手的态度：每行一条（第 1 条两档共享）',
+      personaField_scenes: '场景脚本：每行一条（只进细腻版，可空）',
+      personaField_anti: '反向清单：做了就崩人设的事，每行一条（只进细腻版，可空）',
       personaStickersNow: '贴图目录：',
       personaRestore: '恢复上一份',
       personaRestoreHint: '把内核与贴图恢复成最近一次切换前的那一份',
@@ -567,6 +608,45 @@ window.__ModuleLoader__.load({
       personaPresetDone: 'Switched, takes effect next turn',
       personaPresetNow: 'Active: ',
       personaPresetCustom: 'Current core was hand-edited (matches no preset); use "Restore previous" to get it back',
+      personaTier: 'Tier',
+      personaTierLite: 'Lite (≤500 chars)',
+      personaTierFull: 'Full (≤2500 chars)',
+      personaTierHint: 'Both are caps, not quotas: lite saves tokens, full carries more flavour. Takes effect next turn.',
+      personaTierCharsHint: 'Characters actually injected at this tier (frontmatter and markers excluded)',
+      personaTierLiteShort: 'lite',
+      personaTierFullShort: 'full',
+      personaKernelEditHint: 'You are editing the source: segments wrapped in <!-- lite:skip --> only reach the full tier',
+      personaDiscipline: 'Engineering discipline',
+      personaDisciplineHint: 'Independent of persona; always injected regardless of tier',
+      personaDisciplineOffHint: 'Disabled — constraints like "never fabricate / quote errors verbatim" now rely on the persona text alone (not advised)',
+      personaDisciplineEnabled: 'Enable discipline section',
+      personaDisciplineBuiltin: '5 built-in rules (cannot be removed): rigor · verbatim technical content · say when unsure · tool rules · instant tone switch',
+      personaDisciplinePlaceholder: 'Add your own constraints here (append-only; built-ins cannot be removed)',
+      personaDisciplineSave: 'Save',
+      personaDisciplineDone: 'Saved; applies next turn',
+      personaTierDone: 'Tier switched; applies next turn',
+      personaCreate: 'New',
+      personaCreateHint: 'Write your own persona by filling fields; the server assembles the canonical format. Discipline is NOT here — it is injected separately and always applies.',
+      personaUnlock: 'Unlock full tier',
+      personaUnlockHint: 'Custom personas are locked to lite by default; full text is long and easy to miss, confirm you have read it.',
+      personaUnlockConfirm: 'Confirm you have read it fully and allow full tier for this custom persona?',
+      personaUnlockDone: 'Full tier unlocked; an audit entry was written',
+      personaCreateSave: 'Create',
+      personaCreateDone: 'Created',
+      personaFieldId: 'id (lowercase letters/digits)',
+      personaFieldName: 'Display name',
+      personaFieldSelfRef: 'Self-reference',
+      personaFieldAddress: 'How to address the user',
+      personaField_intro: 'One-line intro (identity)',
+      personaField_core: 'Core temperament (1-2 lines, both tiers)',
+      personaField_coreDetail: 'Temperament detail (optional, full tier only)',
+      personaField_voice: 'Speaking rules: one per line, at least 3 (first 3 shared, rest full only)',
+      personaField_toneLight: 'Light tone: when and how',
+      personaField_toneSerious: 'Serious tone: plans / conclusions',
+      personaField_toneSolemn: 'Solemn tone: how to hold the user',
+      personaField_assistant: 'Assistant stance: one per line (first one shared)',
+      personaField_scenes: 'Scene scripts: one per line (full only, optional)',
+      personaField_anti: 'Anti-list: what breaks this persona, one per line (full only, optional)',
       personaStickersNow: 'Sticker dir: ',
       personaRestore: 'Restore previous',
       personaRestoreHint: 'Restore the core and stickers from before the last switch',
@@ -4435,11 +4515,26 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = React.useState(false)
       const [saveMsg, setSaveMsg] = React.useState('')
       // 阶段 34：预设切换（列表 + 选中项 + 忙碌态）。presets 为空 = 包内没有预设，整条不渲染
-      const [presets, setPresets] = React.useState({ items: [], custom: false, prev: [], stickerDir: '' })
+      const [presets, setPresets] = React.useState({ items: [], custom: false, prev: [], stickerDir: '', tier: 'lite' })
       const [switchName, setSwitchName] = React.useState('')
       const [switching, setSwitching] = React.useState(false)
       const [switchMsg, setSwitchMsg] = React.useState('')
       const [withStickers, setWithStickers] = React.useState(true)
+      // 阶段 14：人设档位。空串 = 还没从后端读到，不渲染下拉（避免闪一个假值）
+      const [tier, setTier] = React.useState('')
+      const [tierBusy, setTierBusy] = React.useState(false)
+      const [tierMsg, setTierMsg] = React.useState('')
+      // 阶段 14：工程纪律段的部署者补充（只追加，不能删内置条目）。
+      // null = 未编辑，跟随后端值；编辑后变成草稿，保存成功再清回 null
+      const [discDraft, setDiscDraft] = React.useState(null)
+      const [discEnabledDraft, setDiscEnabledDraft] = React.useState(null)
+      const [discBusy, setDiscBusy] = React.useState(false)
+      const [discMsg, setDiscMsg] = React.useState('')
+      // 阶段 14：自建人设。creating=false 时整块不渲染；draft 是全字段草稿
+      const [creating, setCreating] = React.useState(false)
+      const [createDraft, setCreateDraft] = React.useState(null)
+      const [createBusy, setCreateBusy] = React.useState(false)
+      const [createMsg, setCreateMsg] = React.useState('')
       // 折叠状态：默认只收起表情包与日记
       const [openKeys, setOpenKeys] = React.useState({ stickers: false, diary: false })
       const toggle = (key) => setOpenKeys((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -4463,11 +4558,13 @@ window.__ModuleLoader__.load({
               custom: Boolean(value.custom),
               prev: Array.isArray(value.prev) ? value.prev : [],
               stickerDir: typeof value.stickerDir === 'string' ? value.stickerDir : '',
+              // 后端按当前 persona.tier 告诉我们；旧宿主没这个字段时按 lite（与 schema 默认一致）
+              tier: value.tier === 'full' ? 'full' : 'lite',
             })
             const activeItem = items.find((item) => item.active)
             setSwitchName((prev) => prev || (activeItem ? activeItem.name : items[0]?.name ?? ''))
           })
-          .catch(() => setPresets({ items: [], custom: false, prev: [], stickerDir: '' }))
+          .catch(() => setPresets({ items: [], custom: false, prev: [], stickerDir: '', tier: 'lite' }))
         apiGet('/stickers')
           .then((value) => setStickers(value))
           .catch(() => setStickers(null))
@@ -4560,6 +4657,98 @@ window.__ModuleLoader__.load({
           .finally(() => setSwitching(false))
       }
 
+      /** 自建人设的空草稿。数组字段用「每行一条」的文本域，保存时按行拆 */
+      const emptyDraft = () => ({
+        id: '', name: '', selfRef: '', address: '',
+        intro: '', core: '', coreDetail: '',
+        voice: '', toneLight: '', toneSerious: '', toneSolemn: '',
+        assistant: '', scenes: '', anti: '',
+      })
+
+      const splitLines = (text) =>
+        String(text ?? '').split('\n').map((line) => line.trim()).filter((line) => line !== '')
+
+      /**
+       * 提交自建人设。服务端会再校验一遍（id 格式、必填、字数、禁用表述），
+       * 这里只做「把每行一条的文本域拆成数组」这一件客户端该做的事。
+       */
+      /**
+       * 解锁细腻版（§6.6）：自建人设默认锁 lite，细腻版上限 2500 字不容易一眼看完，
+       * 是提示注入的天然载体。所以点之前把字数摆出来，让人真的确认一次。
+       */
+      const unlockTier = () => {
+        const target = presets.items.find((item) => item.active)
+        if (!target) return
+        const ask = `${t('personaUnlockConfirm')}「${target.label}」（细腻版 ${target.charsFull} 字）`
+        if (typeof window !== 'undefined' && !window.confirm(ask)) return
+        setTierBusy(true)
+        setTierMsg('')
+        apiPost('/persona/unlock', { id: target.name, confirm: true })
+          .then(() => { setTierMsg(t('personaUnlockDone')); load() })
+          .catch((error) => setTierMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setTierBusy(false))
+      }
+
+      const submitCreate = () => {
+        if (createDraft === null || createBusy) return
+        setCreateBusy(true)
+        setCreateMsg('')
+        const payload = {
+          ...createDraft,
+          voice: splitLines(createDraft.voice),
+          assistant: splitLines(createDraft.assistant),
+          scenes: splitLines(createDraft.scenes),
+          anti: splitLines(createDraft.anti),
+        }
+        apiPost('/persona/create', payload)
+          .then((value) => {
+            const warn = Array.isArray(value?.warnings) && value.warnings.length > 0
+              ? ` · ${value.warnings.join('；')}`
+              : ''
+            setCreateMsg(`${t('personaCreateDone')}（纯享 ${value?.liteChars ?? '?'} 字 / 细腻 ${value?.fullChars ?? '?'} 字）${warn}`)
+            setCreating(false)
+            setCreateDraft(null)
+            load()
+          })
+          .catch((error) => setCreateMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setCreateBusy(false))
+      }
+
+      /** 阶段 14：保存工程纪律的补充。只追加，内置 5 条服务端锁死 */
+      const saveDiscipline = () => {
+        if (discBusy) return
+        setDiscBusy(true)
+        setDiscMsg('')
+        apiPost('/persona/discipline', { extra: discExtraValue, enabled: discEnabledValue })
+          .then(() => {
+            setDiscMsg(t('personaDisciplineDone'))
+            setDiscDraft(null)
+            setDiscEnabledDraft(null)
+            load()
+          })
+          .catch((error) => setDiscMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setDiscBusy(false))
+      }
+
+      /**
+       * 阶段 14：切档位。与切预设分开：换人设和换详略是两件事，
+       * 合在一起会让「我只想切细腻点」变成「连带换了角色」。
+       */
+      const applyTier = (next) => {
+        const current = tier !== '' ? tier : (data.tier || 'lite')
+        if (next === current || tierBusy) return
+        setTierBusy(true)
+        setTierMsg('')
+        apiPost('/persona/tier', { tier: next })
+          .then(() => {
+            setTier(next)
+            setTierMsg(t('personaTierDone'))
+            load()
+          })
+          .catch((error) => setTierMsg(`${t('error')}: ${String(error.message ?? error)}`))
+          .finally(() => setTierBusy(false))
+      }
+
       /** 恢复上一份：恢复栈里第 0 条（最近一次切换前的那份） */
       const restorePrev = (index = 0) => {
         if (typeof window !== 'undefined' && !window.confirm(t('personaRestoreConfirm'))) return
@@ -4628,8 +4817,18 @@ window.__ModuleLoader__.load({
 
       const data = persona.data ?? {}
       const entries = Array.isArray(data.entries) ? data.entries : []
+      // 纪律段的编辑值：null = 用户没动过，直接用服务端值。
+      // **不要用 useEffect 同步**：这个组件在 loading 时会 `return` 早退，
+      // 早退之后再调 hook 会让 hooks 数量在两次渲染间变化 → React 直接崩成白屏
+      // （2026-11-20 实测踩到）。派生值 + load 后清空草稿是安全写法。
+      const discExtraValue = discDraft ?? (typeof data.discipline?.extra === 'string' ? data.discipline.extra : '')
+      const discEnabledValue = discEnabledDraft ?? (data.discipline?.enabled !== false)
       const seed = typeof data.seed === 'string' ? data.seed : ''
-      const seedLines = seed.trim() === '' ? 0 : seed.trim().split('\n').length
+      // 预览显示「当前档位实际注入的文本」（后端渲染好给过来）：
+      // 原始 seed 里有 frontmatter 和 <!-- lite:skip --> 标记，那对用户没有意义，
+      // 而且它不随档位变——切了纯享版/细腻版，下面这一段本该跟着变（2026-11-20 反馈）
+      const seedRendered = typeof data.seedRendered === 'string' ? data.seedRendered : seed
+      const seedLines = seedRendered.trim() === '' ? 0 : seedRendered.trim().split('\n').length
       const stickerRows = stickers && Array.isArray(stickers.items) ? stickers.items : []
       const diaryRows = diary.rows
 
@@ -4662,8 +4861,9 @@ window.__ModuleLoader__.load({
                 style: S.btn,
                 onClick: () => { setEditing(false); setSaveMsg('') },
               }, t('personaCancel')),
-              h('span', { style: S.muted, children: `${draft.length} 字` })))
-        : seed.trim() === ''
+              h('span', { style: S.muted, children: `${draft.length} 字（原文，含标记）` }),
+              h('span', { style: { ...S.muted, fontSize: 11.5 }, children: t('personaKernelEditHint') })))
+        : seedRendered.trim() === ''
           ? h('div', { style: S.muted, children: t('personaKernelEmpty') })
           : h('pre', {
               style: {
@@ -4678,7 +4878,7 @@ window.__ModuleLoader__.load({
                 lineHeight: 1.65,
                 whiteSpace: 'pre-wrap',
               },
-              children: seed,
+              children: seedRendered,
             })
 
       // ── 阶段 34：预设切换条（仅管理员 + 仅非编辑态）────────────────────
@@ -4713,9 +4913,11 @@ window.__ModuleLoader__.load({
                 },
               }, presets.items.map((item) =>
                 h('option', { key: item.name, value: item.name },
-                  // 只报图数：预设字数（去空白）与标题里的 seed 字数（含换行）口径不同，
-                  // 两个数字并排会让人以为切换没成功（1366 vs 1504 那种）
-                  `${item.label}${item.active ? ` · ${t('personaPresetActive')}` : ''}（${item.stickers} 图）`))),
+                  // 阶段 14 起报「当前档位下的真实注入字数」。以前只报图数，是因为
+                  // 文件体量（1559）与实际注入（lite 440）差了 3 倍，两个数并排更像 bug；
+                  // 现在后端按档位算准了，才敢显示（2026-11-20 用户实测反馈「两档差不多」）
+                  `${item.label}${item.active ? ` · ${t('personaPresetActive')}` : ''}`
+                  + `（${presets.tier === 'full' ? item.charsFull : item.charsLite} 字 · ${item.stickers} 图）`))),
               h('button', {
                 type: 'button',
                 style: { ...S.btn, flexShrink: 0 },
@@ -4742,7 +4944,132 @@ window.__ModuleLoader__.load({
                     onClick: () => restorePrev(0),
                   }, t('personaRestore'))
                 : null,
+              // 阶段 14：档位与人设分开选——换角色 ≠ 换详略。
+              // 拿不到后端值时按 lite 显示（缺省值与 config schema 一致）
+              h('span', { style: { ...S.muted, fontSize: 12 } }, t('personaTier')),
+              h('select', {
+                value: tier !== '' ? tier : (data.tier || 'lite'),
+                disabled: tierBusy,
+                title: t('personaTierHint'),
+                onChange: (event) => applyTier(event.target.value),
+                style: {
+                  padding: '3px 6px',
+                  borderRadius: 6,
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  background: 'var(--dsw-alias-bg-l1)',
+                  color: 'var(--dsw-alias-label-primary)',
+                  fontSize: 12,
+                },
+              },
+                h('option', { value: 'lite' }, t('personaTierLite')),
+                h('option', { value: 'full' }, t('personaTierFull'))),
+              // 当前档位真实注入多少字：切档时这个数字会立刻变，是最能说明差别的指标
+              activePreset === null
+                ? null
+                : h('span', {
+                    style: { ...S.muted, fontSize: 11.5, whiteSpace: 'nowrap' },
+                    title: t('personaTierCharsHint'),
+                  }, `${(tier !== '' ? tier : presets.tier) === 'full' ? activePreset.charsFull : activePreset.charsLite} 字`),
+              // 自建人设且未解锁时才显示：内置预设是作者写的，不受这道锁
+              activePreset !== null && activePreset.isCustom === true && activePreset.tierUnlocked !== true
+                ? h('button', {
+                    type: 'button',
+                    style: { ...S.btn, flexShrink: 0 },
+                    disabled: tierBusy,
+                    title: t('personaUnlockHint'),
+                    onClick: unlockTier,
+                  }, t('personaUnlock'))
+                : null,
+              h('button', {
+                type: 'button',
+                style: { ...S.btn, flexShrink: 0 },
+                disabled: creating,
+                title: t('personaCreateHint'),
+                onClick: () => {
+                  setCreateMsg('')
+                  setCreateDraft(emptyDraft())
+                  setCreating(true)
+                },
+              }, t('personaCreate')),
             ),
+
+            // ── 阶段 14：自建人设表单 ──────────────────────────────────
+            // 收字段而不是收 Markdown：用户写错一个 <!-- lite:skip --> 就会让整段被吞，
+            // 七段顺序乱了提示词结构也会散。拼装由服务端做。
+            !creating || createDraft === null
+              ? null
+              : h('div', {
+                  style: {
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                    gap: 8,
+                    padding: '10px',
+                    marginBottom: 8,
+                    borderRadius: 8,
+                    border: '1px solid var(--dsw-alias-border-l1)',
+                  },
+                },
+                ...[
+                  ['personaFieldId', 'id', false, 'demo（小写字母数字）'],
+                  ['personaFieldName', 'name', false, '显示名'],
+                  ['personaFieldSelfRef', 'selfRef', false, '自称'],
+                  ['personaFieldAddress', 'address', false, '对用户的称呼'],
+                ].map(([labelKey, key, , placeholder]) =>
+                  h('label', { key, style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 } },
+                    h('span', { style: S.muted }, t(labelKey)),
+                    h('input', {
+                      value: createDraft[key],
+                      placeholder,
+                      onChange: (event) => setCreateDraft({ ...createDraft, [key]: event.target.value }),
+                      style: {
+                        padding: '4px 6px',
+                        borderRadius: 6,
+                        border: '1px solid var(--dsw-alias-border-l1)',
+                        background: 'var(--dsw-alias-bg-l1)',
+                        color: 'var(--dsw-alias-label-primary)',
+                        fontSize: 12,
+                      },
+                    }))),
+                ...['intro', 'core', 'coreDetail', 'voice', 'toneLight', 'toneSerious', 'toneSolemn', 'assistant', 'scenes', 'anti'].map((key) =>
+                  h('label', {
+                    key,
+                    style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, gridColumn: '1 / -1' },
+                  },
+                    h('span', { style: S.muted }, t(`personaField_${key}`)),
+                    h('textarea', {
+                      value: createDraft[key],
+                      rows: key === 'voice' || key === 'scenes' ? 4 : 2,
+                      onChange: (event) => setCreateDraft({ ...createDraft, [key]: event.target.value }),
+                      style: {
+                        padding: '4px 6px',
+                        borderRadius: 6,
+                        border: '1px solid var(--dsw-alias-border-l1)',
+                        background: 'var(--dsw-alias-bg-l1)',
+                        color: 'var(--dsw-alias-label-primary)',
+                        fontSize: 12,
+                        fontFamily: 'inherit',
+                        resize: 'vertical',
+                      },
+                    }))),
+                h('div', { style: { gridColumn: '1 / -1', display: 'flex', gap: 8, alignItems: 'center' } },
+                  h('button', {
+                    type: 'button',
+                    style: S.btn,
+                    disabled: createBusy,
+                    onClick: submitCreate,
+                  }, createBusy ? '…' : t('personaCreateSave')),
+                  h('button', {
+                    type: 'button',
+                    style: S.btn,
+                    disabled: createBusy,
+                    onClick: () => { setCreating(false); setCreateDraft(null); setCreateMsg('') },
+                  }, t('personaCancel')),
+                  h('span', { style: { ...S.muted, fontSize: 11.5 } }, t('personaCreateHint'))),
+              ),
+
+            createMsg === ''
+              ? null
+              : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: createMsg }),
             h('div', { style: { ...S.muted, fontSize: 11.5, marginBottom: 8 } },
               activePreset
                 ? `${t('personaPresetNow')}${activePreset.label}`
@@ -4750,12 +5077,17 @@ window.__ModuleLoader__.load({
               presets.stickerDir === '' ? '' : ` · ${t('personaStickersNow')}${presets.stickerDir}`),
             switchMsg === ''
               ? null
-              : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: switchMsg }))
+              : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: switchMsg }),
+            tierMsg === ''
+              ? null
+              : h('div', { style: { ...S.muted, marginBottom: 6, fontSize: 12 }, children: tierMsg }))
         : null
 
       const kernelCard = card(
         t('personaKernel'),
-        seed.trim() === '' ? t('personaKernelHint') : `${data.seedLength || seed.length} 字 · ${seedLines} 行 · ${data.enabled === false ? '已关闭' : '已启用'}`,
+        seed.trim() === ''
+          ? t('personaKernelHint')
+          : `${data.renderedLength ?? data.seedLength ?? seed.length} 字 · ${seedLines} 行 · ${presets.tier === 'full' ? t('personaTierFullShort') : t('personaTierLiteShort')} · ${data.enabled === false ? '已关闭' : '已启用'}`,
         h('div', null,
           presetRow,
           saveMsg === ''
@@ -4771,6 +5103,51 @@ window.__ModuleLoader__.load({
                 onClick: () => { setDraft(seed); setSaveMsg(''); setEditing(true) },
               }, t('personaEdit')),
         },
+      )
+
+      // ── 工程纪律（独立于人格，任何档位都注入）───────────────────────────
+      const disciplineCard = card(
+        t('personaDiscipline'),
+        discEnabledValue ? t('personaDisciplineHint') : t('personaDisciplineOffHint'),
+        h('div', null,
+          h('label', {
+            style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12.5, cursor: 'pointer', marginBottom: 8 },
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: discEnabledValue,
+              disabled: discBusy,
+              onChange: (event) => setDiscEnabledDraft(event.target.checked),
+            }),
+            t('personaDisciplineEnabled')),
+          h('div', { style: { ...S.muted, fontSize: 11.5, marginBottom: 8, lineHeight: 1.7 } },
+            t('personaDisciplineBuiltin')),
+          h('textarea', {
+            value: discExtraValue,
+            rows: 3,
+            placeholder: t('personaDisciplinePlaceholder'),
+            onChange: (event) => setDiscDraft(event.target.value),
+            style: {
+              width: '100%',
+              boxSizing: 'border-box',
+              padding: 8,
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-border-l1)',
+              background: 'var(--dsw-alias-bg-l2)',
+              color: 'var(--dsw-alias-label-primary)',
+              fontSize: 12,
+              lineHeight: 1.6,
+              fontFamily: 'inherit',
+              resize: 'vertical',
+            },
+          }),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            h('button', { type: 'button', style: S.btn, disabled: discBusy, onClick: saveDiscipline },
+              discBusy ? '…' : t('personaDisciplineSave')),
+            h('span', { style: { ...S.muted, fontSize: 11.5 }, children: `${discExtraValue.length} 字` }),
+            discMsg === ''
+              ? null
+              : h('span', { style: { ...S.muted, fontSize: 11.5 }, children: discMsg }))),
       )
 
       // ── 学到的倾向（常驻，条数封顶 + 内部滚动）─────────────────────────
@@ -5030,6 +5407,7 @@ window.__ModuleLoader__.load({
       return h('div', null,
         persona.error ? h('div', { style: S.err, children: persona.error }) : null,
         kernelCard,
+        disciplineCard,
         learnedCard,
         stickersCard,
         diaryCard,

@@ -186,7 +186,7 @@ fi
 
 echo
 echo "完成：v${VERSION} 已就位（$PLUGIN_DEST，插件与面板同一个包）"
-echo "人格：内置在插件里（persona/seed.md），装完直接生效，不需要写配置"
+echo "人格：内置在插件里（persona/presets/xilian.md），装完直接生效，不需要写配置"
 echo "      要换成自己的，就在 profile 的 cordis.patch.yml 里配 persona.seed —— 配置优先，升级不会覆盖"
 echo "生效：重启 dsh-web（本机：kill -TERM \$(systemctl show dsh-web -p MainPID --value)；容器：docker restart <容器名>）"
 echo "核对：插件日志 'ready: v${VERSION}'、面板自检 '自检通过 v${VERSION}'、面板页脚「版本 ${VERSION}」"

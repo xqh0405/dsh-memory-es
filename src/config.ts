@@ -17,6 +17,7 @@ import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIDENCE } from './memory/search.ts'
 import type { WriteMode } from './memory/save.ts'
 import { DEFAULT_RANKING } from './fragment.ts'
+import type { PersonaTier } from './prompt.ts'
 
 export interface ConfigType {
   es: {
@@ -175,6 +176,14 @@ export interface ConfigType {
     enabled: boolean
     /** 基础人格文本；空串 = 不注入 */
     seed: string
+    /** 阶段 14：档位。lite 纯享版（≤500 字）/ full 细腻版（≤2500 字），都是上限 */
+    tier: PersonaTier
+    /** 阶段 14：工程纪律段。独立于人设，任何档位都注入 */
+    discipline: {
+      enabled: boolean
+      /** 部署者补充，只能追加 */
+      extra: string
+    }
   }
   /** 阶段 9.6：每日自动提炼用户画像（等价于每天替你跑一次 memory_traits dry_run=false） */
   traits: {
@@ -295,16 +304,31 @@ export interface ConfigType {
 }
 
 /**
- * 内置人格：包根的 `persona/seed.md`（随发行包一起装）。
+ * 默认人格取自的预设名。
+ *
+ * 2026-11-20 改：原来有个 `persona/seed.md` 当"发布用实例"，但它与预设是两份副本，
+ * 靠人记得跑 `--also-default` 同步——README 里早就记过这个坑。双档改造后副本还会翻倍，
+ * 所以干脆取消：**默认人格直接就是这份预设**，改它就同时改了默认，没有第二处要同步。
+ */
+const DEFAULT_PERSONA_PRESET = 'xilian'
+
+/**
+ * 内置人格：包内 `persona/presets/<DEFAULT_PERSONA_PRESET>.md`（随发行包一起装）。
+ *
+ * 读出来的是**完整预设原文**（含 frontmatter 与 `<!-- lite:skip -->` 标记），
+ * 由 `buildPersonaSection` 按 `persona.tier` 解析——这里不做任何裁剪。
  *
  * 为什么做成默认值而不是「安装时写进配置」：
  *  · 配置优先于默认值 → 用户改过的人格不会被升级覆盖（这正是「更新不要覆盖已有」）；
- *  · 内置人格能随版本更新（改 seed.md 就更新），而写进配置后就永远停在装的那一刻；
+ *  · 内置人格能随版本更新（改预设就更新），而写进配置后就永远停在装的那一刻；
  *  · 读不到（例如有人只拷了 lib/）就当空串，不注入，也不阻断启动。
  */
 function defaultPersonaSeed(): string {
   try {
-    return readFileSync(new URL('../persona/seed.md', import.meta.url), 'utf8').trim()
+    return readFileSync(
+      new URL(`../persona/presets/${DEFAULT_PERSONA_PRESET}.md`, import.meta.url),
+      'utf8',
+    ).trim()
   } catch {
     return ''
   }
@@ -590,7 +614,17 @@ export const Config: z<ConfigType> = z.object({
     enabled: z.boolean().default(true)
       .description('是否注入人格段。关掉等于这个插件不提供人格（行为与未安装此插件一致）。'),
     seed: z.string().default(defaultPersonaSeed())
-      .description('基础人格（部署者写）：我是谁、什么口吻、守什么边界。默认取包内 persona/seed.md；写成空串 = 不注入。'),
+      .description('基础人格（部署者写）：我是谁、什么口吻、守什么边界。默认取包内 persona/presets/xilian.md（完整预设，按 tier 解析）；写成空串 = 不注入。'),
+    tier: z.union([z.const('lite'), z.const('full')]).default('lite')
+      .description('人设档位：lite = 纯享版（上限 500 字），full = 细腻版（上限 2500 字）。两档都是**上限不是指标**，'
+        + '写多写少随你；档位只决定 `<!-- lite:skip -->` 包住的那部分要不要进提示词。'),
+    discipline: z.object({
+      enabled: z.boolean().default(true)
+        .description('是否注入工程纪律段（不编造 / 报错原样贴 / 技术内容不改写 / 一句话切普通语气）。'
+          + '默认开；关掉后这些约束只能靠人设自己写，**不建议**。'),
+      extra: z.string().default('')
+        .description('追加到纪律段末尾的部署者补充。只能追加，不能删掉内置条目——纪律与人设的区别就在这里。'),
+    }).default({}),
   }),
   // 阶段 9.6：每日自动提炼。产物是 pending 候选，仍要人工审核才生效
   traits: z.object({

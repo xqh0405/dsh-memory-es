@@ -1,8 +1,11 @@
 /**
- * 内置人格（persona/seed.md）的三条契约。
+ * 内置人格（persona/presets/xilian.md）的三条契约。
+ *
+ * 2026-11-20 改：取消 `persona/seed.md` 这份「发布用副本」，默认人格直接取预设，
+ * 单一源、没有第二处要同步。
  *
  * 为什么值得钉住：
- *  · 默认值读包内文件 → 安装即有人格，且改 seed.md 就能随版本更新；
+ *  · 默认值读包内文件 → 安装即有人格，且改预设就能随版本更新；
  *  · 配置优先 → 用户自己写的人格不会被升级覆盖（这是「更新不要覆盖已有」的实现方式）；
  *  · 显式空串仍然等于「不注入」——老口径不能被默认值悄悄改掉。
  */
@@ -13,9 +16,9 @@ import { readFileSync } from 'node:fs'
 
 import { Config } from '../src/config.ts'
 
-const seedFile = readFileSync(new URL('../persona/seed.md', import.meta.url), 'utf8').trim()
+const seedFile = readFileSync(new URL('../persona/presets/xilian.md', import.meta.url), 'utf8').trim()
 
-test('persona.seed 默认取包内 persona/seed.md', () => {
+test('persona.seed 默认取包内 persona/presets/xilian.md', () => {
   // `as never` 与 apply.test.ts 同款：Config 的入参类型要求把带默认值的字段也写全，
 // 而运行时由 schema 补默认值。这里只关心 persona.seed 的取值来源。
   const parsed = Config({ identity: { userId: 'u1' } } as never)

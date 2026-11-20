@@ -30,7 +30,7 @@ import {
 } from './journal.ts'
 import { minutesOfDay, zonedParts } from './timezone.ts'
 import { definePersonaTool, loadActivePersona, type PersonaDeps } from './memory/persona.ts'
-import { buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SECTION_NAME, CITATION_SECTION_ORDER, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
+import { buildDisciplineSection, buildPersonaSection, buildStickersSection, CITATION_PROMPT, CITATION_SECTION_NAME, CITATION_SECTION_ORDER, MEMORY_PROMPT_SECTION, MOOD_SECTION_NAME, MOOD_SECTION_ORDER, parseStickerPack, PERSONA_DISCIPLINE_SECTION_NAME, PERSONA_DISCIPLINE_SECTION_ORDER, PERSONA_SECTION_NAME, PERSONA_SECTION_ORDER, STICKERS_SECTION_NAME, STICKERS_SECTION_ORDER, type StickerPack } from './prompt.ts'
 import { applyMoodEvent, NEUTRAL_MOOD, renderMoodLine, type MoodEventKind, type MoodState } from './mood.ts'
 import { classifyUserMessage, extractUserText, MoodEventThrottle } from './mood-events.ts'
 import { createRecallObserver, createShadowWriter, resolveShadowPath } from './recall-shadow.ts'
@@ -654,12 +654,49 @@ export function apply(ctx: Context, config: ConfigType): void {
     return () => clearInterval(timer)
   }, 'dsh-memory-es.persona-refresh')
 
+  /**
+   * 阶段 14：工程纪律段（order 3198，排在人格段 3199 之前）。
+   *
+   * 与人设分开的理由：这些约束是所有角色共有的安全底线，不是人设偏好。
+   * 混在人设里时，用户自建人设只要不写就丢了；拆出来才能保证「换角色不换纪律」。
+   * `persona.enabled=false` 时一并消失——那时这个插件本来就不提供人格。
+   */
+  if (config.persona.enabled && !config.persona.discipline.enabled) {
+    logger.warn('persona: 纪律段被关闭；不编造 / 报错原样贴 / 技术内容不改写 将只依赖人设自述（不建议）')
+  }
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: PERSONA_DISCIPLINE_SECTION_NAME,
+        order: PERSONA_DISCIPLINE_SECTION_ORDER,
+        text: () =>
+          config.persona.enabled
+            ? buildDisciplineSection(config.persona.discipline.enabled, config.persona.discipline.extra)
+            : '',
+      }),
+    'dsh-memory-es.discipline',
+  )
+
+  // 人设解析告警去重：标记不成对是配置问题，不该每轮刷一条日志
+  const personaTierWarnings = new Set<string>()
+
   ctx.effect(
     () =>
       ctx.systemPrompt.section({
         name: PERSONA_SECTION_NAME,
         order: PERSONA_SECTION_ORDER,
-        text: () => buildPersonaSection(config.persona.seed, config.persona.enabled, personaCache.entries),
+        text: () =>
+          buildPersonaSection(
+            config.persona.seed,
+            config.persona.enabled,
+            personaCache.entries,
+            config.persona.tier,
+            (message) => {
+              if (personaTierWarnings.has(message)) return
+              personaTierWarnings.add(message)
+              logger.warn('persona: %s', message)
+            },
+          ),
       }),
     'dsh-memory-es.persona',
   )
@@ -1025,7 +1062,7 @@ export function apply(ctx: Context, config: ConfigType): void {
        */
       const assembleSeq = new Map<string, number>()
       /**
-       * 阶段 38：同一 query 的注入结果复用（会话级）。
+       * 阶段 38：同一 query 的注入结果复用（按 agent 隔离，见下方 cacheKey）。
        *
        * 为什么需要：一个 turn 有多个 step，每步都重新组装 prompt；实测单条 query
        * 一轮最多 28 次 assemble。此前只在 assemble 层缓存了 text，且 key 用原始 query、
@@ -1111,7 +1148,9 @@ export function apply(ctx: Context, config: ConfigType): void {
 
       const recall = async (query: string, agentId: string, seq: number): Promise<string> => {
         const startedAt = Date.now()
-        const cacheKey = normalizeContent(query)
+        // key 带上 agentId：这份缓存是**进程级**的（一个插件实例一份），不加 agent
+        // 会让同一容器里并发的两个会话互相复用对方的注入文本（2026-11-20 巡检发现）。
+        const cacheKey = `${agentId}\u0000${normalizeContent(query)}`
         // get 内部会刷 LRU 并丢弃过期项；ttlMs<=0 时直接返回 undefined（缓存关闭）
         const cachedResult = injectResultCache.get(cacheKey)
         // 预热命中与否：只看缓存里有没有这条向量（与 search 内部用的是同一个 key）。
