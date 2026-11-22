@@ -111,9 +111,11 @@ window.__ModuleLoader__.load({
       graphZoomHint: '滚轮缩放 · 拖动平移',
       graphReset: '复位',
       graphSkin: '风格',
+      graphTools: '显示 / 隐藏工具条',
       graphSkinGalaxy: '银河',
       graphSkinInfinity: '浮黎涟',
       graphSkinNeural: '大肥鱼',
+      graphSkinDove: '小鸽子',
       graphSkinDefault: '设为默认',
       graphSkinDefaultHint: '下次打开星图默认用这一版（只记在这台浏览器里）',
       graphSkinIsDefault: '已设为默认',
@@ -536,9 +538,11 @@ window.__ModuleLoader__.load({
       graphZoomHint: 'wheel to zoom · drag to pan',
       graphReset: 'Reset',
       graphSkin: 'Style',
+      graphTools: 'Show / hide toolbar',
       graphSkinGalaxy: 'Galaxy',
       graphSkinInfinity: 'Fulilian',
       graphSkinNeural: 'Dafeiyu',
+      graphSkinDove: 'Dove',
       graphSkinDefault: 'Set default',
       graphSkinDefaultHint: 'Use this style when the graph opens next time (stored in this browser only)',
       graphSkinIsDefault: 'Default set',
@@ -971,22 +975,33 @@ window.__ModuleLoader__.load({
       topbarMeta: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'nowrap' },
       workspaceScroll: { scrollbarGutter: 'stable', flex: 1, minHeight: 0, overflow: 'auto' },
       // 铺满：主区现在是"外面的空间"，960 居中会显得像设置页。
-      // 与 mnemon 一致——全宽、左右 20~32px，宽屏靠 maxWidth 兜住阅读行长。
+      // 2026-11-22 用户定案：一级页签贴左、右侧内容铺满整块，所以这里
+      // 去掉 maxWidth 与居中，并且把高度撑满——内容区（尤其星图画布）靠 flex:1 吃满剩余空间。
       workspaceContent: {
-        maxWidth: 1280, margin: '0 auto',
-        padding: '18px clamp(20px, 2.5vw, 32px) 48px',
+        maxWidth: 'none', margin: 0,
+        padding: '10px clamp(8px, 1.2vw, 16px) 12px',
+        height: '100%', minHeight: 0, boxSizing: 'border-box',
+        display: 'flex', flexDirection: 'column',
       },
-      tabs: { display: 'flex', gap: 4, borderBottom: '1px solid var(--dsw-alias-border-l1)', marginBottom: 14 },
+      // 一级页签：左侧竖排（2026-11-22 用户定案），内容区因此能铺满右边整块
+      tabs: {
+        display: 'flex', flexDirection: 'column', gap: 2,
+        width: 96, flex: 'none',
+        borderRight: '1px solid var(--dsw-alias-border-l1)',
+        paddingRight: 8, marginBottom: 0,
+      },
       tab: (active) => ({
         appearance: 'none',
         border: 'none',
-        borderBottom: active ? '2px solid var(--dsw-alias-brand-primary)' : '2px solid transparent',
-        background: 'transparent',
+        borderLeft: active ? '2px solid var(--dsw-alias-brand-primary)' : '2px solid transparent',
+        background: active ? 'rgba(120,160,255,.12)' : 'transparent',
         color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
         fontSize: 13,
         fontWeight: active ? 600 : 400,
-        padding: '8px 12px',
+        padding: '7px 10px',
         cursor: 'pointer',
+        textAlign: 'left',
+        borderRadius: 6,
       }),
       card: {
         border: '1px solid var(--dsw-alias-border-l1)',
@@ -2090,6 +2105,180 @@ window.__ModuleLoader__.load({
       return { positions, radius: haloR + 150, flow, spin }
     }
 
+    // ── 小鸽子版布局（2026-11-21）────────────────────────────────────────────
+
+    const DOVE_TAU = Math.PI * 2
+    /** 每圈的基础速度倍率：内圈快、外圈慢，转起来才有差速 */
+    const DOVE_SPEED = [1.35, 1.12, 0.94, 0.78]
+
+    /**
+     * 椭圆轨道上参数 t 处的点与法向。
+     *
+     * t 是**参数角**不是极角：x = a·cos t, y = b·sin t，再旋转 phi。
+     * 返回的 c/s 是法向（切线转 90°）——星点的"分散"要沿法向推，
+     * 顺着轨迹方向推只会滑成一条线。
+     */
+    function doveTrackPoint(k, t) {
+      const o = DOVE_ELLIPSES[k]
+      const ct = Math.cos(t)
+      const st = Math.sin(t)
+      const x0 = o.a * ct
+      const y0 = o.b * st
+      // 切线方向 → 法向
+      const dx = -o.a * st * o.cos - o.b * ct * o.sin
+      const dy = -o.a * st * o.sin + o.b * ct * o.cos
+      const len = Math.hypot(dx, dy) || 1
+      return {
+        x: o.cx + x0 * o.cos - y0 * o.sin,
+        y: o.cy + x0 * o.sin + y0 * o.cos,
+        // 法向（c/s）：星点的"散开"往这里推
+        c: -dy / len,
+        s: dx / len,
+        // 切向（tx/ty）：沿轨道方向再抖一下，星点才不会排成一条线
+        tx: dx / len,
+        ty: dy / len,
+      }
+    }
+
+    /**
+     * 遮挡程度：0 可以画 / 1 贴着人物边缘（半透明）/ 2 在人物里（不画）。
+     *
+     * 布局阶段已经避开了人物，但**星点是在转的**——静态角度避开不等于转起来也避开，
+     * 实测 t=80s 时有一串星点正从头发上飘过。所以每帧要再挡一次：
+     * 直接消失太硬，边缘那一格给半透明，星点绕到人物后面就是"淡出 → 淡入"。
+     */
+    function doveOcclusion(x, y) {
+      if (!(x >= 0 && y >= 0 && x < DOVE_DESIGN.w && y < DOVE_DESIGN.h)) return 2
+      const gx = Math.floor((x / DOVE_DESIGN.w) * DOVE_PERSON_W)
+      const gy = Math.floor((y / DOVE_DESIGN.h) * DOVE_PERSON_H)
+      const row = DOVE_PERSON[gy]
+      if (row === undefined) return 2
+      if (row.charAt(gx) === '1') return 2
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const near = DOVE_PERSON[gy + dy]
+        if (near === undefined) continue
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (near.charAt(dx + gx) === '1') return 1
+        }
+      }
+      return 0
+    }
+
+    /** 是否落在画布内（布局只关心这个：出界的星点永远看不到） */
+    function doveInCanvas(x, y) {
+      return x >= 0 && y >= 0 && x < DOVE_DESIGN.w && y < DOVE_DESIGN.h
+    }
+
+    /** 这个设计坐标能不能落点：踩到人物遮罩或跑出画布都算不行 */
+    function doveBlocked(x, y) {
+      return doveOcclusion(x, y) !== 0
+    }
+
+    /** 椭圆周长（Ramanujan 近似）：分配节点时用它当"容量" */
+    function dovePerimeter(o) {
+      const h = Math.pow(o.a - o.b, 2) / Math.pow(o.a + o.b, 2)
+      return Math.PI * (o.a + o.b) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)))
+    }
+
+    /**
+     * 小鸽子布局：星点在椭圆星轨上**整圈随机分布**，各自公转。
+     *
+     * 关键一点（2026-11-22 修）：**不再把被遮挡的星点挪进可见弧**。
+     * 之前那样做，632 颗会全挤在 1/3 的弧段上，密度翻三倍（用户反馈"星点有点密集"）。
+     * 现在布局只看"是不是在画布内"，落在人物/球上的照常放——渲染时 doveOcclusion
+     * 会把它们挡掉，于是任一时刻可见的约是总量的 1/3，转动时像依次绕到人后面。
+     *
+     * 分布仍然随机：参数角随机、沿法向随机偏、每颗自己的转速再抖 ±15%。
+     */
+    function layoutDove(graph) {
+      const positions = new Map()
+      const orbit = new Map()
+      const nodes = graph.nodes
+      if (nodes.length === 0 || DOVE_ELLIPSES.length === 0) return { positions, radius: 0, orbit }
+
+      // 容量按椭圆周长：外圈长、容得多
+      const capacity = DOVE_ELLIPSES.map((o) => Math.max(1, dovePerimeter(o)))
+
+      const byDomain = new Map()
+      for (const node of nodes) {
+        if (!byDomain.has(node.domain)) byDomain.set(node.domain, [])
+        byDomain.get(node.domain).push(node)
+      }
+      const groups = [...byDomain.entries()]
+        .sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))
+        .map(([, members]) => members)
+
+      const load = DOVE_ELLIPSES.map(() => 0)
+      const buckets = DOVE_ELLIPSES.map(() => [])
+      for (const group of groups) {
+        let best = 0
+        let bestScore = -Infinity
+        for (let k = 0; k < buckets.length; k += 1) {
+          const score = capacity[k] / (load[k] + group.length) - load[k] * 0.35
+          if (score > bestScore) {
+            bestScore = score
+            best = k
+          }
+        }
+        buckets[best].push(group)
+        load[best] += group.length
+      }
+
+      buckets.forEach((groupList, k) => {
+        const flat = groupList.flat()
+        if (flat.length === 0) return
+        const speedBase = DOVE_SPEED[k % DOVE_SPEED.length]
+        for (const node of flat) {
+          // 参数角随机铺满整圈；出界就换角度重试（出界的星点永远看不到，纯浪费）
+          const spread = 11 + hashUnit(node.id + '#dove-q') * 26
+          // 沿轨道的抖动：只有法向偏移时星点会排成一条线，必须再往前/后错开
+          const alongMax = 16 + hashUnit(node.id + '#dove-aq') * 34
+          let placedPoint = null
+          for (let attempt = 0; attempt < 20 && placedPoint === null; attempt += 1) {
+            const tt = hashUnit(node.id + (attempt === 0 ? '#dove-t' : '#dove-t' + attempt)) * DOVE_TAU
+            const pp = doveTrackPoint(k, tt)
+            let off = (hashUnit(node.id + '#dove-w') - 0.5) * 2 * spread
+            let along = (hashUnit(node.id + '#dove-along') - 0.5) * 2 * alongMax
+            // 偏出去可能直接出界：两个方向一起折半，还不行就贴线
+            let inside = false
+            for (let step = 0; step < 4; step += 1) {
+              if (doveInCanvas(pp.x + pp.c * off + pp.tx * along, pp.y + pp.s * off + pp.ty * along)) {
+                inside = true
+                break
+              }
+              off *= 0.5
+              along *= 0.5
+            }
+            if (inside) {
+              placedPoint = { t: tt, point: pp, offset: off, along }
+            }
+          }
+          if (placedPoint === null) continue
+          const point = placedPoint.point
+          const offset = placedPoint.offset
+          const along = placedPoint.along
+          const t = placedPoint.t
+          positions.set(node.id, {
+            x: point.x + point.c * offset + point.tx * along,
+            y: point.y + point.s * offset + point.ty * along,
+            z: 0,
+          })
+          orbit.set(node.id, {
+            k,
+            theta: t,
+            offset,
+            along,
+            speed: speedBase * (0.85 + hashUnit(node.id + '#dove-v') * 0.3),
+            phase: hashUnit(node.id + '#dove-p') * DOVE_TAU,
+            rate: 0.55 + hashUnit(node.id + '#dove-r') * 0.6,
+          })
+        }
+      })
+
+      const maxA = Math.max(...DOVE_ELLIPSES.map((o) => o.a))
+      return { positions, radius: maxA + 40, orbit }
+    }
+
     // ── 神经版布局（2026-11-18）────────────────────────────────────────────
 
     /**
@@ -2196,7 +2385,7 @@ window.__ModuleLoader__.load({
     // ── 星图皮肤（2026-11-18）──────────────────────────────────────────────
 
     /**
-     * 三套皮肤：银河（原有）/ 无限 / 神经。
+     * 四套皮肤：银河（原有）/ 无限 / 神经 / 小鸽子（2026-11-21）。
      *
      * 皮肤**只影响画法与布局**，不碰任何数据：取数、节点/边的裁剪、LOD、拾取、
      * 聚焦子图、.canvas 导出全部走同一套逻辑，换皮肤等于换一层"滤镜 + 摆法"。
@@ -2208,7 +2397,7 @@ window.__ModuleLoader__.load({
      *  · node      —— 节点画法参数（半径曲线 / 光晕倍数 / 描边）
      *  · backdrop  —— 背景（见 buildSkinBackdrop）
      */
-    const GRAPH_SKIN_IDS = ['galaxy', 'infinity', 'neural']
+    const GRAPH_SKIN_IDS = ['galaxy', 'infinity', 'neural', 'dove']
 
     const SKIN_PALETTES = {
       // 原有那套亮色，一个字节都没动
@@ -2217,6 +2406,9 @@ window.__ModuleLoader__.load({
       infinity: ['#e9f1ff', '#a9c8ff', '#cdb9ff', '#9fe6ff', '#ffd9f2', '#b6ffe8', '#ffd0b0', '#dfe6ff'],
       // 神经：荧光团，粉 / 黄 / 蓝 / 紫，饱和度拉高
       neural: ['#ff9ecf', '#ffd479', '#8fd3ff', '#b79bff', '#7fe9d2', '#ffb3a0', '#d9b3ff', '#ffe9a8'],
+      // 小鸽子：背景是黑白立绘 + 她自己那条红线，星点只能做点睛——
+      // 冷白为主，少量淡紫淡金，颜色一浓就盖住人物了
+      dove: ['#eef4ff', '#c9b8ff', '#ffe6c9', '#a8d8ff', '#ffd9e2', '#d6fff0', '#dfe9ff', '#f3e8ff'],
     }
 
     /**
@@ -2233,6 +2425,9 @@ window.__ModuleLoader__.load({
       // 神经：荧光团但要有核——光晕从 9.5 收到 6，alpha 压到 0.62，
       // 硬核反而放大一点，这样一团里能看出每颗星，不至于糊成一片雾
       neural: { base: 1.1, pow: 0.7, mul: 0.68, glow: 4.6, glowHub: 6.4, glowHover: 9, glowAlpha: 0.58, blur: 0.3, stroke: false, flare: 2.0 },
+      // 小鸽子：星点要像"洒在丝带上的细沙"——小、锐、光晕很薄，
+      // 光晕一大就会在丝带旁边糊出一圈雾，反而看不清轨迹
+      dove: { base: 0.78, pow: 0.62, mul: 0.44, glow: 2.5, glowHub: 3.6, glowHover: 6.8, glowAlpha: 0.4, blur: 0.45, stroke: false, flare: 1.2 },
     }
 
     const SKIN_CAM = {
@@ -2244,6 +2439,9 @@ window.__ModuleLoader__.load({
       infinity: { yaw: 0, pitch: 0, dist: 700, focal: 1600 },
       // 神经：几乎正视，人物立绘要正对观众，云团只是浮在她前面
       neural: { yaw: -0.16, pitch: -0.4, dist: 1000, focal: 1600 },
+      // 小鸽子：平面映射——星点直接贴背景像素，相机完全不参与（写一组中性值占位，
+      // 拖拽/缩放也都在这套皮肤下禁用，见 onMouseDown / onWheel）
+      dove: { yaw: 0, pitch: 0, dist: 1000, focal: 1600 },
     }
 
     /**
@@ -2258,12 +2456,144 @@ window.__ModuleLoader__.load({
         '/plugins/dsh-memory-es/assets/skin/cyrene.png',
         `${API}/skin-asset?file=cyrene.png`,
       ],
+      // 加 ?v= 是为了绕开浏览器对同名 mp4 的强缓存（2026-11-22 换成 pingpong 无缝循环片，
+      // 文件名没变，不加这层用户会一直看到旧视频）
       video: [
-        '/plugins/dsh-memory-es/assets/skin/neural-bg.mp4',
-        `${API}/skin-asset?file=neural-bg.mp4`,
+        '/plugins/dsh-memory-es/assets/skin/neural-bg.mp4?v=pp1',
+        `${API}/skin-asset?file=neural-bg.mp4&v=pp1`,
+      ],
+      // 小鸽子的背景（2026-11-21）：原片是 HEVC，Chromium 系解不了，已转 H.264
+      doveVideo: [
+        '/plugins/dsh-memory-es/assets/skin/dove-bg.mp4?v=pp1',
+        `${API}/skin-asset?file=dove-bg.mp4&v=pp1`,
       ],
     }
-    const SKIN_ASSET = { image: null, video: null, imageOk: false, videoOk: false, imageError: '', videoError: '' }
+    /**
+     * 素材缓存（模块级：切页签会重挂组件，素材没必要重下）。
+     *
+     * 视频按皮肤分开存：神经一段 8 秒、小鸽子一段 4 秒，共用一个槽会让切皮肤
+     * 触发重新建 <video>、白闪一下，而且两段都只有几十 KB~几 MB，留着更划算。
+     */
+    const SKIN_ASSET = {
+      image: null, imageOk: false, imageError: '',
+      videos: { neural: null, dove: null },
+      videoOk: { neural: false, dove: false },
+      videoError: { neural: '', dove: '' },
+    }
+
+    /** 这套皮肤有没有背景视频；有就返回那个 <video> 元素（没建过是 null） */
+    function skinVideoOf(skin) {
+      return skin === 'dove' ? SKIN_ASSET.videos.dove : skin === 'neural' ? SKIN_ASSET.videos.neural : null
+    }
+
+    /**
+     * 背景视频的「最后一帧」缓存。
+     *
+     * `<video loop>` 回到开头的那一瞬 readyState 会短暂掉到 1，渲染层原来在
+     * readyState < 2 时铺纯深空，于是每轮循环都闪一下黑（用户 2026-11-22：
+     * "会出现 1 秒的背景空白"）。现在把能画的帧留一份，掉帧时拿它顶替。
+     */
+    const VIDEO_FRAME_CACHE = { canvas: null, ctx: null, valid: false, tick: 0 }
+
+    /** 把视频当前帧存进离屏画布（按视频原始尺寸存，画布 resize 不用重建） */
+    function cacheVideoFrame(video) {
+      if (video.videoWidth <= 0 || video.videoHeight <= 0) return
+      const cache = VIDEO_FRAME_CACHE
+      if (cache.canvas === null || cache.canvas.width !== video.videoWidth || cache.canvas.height !== video.videoHeight) {
+        cache.canvas = document.createElement('canvas')
+        cache.canvas.width = video.videoWidth
+        cache.canvas.height = video.videoHeight
+        cache.ctx = cache.canvas.getContext('2d')
+      }
+      if (cache.ctx === null) return
+      cache.ctx.drawImage(video, 0, 0, cache.canvas.width, cache.canvas.height)
+      cache.valid = true
+    }
+
+    /** 这套皮肤的背景视频状态：ok 表示已经有画面可画 */
+    function skinVideoOkOf(skin) {
+      return skin === 'dove' ? SKIN_ASSET.videoOk.dove : skin === 'neural' ? SKIN_ASSET.videoOk.neural : false
+    }
+
+    /**
+     * 小鸽子皮肤（2026-11-21）：背景是那张托着记忆球的立绘，星点沿画面里的椭圆星轨环绕。
+     *
+     * 早先的做法是「以球心为圆心做极坐标、从轨迹里学 r(θ)」——那只能表达同心圆，
+     * 而背景里的星轨是**倾斜的扁椭圆**，圆环怎么调都贴不上去（用户 2026-11-21 反馈）。
+     * 现在直接给椭圆参数：四条同心椭圆，中心 (455,470) 略低于球心，长轴向右下倾 6°，
+     * 扁率约 2:1。参数是拿画面里星轨的极值点量出来、再画回背景逐轮对齐的。
+     *
+     * DOVE_PERSON 是人物遮罩（54x36，每行 54 格，1 表示不许落点）。
+     * 星点是「避开」而不是「压暗」：候选位置落在遮罩里就沿轨道挪开。
+     */
+    const DOVE_CENTER = { x: 455, y: 395 }
+    const DOVE_DESIGN = { w: 1080, h: 720 }
+    /**
+     * 椭圆星轨：中心**就是记忆球心**，四条同心、长轴向右下倾 6°、扁率约 2:1。
+     * 星点在环附近随机散开、各自公转——球面本身也算遮挡（2026-11-21 用户定案：
+     * 球是椭圆中心，星点只在星环附近，不许压球）。
+     * phi 是倾角（度，y 轴向下为正）；cos/sin 预存，省得每帧算。
+     */
+    // 扁率 0.38（用户要更椭圆）；7 条、跨度 240~615，间隔故意不等。
+    // 条数必须够：扁椭圆在画面左侧只扫过两条窄带，条数少了左中会整片空白
+    // （2026-11-22 用户指出"前面这一块星点也是空的"就是这个问题）
+    const DOVE_ELLIPSES = [
+      { cx: 455, cy: 445, a: 280, b: 106, phi: 35 },
+      { cx: 455, cy: 445, a: 330, b: 125, phi: 35 },
+      { cx: 455, cy: 445, a: 385, b: 146, phi: 35 },
+      { cx: 455, cy: 445, a: 445, b: 169, phi: 35 },
+      { cx: 455, cy: 445, a: 510, b: 194, phi: 35 },
+      { cx: 455, cy: 445, a: 580, b: 220, phi: 35 },
+    ].map((o) => ({
+      ...o,
+      cos: Math.cos((o.phi * Math.PI) / 180),
+      sin: Math.sin((o.phi * Math.PI) / 180),
+    }))
+    const DOVE_PERSON = [
+      '000000000000000000000001111111111111111100000000011100',
+      '000000000000000000000001111111111111111110000111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000001111111111111111111111111111111',
+      '000000000000000000000011111111111111111111111111111111',
+      '000000000000000000000111111111111111111111111111111100',
+      '000000000000000000000111111111111111111111111111000000',
+      '000000000000000000111111111111111111111111111100000000',
+      '000000000000111111111111111111111111111111111000000000',
+      '000111111111111111111111111111111111111111111000000000',
+      '111111111111111111111111111111111111111111110000000000',
+      '111111111111111111111111111111111111111111110000000000',
+      '111111111111111111111111111111111111111111110000000000',
+      '111111111111111111111111111111111111111111110000000000',
+      '111111111111111111111111111111111111111111110000000000',
+      '001111111111111111111111111111111111111111110000000000',
+      '000001111111111111111111111111111111111111100000000000',
+      '000000011111111111111111111111111111111111100000000000',
+      '000000001111111111111111111111111111111111100000000000',
+      '000000000011111111111111111111111111111111100000000000',
+      '000000000000111111111111111111111111111111000000000000',
+      '000000000000011111111111111111111111111111000000000000',
+      '000000000000001111111111111111111111111110000000000000',
+      '000000000000000111111111111111111111111100000000000000',
+      '000000000000000011111111111111111111111100000000000000',
+      '000000000000000011111111111111111111111000000000000000',
+      '000000000000000011111111111111111111110000000000000000',
+      '000000000000000011111111111111111111100000000000000000',
+      '000000000000000001111111111111111111100000000000000000',
+      '000000000000000001111111111111111111000000000000000000',
+      '000000000000000001111111111111111110000000000000000000',
+    ]
+    /**
+     * 记忆球：球面**也算遮挡**（用户定案）。球是椭圆星轨的中心，星点只在星环附近，
+     * 不允许压在球上；所以内圈椭圆会被球切掉上下两段，星点自然只落在左右两侧的弧上。
+     */
+    const DOVE_ORB = { x: 455, y: 395, r: 118 }
+    const DOVE_PERSON_W = DOVE_PERSON[0].length
+    const DOVE_PERSON_H = DOVE_PERSON.length
 
     /** JSON Canvas 的六种颜色编号（1 红 / 2 橙 / 3 黄 / 4 绿 / 5 青 / 6 紫） */
     function canvasColor(domain, clusters) {
@@ -2585,25 +2915,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 背景视频：神经皮肤的地基。
+     * 背景视频：神经与小鸽子两套皮肤的地基。
      *
-     * 三重保险：muted（自动播放必须先静音）、loop（8 秒一段循环）、playsInline（移动端不接管全屏）。
+     * 三重保险：muted（自动播放必须先静音）、loop（循环播）、playsInline（移动端不接管全屏）。
      * 播放在渲染循环里按"可见 + 当前皮肤"统一控制，这里只管把元素建出来。
+     * 两段视频各放各的槽：neural 8 秒、dove 4 秒。
      */
-    function ensureSkinVideo() {
-      if (SKIN_ASSET.video !== null) return SKIN_ASSET.video
+    function ensureSkinVideo(skin) {
+      if (skin !== 'neural' && skin !== 'dove') return null
+      const cached = SKIN_ASSET.videos[skin]
+      if (cached !== null) return cached
+      const urls = skin === 'dove' ? SKIN_ASSET_URLS.doveVideo : SKIN_ASSET_URLS.video
       const video = document.createElement('video')
       video.muted = true
       video.loop = true
       video.playsInline = true
       video.preload = 'auto'
-      const urls = SKIN_ASSET_URLS.video
       let attempt = 0
       video.addEventListener('loadeddata', () => {
-        SKIN_ASSET.videoOk = true
-        SKIN_ASSET.videoError = ''
-        // 背景视频放慢：循环周期从 8 秒拉到约 21 秒，动起来更安静
-        video.playbackRate = 0.38
+        SKIN_ASSET.videoOk[skin] = true
+        SKIN_ASSET.videoError[skin] = ''
+        // 半速播放（2026-11-22 用户要求）。循环接缝的黑帧由「最后一帧缓存」兜住，
+        // 这里只负责让画面慢下来：dove 4 秒 → 8 秒一轮，neural 8 秒 → 16 秒一轮。
+        video.playbackRate = 0.5
       })
       video.addEventListener('error', () => {
         // 与立绘同样两条路：官方 assets 通道优先，自建路由兜底
@@ -2613,17 +2947,18 @@ window.__ModuleLoader__.load({
           video.load()
           return
         }
-        SKIN_ASSET.videoError = '背景视频加载失败'
-        console.warn('[memory-es] 背景视频加载失败，神经皮肤退回纯深空')
+        SKIN_ASSET.videoError[skin] = '背景视频加载失败'
+        console.warn(`[memory-es] 背景视频加载失败（${skin}），该皮肤退回纯深空`)
       })
       video.src = urls[0]
-      SKIN_ASSET.video = video
+      SKIN_ASSET.videos[skin] = video
       return video
     }
 
     /** 背景离屏画布：按皮肤出不同底子；神经皮肤的视频层另外每帧叠在上面 */
     function buildSkinBackdrop(skin, width, height, dpr) {
-      const assetKey = `${SKIN_ASSET.imageOk ? 1 : 0}${SKIN_ASSET.videoOk ? 1 : 0}`
+      // 缓存键要带皮肤：两套皮肤共用同一张离屏底图缓存，不区分会拿到别人的那一版
+      const assetKey = `${skin}|${SKIN_ASSET.imageOk ? 1 : 0}${skinVideoOkOf(skin) ? 1 : 0}`
       if (skin === 'galaxy') {
         return { ...buildGalaxyBackdrop(width, height, dpr), skin, assetKey }
       }
@@ -2675,6 +3010,23 @@ window.__ModuleLoader__.load({
         return { canvas, width, height, skin, assetKey }
       }
 
+      if (skin === 'dove') {
+        // 小鸽子：背景立绘本就很暗（大面积纯黑），压暗只需轻一点，
+        // 否则人物和丝带一起糊掉；重点收的是四周暗角
+        ctx.fillStyle = 'rgba(2,4,10,.24)'
+        ctx.fillRect(0, 0, width, height)
+        const shade = ctx.createRadialGradient(
+          width * 0.42, height * 0.56, 0,
+          width * 0.42, height * 0.56, Math.max(width, height) * 0.7,
+        )
+        shade.addColorStop(0, 'rgba(1,2,8,0)')
+        shade.addColorStop(0.6, 'rgba(1,2,8,.12)')
+        shade.addColorStop(1, 'rgba(1,2,8,.7)')
+        ctx.fillStyle = shade
+        ctx.fillRect(0, 0, width, height)
+        return { canvas, width, height, skin, assetKey }
+      }
+
       // 神经：底色几乎透明（视频在下面），只留压暗与边缘渐变——
       // 视频是每帧画的，这张画布只负责"把人压下去、把边收黑"
       // 整体先压一层，视频再淡一点，星点才压得住人物
@@ -2718,6 +3070,29 @@ window.__ModuleLoader__.load({
       return INFINITY_DUST
     }
 
+    /** 小鸽子的星尘：沿 4 条椭圆星轨撒，补的是轨道之间的颗粒感（不参与拾取，也不连任何记忆） */
+    const DOVE_DUST = []
+    const DOVE_TONES = ['rgba(234,241,255,1)', 'rgba(206,190,255,1)', 'rgba(255,232,206,1)', 'rgba(196,224,255,1)']
+    function doveDust(count) {
+      if (DOVE_DUST.length === count) return DOVE_DUST
+      DOVE_DUST.length = 0
+      for (let i = 0; i < count; i += 1) {
+        const k = Math.floor(hashUnit(`dov-d-k-${i}`) * DOVE_ELLIPSES.length) % DOVE_ELLIPSES.length
+        DOVE_DUST.push({
+          // 只存曲线参数与偏移：位置每帧按进度现算，星尘才会和节点一起沿轨道流
+          k,
+          theta: hashUnit(`dov-d-t-${i}`) * DOVE_TAU,
+          offset: (hashUnit(`dov-d-w-${i}`) - 0.5) * 2 * (4 + hashUnit(`dov-d-q-${i}`) * 26),
+          size: 0.45 + hashUnit(`dov-d-s-${i}`) * 1.05,
+          alpha: 0.04 + hashUnit(`dov-d-a-${i}`) * 0.2,
+          tone: DOVE_TONES[Math.floor(hashUnit(`dov-d-c-${i}`) * DOVE_TONES.length) % DOVE_TONES.length],
+          speed: DOVE_SPEED[k % DOVE_SPEED.length],
+          seed: hashUnit(`dov-d-i-${i}`),
+        })
+      }
+      return DOVE_DUST
+    }
+
     /**
      * 「默认星图」存 localStorage（2026-11-18 用户定案）。
      *
@@ -2753,6 +3128,9 @@ window.__ModuleLoader__.load({
       // 星图皮肤（2026-11-18）：URL 优先（分享链接/刷新还原），其次 localStorage 里的"默认"
       const [skin, setSkin] = React.useState(() => readUrlEnum('graphSkin', GRAPH_SKIN_IDS, readDefaultSkin()))
       const [hover, setHover] = React.useState(null)
+      // 星图的二级工具条默认收起（2026-11-22 用户要求：不要一排整块浮在画布上，
+      // 只留一个按钮，点开才展开）。收起时画布完全无遮挡。
+      const [toolsOpen, setToolsOpen] = React.useState(false)
       const [size, setSize] = React.useState({ width: 900, height: 560 })
       const [focusId, setFocusId] = React.useState(null)
       const [defaultHint, setDefaultHint] = React.useState(false)
@@ -2801,6 +3179,8 @@ window.__ModuleLoader__.load({
       const infinityFlowRef = React.useRef(0)
       // 神经皮肤的云团自转角，同样受"自转"开关控制（视频背景仍在播，但图案可以停）
       const neuralSpinRef = React.useRef(0)
+      // 小鸽子的轨道进度（弧度）：所有星点共用同一个进度，各圈再按自己的倍率推算角度
+      const doveFlowRef = React.useRef(0)
       // 云团沿两条星环公转的相位（比自转快一点，才看得出绕环走）
       const neuralOrbitRef = React.useRef(0)
       // 上一帧时间戳：按真实时间推进动画，不依赖帧率
@@ -2912,11 +3292,17 @@ window.__ModuleLoader__.load({
 
       const model = React.useMemo(() => {
         if (visibleData === null) return null
-        if (focusId === null) {
+        // 小鸽子是"星点贴背景"的平面皮肤：聚焦会换一套球壳布局，和背景完全错位，
+        // 所以这套皮肤下 focusId 一律当作没有（点击不聚焦，悬停照旧）
+        if (focusId === null || skin === 'dove') {
           // 无限版不进双盘：一条 8 字承载两个库（左瓣个人、右瓣团队），
           // 双盘会把图案推出画面，还会把流动状态丢掉
           if (skin === 'infinity') {
             return { graph: visibleData, layout: layoutInfinity(visibleData), focused: null }
+          }
+          // 小鸽子的星点贴在背景像素上，不走双盘：两张盘会把轨道推到一起
+          if (skin === 'dove') {
+            return { graph: visibleData, layout: layoutDove(visibleData), focused: null }
           }
           const layoutOf = skin === 'neural' ? layoutNeural : layoutGalaxy
           // 神经的云团边缘很散，双盘间距收窄才像一个整体（银河仍是 90）
@@ -2967,20 +3353,20 @@ window.__ModuleLoader__.load({
             (message) => setAssetNote(message),
           )
         }
-        if (skin === 'neural') {
-          const video = ensureSkinVideo()
+        if (skin === 'neural' || skin === 'dove') {
+          const video = ensureSkinVideo(skin)
           const wake = () => {
             setAssetNote('')
             backdropRef.current = null
             loopRef.current?.()
             drawRef.current()
           }
-          const note = () => setAssetNote(SKIN_ASSET.videoError || '背景视频加载失败')
+          const note = () => setAssetNote(SKIN_ASSET.videoError[skin] || '背景视频加载失败')
           video.addEventListener('loadeddata', wake)
           video.addEventListener('error', note)
           // 已经加载过的（切回来）不会再有事件，主动补一次
           if (video.readyState >= 2) wake()
-          if (SKIN_ASSET.videoError !== '') setAssetNote(SKIN_ASSET.videoError)
+          if (SKIN_ASSET.videoError[skin] !== '') setAssetNote(SKIN_ASSET.videoError[skin])
           return () => {
             video.removeEventListener('loadeddata', wake)
             video.removeEventListener('error', note)
@@ -3092,13 +3478,19 @@ window.__ModuleLoader__.load({
           ctx.fillRect(0, 0, width, height)
           ctx.globalAlpha = clamp01(introT / INTRO.black)
         }
-        // 神经皮肤：背景视频在最底层，压暗层（backdrop）叠在它上面
-        if (skin === 'neural') {
-          const video = SKIN_ASSET.video
-          if (SKIN_ASSET.videoOk && video !== null && video.readyState >= 2) {
+        // 神经 / 小鸽子：背景视频在最底层，压暗层（backdrop）叠在它上面
+        if (skin === 'neural' || skin === 'dove') {
+          const video = skinVideoOf(skin)
+          if (skinVideoOkOf(skin) && video !== null && video.readyState >= 2) {
             drawCover(ctx, video, video.videoWidth, video.videoHeight, width, height)
+            // 每 6 帧留一帧底：loop 回头的瞬间有的用它顶替
+            VIDEO_FRAME_CACHE.tick = (VIDEO_FRAME_CACHE.tick + 1) % 6
+            if (VIDEO_FRAME_CACHE.tick === 0) cacheVideoFrame(video)
+          } else if (VIDEO_FRAME_CACHE.valid && VIDEO_FRAME_CACHE.canvas !== null) {
+            // 循环间隙（readyState 掉到 1）：画上一帧，别铺深空
+            drawCover(ctx, VIDEO_FRAME_CACHE.canvas, VIDEO_FRAME_CACHE.canvas.width, VIDEO_FRAME_CACHE.canvas.height, width, height)
           } else {
-            // 视频没就绪：铺纯深空，别让上一帧的残影透出来
+            // 第一次还没拿到任何帧：铺纯深空
             ctx.fillStyle = '#02040c'
             ctx.fillRect(0, 0, width, height)
           }
@@ -3125,6 +3517,14 @@ window.__ModuleLoader__.load({
         // 聚焦模式仍然走 3D——那里的布局是球壳，平面化会把邻居压成一圈。
         const plane = skin === 'infinity' && focusId === null ? planeRef.current : null
         const project = (px, py, pz) => {
+          // 小鸽子：设计坐标 → 屏幕，缩放与 drawCover 完全一致（cover 铺满 + 居中）。
+          // 星点要贴背景像素，就不能走 3D：相机一转、一缩放，星点立刻脱离轨迹。
+          if (skin === 'dove') {
+            const scale = Math.max(width / DOVE_DESIGN.w, height / DOVE_DESIGN.h)
+            const offX = (width - DOVE_DESIGN.w * scale) / 2
+            const offY = (height - DOVE_DESIGN.h * scale) / 2
+            return { x: offX + px * scale, y: offY + py * scale, z: pz, k: scale }
+          }
           if (plane !== null) {
             // 星环走 3D 环绕（拖动 = yaw/pitch），但**不用透视**：
             // 有透视时两瓣的前后分层会让近的那瓣被放大、远的那瓣被缩小，
@@ -3171,6 +3571,12 @@ window.__ModuleLoader__.load({
             })
           } else if (skin === 'infinity') {
             coreSpots.push({ x: 0, y: 0, z: 0, scale: INFINITY_A * 0.62, phase: 0, color: '#dfeaff' })
+          } else if (skin === 'dove') {
+            // 记忆球本身就是画里的光源：只给它一层极淡的呼吸，别把人物盖过去
+            coreSpots.push({
+              x: DOVE_CENTER.x, y: DOVE_CENTER.y, z: 0,
+              scale: 118, phase: 0, color: '#dbe6ff',
+            })
           } else {
             coreSpots.push({ x: 0, z: 0, scale: GALAXY_R1, phase: 0 })
           }
@@ -3200,17 +3606,27 @@ window.__ModuleLoader__.load({
           ? null
           : skin === 'infinity'
             ? (dualDisks ? null : infinityDust(2600))
-            : galaxyDust(3800)
+            : skin === 'dove'
+              ? doveDust(1600)
+              : galaxyDust(3800)
         if (dust !== null) {
           ctx.globalCompositeOperation = 'lighter'
           // 无限的星尘与节点是同一支笔：都用 t0 + 进度求位置，才会一起沿 8 字流动。
           // 银河的星尘是固定底噪，不参与流动。
-          const flowProgress = skin === 'infinity' ? infinityFlowRef.current : 0
+          const flowProgress = skin === 'infinity'
+            ? infinityFlowRef.current
+            : skin === 'dove' ? doveFlowRef.current : 0
           for (const mote of dust) {
             let mx = mote.x
             let my = mote.y
             let mz = mote.z
-            if (skin === 'infinity') {
+            if (skin === 'dove') {
+              // 与小鸽子的节点同一支笔：角度 = 起始角 + 进度 × 该圈倍率
+              const dpoint = doveTrackPoint(mote.k, mote.theta + flowProgress * mote.speed)
+              mx = dpoint.x + dpoint.c * mote.offset
+              my = dpoint.y + dpoint.s * mote.offset
+              mz = 0
+            } else if (skin === 'infinity') {
               const mt = mote.t + flowProgress
               const point = infinityPoint(mt)
               const normal = infinityNormal(mt)
@@ -3241,6 +3657,10 @@ window.__ModuleLoader__.load({
         const flow = model.layout.flow ?? null
         const flowProgress = infinityFlowRef.current
         const spinMap = model.layout.spin ?? null
+        // 小鸽子：轨道表 + 共享进度；呼吸用真实时间，关掉自转也照常明灭
+        const doveOrbit = model.layout.orbit ?? null
+        const doveProgress = doveFlowRef.current
+        const doveTime = performance.now() * 0.001
         const neuralSpin = neuralSpinRef.current
         const neuralOrbit = neuralOrbitRef.current
         const spinTrig = new Map()
@@ -3253,7 +3673,21 @@ window.__ModuleLoader__.load({
           let wz = world.z
           // 曲线上的节点：位置完全由曲线参数决定，不再看 positions 里的静态坐标
           const onCurve = flow === null ? undefined : flow.get(node.id)
-          if (onCurve !== undefined) {
+          // 小鸽子：角度 = 起始角 + 共享进度 × 该圈倍率；半径由轨道表插值给出，
+          // 所以星点一边绕球心转，一边跟着背景丝带起伏
+          const doveEntry = doveOrbit === null ? undefined : doveOrbit.get(node.id)
+          let doveFade = 1
+          if (doveEntry !== undefined) {
+            const dpoint = doveTrackPoint(doveEntry.k, doveEntry.theta + doveProgress * doveEntry.speed)
+            const along = doveEntry.along ?? 0
+            wx = dpoint.x + dpoint.c * doveEntry.offset + dpoint.tx * along
+            wy = dpoint.y + dpoint.s * doveEntry.offset + dpoint.ty * along
+            wz = 0
+            // 转到人物身上就别画了；贴边的那一格半透明，看起来是"绕到人后面去"
+            const occ = doveOcclusion(wx, wy)
+            if (occ === 2) continue
+            if (occ === 1) doveFade = 0.22
+          } else if (onCurve !== undefined) {
             const t = onCurve.t + flowProgress
             const point = infinityPoint(t)
             const normal = infinityNormal(t)
@@ -3302,6 +3736,11 @@ window.__ModuleLoader__.load({
             screen: projected,
             color: colorMap.get(node.id) ?? '#6b8cff',
             seed: hashUnit(node.id + '#intro'), // 开场逐个点亮的稳定延迟
+            // 淡入淡出：每颗星自己的相位与周期（4~11 秒），整屏不会同步闪
+            // 其它皮肤没有这套节奏，恒为 1，等于不介入
+            breath: doveEntry === undefined
+              ? 1
+              : (0.2 + 0.6 * (0.5 + 0.5 * Math.sin(doveTime * doveEntry.rate + doveEntry.phase))) * doveFade,
           })
         }
         // 远的先画，近的盖上去。
@@ -3366,6 +3805,27 @@ window.__ModuleLoader__.load({
               ctx.closePath()
               ctx.stroke()
             }
+          }
+        } else if (skin === 'dove') {
+          // 轨迹本身已经在背景里了，这里只补一圈几乎看不见的轨道提示——
+          // 星点在转的时候，有这条淡线才读得出"多圈"
+          const dovePalette = [
+            'rgba(200,220,255,1)', 'rgba(220,205,255,1)', 'rgba(255,236,214,1)',
+            'rgba(196,232,255,1)', 'rgba(255,214,228,1)',
+          ]
+          for (let k = 0; k < DOVE_ELLIPSES.length; k += 1) {
+            ctx.globalAlpha = 0.055
+            ctx.strokeStyle = dovePalette[k % dovePalette.length]
+            ctx.lineWidth = Math.max(0.7, 0.9 * unit)
+            ctx.beginPath()
+            for (let i = 0; i <= 180; i += 1) {
+              const point = doveTrackPoint(k, (i / 180) * DOVE_TAU)
+              const projected = project(point.x, point.y, 0)
+              if (i === 0) ctx.moveTo(projected.x, projected.y)
+              else ctx.lineTo(projected.x, projected.y)
+            }
+            ctx.closePath()
+            ctx.stroke()
           }
         } else if (skin === 'neural') {
           // 两条交叉的神经纤维环：一个水平、一个绕 X 轴倾斜约 60°，
@@ -3527,7 +3987,7 @@ window.__ModuleLoader__.load({
             const dot = Math.max(0.6, radius * 0.9)
             ctx.globalAlpha = Math.min(1, (0.2 + fresh * 0.34) * (0.7 + depth * 0.3)
               * (1 - blur * 0.45)) * alphaScale
-              * (dimTeam && node.scope === 'team' ? 0.3 : 1) * litOf(item.seed)
+              * (dimTeam && node.scope === 'team' ? 0.3 : 1) * litOf(item.seed) * item.breath
             ctx.fillStyle = item.color
             ctx.fillRect(screen.x - dot / 2, screen.y - dot / 2, dot, dot)
             continue
@@ -3549,7 +4009,7 @@ window.__ModuleLoader__.load({
           const alpha = Math.min(1,
             (0.42 + fresh * 0.58) * (0.6 + depth * 0.5) * twinkle * (isHover ? 1.35 : 1)
               * (1 + flare * 0.9),
-          ) * (dimNode ? 0.3 : 1) * litOf(item.seed)
+          ) * (dimNode ? 0.3 : 1) * litOf(item.seed) * item.breath
             // 亮星也要随总量略压（保底 0.55），否则 5000 点时一片白；
             // alphaScale === 1 表示没超阈值，此处完全不介入
             * (alphaScale === 1 ? 1 : Math.max(0.55, alphaScale))
@@ -3609,7 +4069,7 @@ window.__ModuleLoader__.load({
         // 无限 / 神经两版的边在背景里已经压过一轮，这里只补一层淡的，
         // 免得人物立绘被压成一块黑。
         ctx.globalCompositeOperation = 'source-over'
-        ctx.globalAlpha = skin === 'galaxy' ? 1 : 0.45
+        ctx.globalAlpha = skin === 'galaxy' ? 1 : skin === 'dove' ? 0.3 : 0.45
         let vignette = vignetteRef.current
         if (vignette === null || vignette.width !== width || vignette.height !== height) {
           vignette = buildVignette(width, height, dpr)
@@ -3682,13 +4142,14 @@ window.__ModuleLoader__.load({
           // 不可见就停下、不再调度；重新可见时由 IntersectionObserver 把循环拉起来
           if (!visibleRef.current) {
             // 后台不播视频：解码白烧电
-            if (SKIN_ASSET.video !== null && !SKIN_ASSET.video.paused) SKIN_ASSET.video.pause()
+            const idleVideo = skinVideoOf(skin)
+            if (idleVideo !== null && !idleVideo.paused) idleVideo.pause()
             return
           }
           // 背景视频跟着「当前皮肤」走：神经版才播，切走立刻暂停
-          const video = SKIN_ASSET.video
+          const video = skinVideoOf(skin)
           if (video !== null) {
-            if (skin === 'neural') {
+            if (skin === 'neural' || skin === 'dove') {
               if (video.paused) video.play().catch(() => {})
             } else if (!video.paused) {
               video.pause()
@@ -3702,6 +4163,7 @@ window.__ModuleLoader__.load({
           lastFrameRef.current = nowMs
           if (orbitRef.current && dragRef.current === null) {
             if (skin === 'infinity') infinityFlowRef.current += 0.32 * dt
+            else if (skin === 'dove') doveFlowRef.current += 0.062 * dt
             else if (skin === 'neural') {
               neuralSpinRef.current += 0.15 * dt
               neuralOrbitRef.current += 0.11 * dt
@@ -3710,7 +4172,7 @@ window.__ModuleLoader__.load({
           }
           drawRef.current()
           // 开场动画也要持续跑帧：自转关掉时它照样得把推镜和点亮画完
-          const videoLive = skin === 'neural' && SKIN_ASSET.videoOk
+          const videoLive = (skin === 'neural' || skin === 'dove') && skinVideoOkOf(skin)
           if (orbitRef.current || introRef.current.active || videoLive) {
             rafRef.current = window.requestAnimationFrame(tick)
           }
@@ -3718,7 +4180,7 @@ window.__ModuleLoader__.load({
         loopRef.current = () => {
           if (rafRef.current === null && visibleRef.current) rafRef.current = window.requestAnimationFrame(tick)
         }
-        if (orbit || skin === 'neural' || skin === 'infinity') {
+        if (orbit || skin === 'neural' || skin === 'infinity' || skin === 'dove') {
           loopRef.current()
         } else {
           drawRef.current()
@@ -3880,8 +4342,48 @@ window.__ModuleLoader__.load({
       const hoverNode = hover === null ? null : graph.nodes.find((node) => node.id === hover) ?? null
       const inFocus = model.focused !== null
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100dvh - 180px)', minHeight: 420 } },
-        h('div', { style: S.toolbar },
+      // 星图铺满右列，二级工具条浮在画布左上角（2026-11-22 用户定案：
+      // 一级页签在左、二级工具条浮在内容上，画布才能吃到整块剩余空间）。
+      const overlayRow = {
+        pointerEvents: 'auto',
+        background: 'rgba(8,13,24,.72)',
+        backdropFilter: 'blur(8px)',
+        border: '1px solid rgba(120,160,255,.14)',
+        borderRadius: 10,
+        padding: '6px 10px',
+        marginBottom: 0,
+      }
+      const toolsButton = {
+        pointerEvents: 'auto',
+        width: 30, height: 30, borderRadius: 8,
+        border: '1px solid rgba(120,160,255,.2)',
+        background: 'rgba(8,13,24,.72)', backdropFilter: 'blur(8px)',
+        color: '#c9d6f2', fontSize: 15, lineHeight: 1, cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      }
+      return h('div', { style: { position: 'relative', flex: 1, minHeight: 0 } },
+        h('div', {
+          style: {
+            position: 'absolute', top: 10, left: 10, zIndex: 6,
+            display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start',
+            maxWidth: 'calc(100% - 20px)',
+            // 浮层本身不吃鼠标：只有里面的控件吃，其余交给画布
+            pointerEvents: 'none',
+          },
+        },
+        h('button', {
+          type: 'button',
+          title: t('graphTools'),
+          style: { ...toolsButton, color: toolsOpen ? '#8fc3ff' : '#c9d6f2' },
+          onClick: () => setToolsOpen((open) => !open),
+        }, toolsOpen ? '×' : '☰'),
+        toolsOpen ? h('div', {
+          style: {
+            pointerEvents: 'auto', display: 'flex', flexDirection: 'column', gap: 6,
+            maxWidth: '100%', overflowX: 'auto',
+          },
+        },
+        h('div', { style: { ...S.toolbar, ...overlayRow } },
           inFocus
             ? h('span', { style: { ...S.muted, fontSize: 12 } },
                 `${t('graphFocus')}：${String(focusNode?.label ?? '').slice(0, 22)} · ` +
@@ -3944,11 +4446,11 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: S.btn, onClick: resetCamera }, t('graphReset')),
         ),
         // 双透镜控制条：来源=调暗、类型=隐藏；有过滤器生效时给一个圆点提示
-        h('div', { style: { ...S.toolbar, gap: 6, flexWrap: 'wrap', borderTop: 'none', paddingTop: 0 } },
+        h('div', { style: { ...S.toolbar, ...overlayRow, gap: 6, flexWrap: 'wrap' } },
           // 星图风格（2026-11-18）：纯观感，切它不动任何数据与接口
           h('span', { style: { ...S.muted, fontSize: 12 } }, t('graphSkin')),
           h('div', { style: S.seg },
-            [['galaxy', t('graphSkinGalaxy')], ['infinity', t('graphSkinInfinity')], ['neural', t('graphSkinNeural')]].map(([value, label]) =>
+            [['galaxy', t('graphSkinGalaxy')], ['infinity', t('graphSkinInfinity')], ['neural', t('graphSkinNeural')], ['dove', t('graphSkinDove')]].map(([value, label]) =>
               h('button', {
                 key: value,
                 type: 'button',
@@ -4009,12 +4511,18 @@ window.__ModuleLoader__.load({
             ? null
             : h('span', { style: { fontSize: 12, color: '#ff9b9b' }, title: assetNote }, assetNote),
         ),
+        ) : null,
+        ),
         h('div', {
           ref: wrapRef,
           style: {
-            ...S.card, padding: 0, overflow: 'hidden', position: 'relative',
-            width: '100%', flex: 1, minHeight: 0,
-            cursor: hover === null ? 'grab' : 'pointer',
+            ...S.card, padding: 0, overflow: 'hidden',
+            // 画布绝对铺满：工具条浮在它上面
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            width: 'auto', minHeight: 0, borderRadius: 12,
+            cursor: skin === 'dove'
+              ? (hover === null ? 'default' : 'pointer')
+              : (hover === null ? 'grab' : 'pointer'),
             background: '#03050b',
           },
           onMouseMove: (event) => {
@@ -4027,6 +4535,9 @@ window.__ModuleLoader__.load({
             if (event.button !== 0) return
             event.preventDefault()
             skipIntro()
+            // 小鸽子的星点是"贴在这张画上的"：一拖就和背景轨迹分家，所以这版不给拖。
+            // 悬停/点击仍然要工作，只把"创建拖拽"这一步掐掉。
+            if (skin === 'dove') return
             dragRef.current = {
               startX: event.clientX, startY: event.clientY,
               lastX: event.clientX, lastY: event.clientY,
@@ -4045,7 +4556,8 @@ window.__ModuleLoader__.load({
               if (inFocus) setFocusId(null)
               return
             }
-            setFocusId(hit.id)
+            // 小鸽子不进聚焦：球壳布局会和背景完全错位，点了只当作悬停
+            if (skin !== 'dove') setFocusId(hit.id)
           },
           onMouseLeave: () => {
             setHover(null)
@@ -4053,6 +4565,8 @@ window.__ModuleLoader__.load({
           onWheel: (event) => {
             event.preventDefault()
             skipIntro()
+            // 同上：缩放同样会让星点脱离轨迹
+            if (skin === 'dove') return
             if (skin === 'infinity' && focusId === null) {
               // 正交投影没有相机距离，缩放直接乘在星环比例上
               const plane = planeRef.current
@@ -6675,7 +7189,7 @@ window.__ModuleLoader__.load({
         firstLoad.current = false
       }, [tab, loadOverview])
 
-      return h('div', { style: S.wrapMain },
+      return h('div', { style: { ...S.wrapMain, flex: 1, minHeight: 0, display: 'flex', gap: 12, alignItems: 'stretch' } },
         h('div', { style: S.tabs, [TABS_ATTR]: '' },
           [
             ['overview', t('tabOverview')],
@@ -6700,6 +7214,8 @@ window.__ModuleLoader__.load({
             }, label),
           ),
         ),
+        // 右列：二级工具条在页内顶部，内容区吃掉剩余高度
+        h('div', { style: { flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
         tab === 'maint'
           ? h(Maintenance, { t, canReview: caps.canReview, caps })
           : tab === 'config'
@@ -6727,6 +7243,7 @@ window.__ModuleLoader__.load({
               onOpenBrowse: () => setTab('browse'),
             })
           : h(Browse, { t, caps }),
+        ),
       )
     }
 
@@ -6756,9 +7273,22 @@ window.__ModuleLoader__.load({
     const WORKSPACE_CSS = [
       `[${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
       `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
-      // 页签在主区滚动时粘顶：底色必须与画布同色，否则内容会从下面透上来。
-      `[${WORKSPACE_ATTR}] [${TABS_ATTR}] { position: sticky; top: 0; z-index: 2; background-color: var(--dsw-static-neutral-bluish-00, #fff); }`,
-      `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] [${TABS_ATTR}] { background-color: var(--dsw-static-neutral-bluish-950, #151517); }`,
+      // 页签改成左侧竖排后不再需要"粘顶：底色与画布同色"那一层——
+      // 它原本是防横向滚动时内容从页签条下面透上来。
+      `[${WORKSPACE_ATTR}] [${TABS_ATTR}] { z-index: 2; background-color: transparent; }`,
+      // 原生控件的配色方案（2026-11-20 用户实测：暗色主题下「人格」页预设下拉展开后
+      // 深底深字，几乎看不清）。原因：插件给 select 只写了内联 background/color，
+      // 而 Chrome 的 option 弹层是 UA 自己画的，不继承这套配色；主题又没声明
+      // color-scheme，弹层便按系统浅色方案取 `canvastext`（黑字），底色却用了
+      // select 的深色 —— 于是黑字压在深底上。
+      // 两件事一起做：整块主区声明 color-scheme 让 UA 弹层/滚动条/日期控件跟随明暗，
+      // 再给 option 显式指定底色与文字色兜底（某些平台会忽略 color-scheme 对弹层的影响）。
+      `[${WORKSPACE_ATTR}] { color-scheme: light; }`,
+      `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] { color-scheme: dark; }`,
+      `[${WORKSPACE_ATTR}] select option { background-color: var(--dsw-static-neutral-bluish-00, #fff); color: var(--dsw-static-neutral-bluish-950, #151517); }`,
+      `body[data-ds-dark-theme] [${WORKSPACE_ATTR}] select option { background-color: var(--dsw-static-neutral-bluish-850, #2c2c2e); color: var(--dsw-static-neutral-bluish-55, #f5f7fa); }`,
+      // 选中项：Chrome 的弹层高亮是系统淡蓝，压在深底上对比很弱，换成品牌色
+      `[${WORKSPACE_ATTR}] select option:checked { background-color: var(--dsw-alias-brand-primary); color: #fff; }`,
       // 有新版本的红点：一圈向外扩散的脉冲，安静但看得出来
       '@keyframes memoryEsUpdatePulse { 0% { box-shadow: 0 0 0 0 rgba(255,86,86,.55); } 70% { box-shadow: 0 0 0 6px rgba(255,86,86,0); } 100% { box-shadow: 0 0 0 0 rgba(255,86,86,0); } }',
     ].join('\n')
