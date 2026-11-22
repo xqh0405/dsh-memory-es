@@ -1,6 +1,6 @@
 # dsh-memory-es
 
-**当前版本：0.7.5** · **DSH 版本：≥ 0.1.0**（`engines.dsh`；当前在 **0.2.2-rc.1** 上运行）
+**当前版本：0.7.6** · **DSH 版本：≥ 0.1.0**（`engines.dsh`；当前在 **0.2.2-rc.1** 上运行）
 
 DSH（DeepSeek Harness）的记忆插件：用 Elasticsearch 做存储与检索，给 AI 助手一套跨会话、可检索、可治理的双层记忆——**个人记忆库**负责「我记得你」，**团队知识库**负责「我们踩过的坑」，两者可以互相晋升、彼此隔离。
 
@@ -127,7 +127,7 @@ profile 的 `cordis.patch.yml`（`es.caCertPath` 可以留空，会自动找到�
 
 ## 版本
 
-当前 **0.7.5**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
+当前 **0.7.6**。版本号是 `X.Y.Z` 纯数字，唯一来源是 `package.json`：
 
 ```bash
 scripts/version.sh              # 看当前版本
